@@ -13,8 +13,10 @@ jobs:
     strategy:
       matrix:
         # Każdy item generuje 2 ZIPy (self-contained + framework-dependent).
-        # win-x86 wymagany dla 32-bitowego Subiekta GT (in-proc COM = bit-level musi pasować).
-        rid: [win-x64, win-x86]
+        # Subiekt GT jest wyłącznie 32-bit (cała linia produktów InsERT "GT").
+        # In-proc COM wymaga że bit-level Bridge pasuje do Subiekta - dlatego tylko x86.
+        # (Subiekt Nexo to osobny produkt, x64, ale nie targetujemy go.)
+        rid: [win-x86]
     outputs:
       version: ${{ steps.ver.outputs.version }}
 
@@ -152,28 +154,21 @@ jobs:
           name: SubiektBridge ${{ steps.ver.outputs.version }}
           generate_release_notes: true
           body: |
-            ## Wybór binarki
-
-            **Najpierw sprawdź architekturę swojego Subiekta GT:**
-            ```powershell
-            Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*","HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" |
-              Where DisplayName -Match "Subiekt|InsERT" | Select DisplayName, InstallLocation
-            ```
-            - `Program Files (x86)` → Subiekt **32-bit** → bierz **win-x86**
-            - `Program Files\` → Subiekt **64-bit** → bierz **win-x64**
-
-            > Bridge to in-process COM klient — bit-level **MUSI** pasować, inaczej dostaniesz `0x8000FFFF Katastrofalny błąd`.
-
             ## Pliki do pobrania
 
-            | Plik | Architektura | Rozmiar | Wymagania |
-            |---|---|---|---|
-            | `SubiektBridge-${{ steps.ver.outputs.version }}-win-x64.zip` | x64 | ~50 MB | Nic — runtime wbudowany |
-            | `SubiektBridge-${{ steps.ver.outputs.version }}-win-x64-fxdep.zip` | x64 | ~2 MB | ASP.NET Core Runtime 10 (x64) |
-            | `SubiektBridge-${{ steps.ver.outputs.version }}-win-x86.zip` | **x86** | ~50 MB | Nic — runtime wbudowany |
-            | `SubiektBridge-${{ steps.ver.outputs.version }}-win-x86-fxdep.zip` | **x86** | ~2 MB | ASP.NET Core Runtime 10 (x86) |
+            Subiekt GT jest wyłącznie 32-bit (cała linia "GT" InsERT). Bridge to in-process COM
+            klient — bit-level musi pasować, dlatego tylko **win-x86**. Działa na 32- i 64-bitowym
+            Windowsie (na 64-bit przez WOW64).
 
-            ASP.NET Core Runtime 10 dla Windows: https://dotnet.microsoft.com/download/dotnet/10.0
+            | Plik | Rozmiar | Wymagania |
+            |---|---|---|
+            | `SubiektBridge-${{ steps.ver.outputs.version }}-win-x86.zip` | ~45 MB | **Nic** — runtime wbudowany (self-contained) |
+            | `SubiektBridge-${{ steps.ver.outputs.version }}-win-x86-fxdep.zip` | ~2 MB | **ASP.NET Core Runtime 10 (x86)** zainstalowany |
+
+            Niepewny? Bierz self-contained.
+
+            ASP.NET Core Runtime 10 (x86) dla Windows: https://dotnet.microsoft.com/download/dotnet/10.0
+            (przy pobieraniu wybierz "x86" — nie "x64").
           files: |
             dist/SubiektBridge-*.zip
             dist/SubiektBridge-*.zip.sha256
