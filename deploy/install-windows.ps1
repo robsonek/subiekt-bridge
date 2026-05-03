@@ -23,19 +23,38 @@
     Nazwa Windows Service. Domyślnie "SubiektBridge".
 
 .PARAMETER LaravelHostIp
-    IP serwera marketplace-manage (Linux). Wymagane dla reguły firewalla.
-    Wstaw "0.0.0.0/0" tylko do testów - na produkcji zawsze konkretny adres.
+    OPCJONALNE. IP/IPs serwera(ów) marketplace-manage uprawnionych do połączenia.
+    Jeśli podasz - skrypt utworzy regułę Windows Firewall z whitelistą.
+    Jeśli pominiesz - skrypt NIE TWORZY reguły firewall (zarządzasz sam, np. router/perimeter firewall).
+
+    Akceptuje:
+    - pojedynczy adres:    "1.2.3.4"
+    - wiele adresów:       "1.2.3.4","5.6.7.8"
+    - zakres CIDR:         "10.0.0.0/24"
+    - mieszane:            "1.2.3.4","10.0.0.0/24","2001:db8::/32"
+    - "Any" (specjalna wartość) - dla CAŁEGO internetu (TYLKO testy!)
+
+.PARAMETER Port
+    Port HTTPS (default 8443). Bridge listen.
 
 .EXAMPLE
+    # Bez firewalla - sam zarządzasz regułą poza skryptem.
+    .\install-windows.ps1
+
+.EXAMPLE
+    # Whitelist jednego IP.
     .\install-windows.ps1 -LaravelHostIp 1.2.3.4
+
+.EXAMPLE
+    # Whitelist kilku adresów / CIDR / IPv6.
+    .\install-windows.ps1 -LaravelHostIp 1.2.3.4,10.0.0.0/24
 #>
 
 param(
-    [string] $InstallDir   = "C:\SubiektBridge",
-    [string] $ServiceName  = "SubiektBridge",
-    [Parameter(Mandatory=$true)]
-    [string] $LaravelHostIp,
-    [int]    $Port         = 8443
+    [string]   $InstallDir    = "C:\SubiektBridge",
+    [string]   $ServiceName   = "SubiektBridge",
+    [string[]] $LaravelHostIp,   # OPCJONALNE - patrz .PARAMETER LaravelHostIp
+    [int]      $Port          = 8443
 )
 
 $ErrorActionPreference = "Stop"
@@ -124,20 +143,39 @@ Set-ItemProperty -Path $envKey -Name "Environment" -Type MultiString -Value @(
 )
 Write-Host "OK: ASPNETCORE_ENVIRONMENT=Production ustawione w rejestrze serwisu" -ForegroundColor Green
 
-# ---------------------- Firewall ----------------------
-Write-Section "Windows Firewall (port $Port -> $LaravelHostIp)"
+# ---------------------- Firewall (opcjonalny) ----------------------
+Write-Section "Windows Firewall"
 
 $ruleName = "SubiektBridge-HTTPS-In"
-Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 
-if ($LaravelHostIp -eq "0.0.0.0/0") {
+if (-not $LaravelHostIp -or $LaravelHostIp.Count -eq 0) {
+    # Bez parametru - skrypt nie zarządza regułą. Użytkownik konfiguruje sam
+    # (np. zewnętrzny perimeter firewall albo ręcznie).
+    Write-Host "Pominięto konfigurację Windows Firewall (brak -LaravelHostIp)." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Pamiętaj samodzielnie zezwolić na ruch TCP/$Port z konkretnych IP. Przykład:" -ForegroundColor Yellow
+    Write-Host "  New-NetFirewallRule -DisplayName '$ruleName' \`" -ForegroundColor Gray
+    Write-Host "    -Direction Inbound -Protocol TCP -LocalPort $Port \`" -ForegroundColor Gray
+    Write-Host "    -RemoteAddress 1.2.3.4,5.6.7.8 -Action Allow" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Albo skonfiguruj reguły na zewnętrznym firewallu/routerze." -ForegroundColor Yellow
+}
+elseif ($LaravelHostIp.Count -eq 1 -and $LaravelHostIp[0] -ieq "Any") {
+    # Specjalna wartość "Any" - otwiera dla całego internetu (testy!).
+    Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     Write-Host "OSTRZEŻENIE: otwierasz port $Port dla CAŁEGO internetu - tylko do testów!" -ForegroundColor Red
-    New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow | Out-Null
-} else {
+    New-NetFirewallRule -DisplayName $ruleName -Direction Inbound `
+        -Protocol TCP -LocalPort $Port -Action Allow | Out-Null
+    Write-Host "OK: reguła $ruleName ($Port/tcp z Any)" -ForegroundColor Green
+}
+else {
+    # Whitelist konkretnych IP / CIDR. New-NetFirewallRule -RemoteAddress przyjmuje string[].
+    Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Protocol TCP -LocalPort $Port `
         -RemoteAddress $LaravelHostIp -Action Allow | Out-Null
+    $ipsDisplay = $LaravelHostIp -join ", "
+    Write-Host "OK: reguła $ruleName ($Port/tcp z $ipsDisplay)" -ForegroundColor Green
 }
-Test-Or-Die $true "reguła firewall: $ruleName ($Port/tcp z $LaravelHostIp)"
 
 # ---------------------- Start ----------------------
 Write-Section "Start serwisu"

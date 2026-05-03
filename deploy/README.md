@@ -71,10 +71,29 @@ PowerShell **jako Administrator**:
 
 ```powershell
 cd C:\SubiektBridge\
+
+# Bez Windows Firewall (zarządzasz blokadą sam - router/perimeter firewall):
+.\install-windows.ps1
+
+# Jeden adres IP (skrypt utworzy regułę whitelist):
 .\install-windows.ps1 -LaravelHostIp 1.2.3.4
-#                     ^^^^^^^^^^^^^^^^^^^^^^^^
-#                     IP serwera Linux z marketplace-manage
+
+# Kilka IP (np. prod + staging Laravela):
+.\install-windows.ps1 -LaravelHostIp 1.2.3.4,5.6.7.8
+
+# Cały podsieć CIDR:
+.\install-windows.ps1 -LaravelHostIp 10.0.0.0/24
+
+# Mieszane (IPv4 + CIDR + IPv6):
+.\install-windows.ps1 -LaravelHostIp 1.2.3.4,10.0.0.0/24,2001:db8::/32
+
+# TYLKO testy - otwarcie dla całego internetu (z ostrzeżeniem):
+.\install-windows.ps1 -LaravelHostIp Any
 ```
+
+> **Bez `-LaravelHostIp`** skrypt nie tyka Windows Firewalla — wyświetla tylko
+> przykładową komendę. Załatw sobie blokadę sam (np. zewnętrzny firewall, router,
+> ręczna `New-NetFirewallRule`).
 
 Skrypt zrobi:
 1. Sanity check: czy plik `.exe` istnieje, czy NSSM jest w PATH, czy `New-Object -ComObject "InsERT.GT"` działa.

@@ -1,146 +1,87 @@
-# SubiektBridge
+# Subiekt Bridge
 
-[![Build](https://github.com/robsonek/subiekt-bridge/actions/workflows/build.yml/badge.svg)](https://github.com/robsonek/subiekt-bridge/actions/workflows/build.yml)
-[![Release](https://img.shields.io/github/v/release/robsonek/subiekt-bridge)](https://github.com/robsonek/subiekt-bridge/releases/latest)
-
-Most HTTP→COM/Sfera dla integracji **Subiekt GT** z aplikacjami Linux/macOS (np. Laravelowy
-[marketplace-manage](https://github.com/robsonek/marketplace-manage)). Wystawia faktury sprzedaży
-i korygujące przez oficjalne API Sfery, działa jako Windows Service obok Subiekta.
+Most HTTP→COM/Sfera dla integracji Subiekt GT z marketplace-manage (Laravel).
 
 ## Architektura
 
 ```
-Twoja aplikacja  ── HTTPS + X-Bridge-Token ──►  SubiektBridge.Api
-(Linux/macOS)         JSON REST                  (Windows .NET 10)
-                                                       │
-                                                       ▼ COM/OLE Automation
-                                              Subiekt GT + Sfera + MSSQL
+marketplace-manage (Linux/Laravel)
+        ↓ HTTPS + X-Bridge-Token
+SubiektBridge.Api (Windows .NET 8)
+        ↓ COM (InsERT.GT) - tylko na Windowsie
+Subiekt GT + Sfera + MSSQL
 ```
 
-REST API (5 endpointów + escape hatch):
+Cały kontekst architektoniczny + kontrakt API: zobacz `~/.claude/plans/tak-radiant-puddle.md`
+w głównym repo marketplace-manage.
 
-| Endpoint | Funkcja |
-|---|---|
-| `POST /api/v1/invoices` | Wystaw FV sprzedaży (z `Idempotency-Key`) |
-| `POST /api/v1/invoices/{id}/corrections` | Wystaw FV korygującą (KFS) |
-| `GET /api/v1/products?ean=...` | Sprawdź czy towar istnieje w Subiekcie |
-| `GET /api/v1/contractors?nip=...` | Sprawdź czy kontrahent istnieje |
-| `GET /api/v1/health` | Diagnostyka (publiczny, bez tokena) |
-| `POST /api/v1/sfera/raw` | Escape hatch z whitelistą metod |
+## Build
 
-Pełen kontrakt: zobacz `src/SubiektBridge.Api/Models/InvoiceModels.cs`.
+### Lokalnie na macOS/Linux (dev z FakeSfera)
 
-## Wymagania
+```bash
+cd src/SubiektBridge.Api
+dotnet run
+# Otwiera HTTPS na https://localhost:8443
+# Sfera jest mockowana (FakeSferaSession), brak COM-u
+```
 
-- Subiekt GT (zgodny z bit-level binarki — domyślnie x64) z wykupioną **Sferą**
-- Windows 10/11/Server 2019+
-- **Brak zewnętrznych narzędzi** — rejestracja jako Windows Service przez wbudowane `sc.exe`
-- **.NET Runtime** — opcjonalny (zobacz "Wybór wariantu" niżej)
+### Build pod Windows (deploy)
 
-## Wybór wariantu
+```bash
+cd src/SubiektBridge.Api
+dotnet publish -c Release -r win-x64 --self-contained true \
+    -p:PublishSingleFile=false \
+    -o ../../publish/win-x64
+```
 
-Każdy release ma dwa pliki ZIP:
+Output: folder `publish/win-x64/` z `SubiektBridge.Api.exe` + DLL.
+Self-contained = nie wymaga zainstalowanego .NET na Windowsie klienta.
 
-| Wariant | Rozmiar (ZIP / rozpakowane) | Wymagania na Windowsie |
-|---|---|---|
-| **`SubiektBridge-X.Y.Z-win-x64.zip`** (self-contained) | ~50 MB / ~108 MB | Nic — runtime wbudowany w binarki |
-| **`SubiektBridge-X.Y.Z-win-x64-fxdep.zip`** (framework-dependent) | ~2 MB / ~3 MB | [ASP.NET Core Runtime 10](https://dotnet.microsoft.com/download/dotnet/10.0) |
-
-**Niepewny? Bierz self-contained** — kosztuje 50 MB na dysku, ale eliminuje całą klasę problemów ("brakuje runtime", "zła wersja .NET", konflikt z innymi appkami na hoście).
-
-**Masz już zainstalowane .NET 10 SDK lub ASP.NET Core Runtime?** Bierz fxdep — szybsze pobieranie, mniejszy update na każdą nową wersję (~2 MB zamiast 50 MB).
-
-## Szybki start (produkcja)
-
-1. **Pobierz** najnowszy ZIP z [Releases](https://github.com/robsonek/subiekt-bridge/releases/latest)
-   (zobacz "Wybór wariantu" wyżej).
-2. **Rozpakuj** do `C:\SubiektBridge\`
-3. **Skopiuj** `appsettings.Production.json.template` jako `appsettings.Production.json` i wypełnij
-   (token, login operatora Subiekta, ścieżki MSSQL).
-4. **Zainstaluj** jako Windows Service (PowerShell jako Admin):
-   ```powershell
-   cd C:\SubiektBridge\
-   .\install-windows.ps1 -LaravelHostIp 1.2.3.4
-   ```
-5. **Test**:
-   ```bash
-   curl -k https://WIN-HOST:8443/api/v1/health
-   # {"status":"ok","subiekt_version":"1.78.0",...}
-   ```
-
-Pełny playbook: [`deploy/README.md`](./deploy/README.md).
-
-## Update na produkcji
-
-Pobierz nowy ZIP z Releases, rozpakuj do tymczasowego folderu, w PowerShell jako Admin:
+### Deploy na Windowsie klienta (raz)
 
 ```powershell
-cd C:\SubiektBridge\new\
-.\update-windows.ps1
+# 1. Skopiuj folder publish/win-x64/ na hosta z Subiektem (np. C:\SubiektBridge\)
+# 2. Przygotuj appsettings.Production.json (token, ścieżki bazy, login operatora)
+# 3. Zainstaluj jako Windows Service przez NSSM
+nssm install SubiektBridge "C:\SubiektBridge\SubiektBridge.Api.exe"
+nssm set SubiektBridge AppDirectory "C:\SubiektBridge"
+nssm set SubiektBridge Start SERVICE_AUTO_START
+nssm start SubiektBridge
+
+# 4. Logi: C:\SubiektBridge\logs\ (Serilog rolling)
 ```
 
-Skrypt: stop service → kopiuje nowe pliki (zachowując `appsettings.Production.json` i `data/`) → start → health check.
+### Update binarek (kolejne deploye)
 
-## Dev (build lokalny)
-
-Wymaga .NET SDK 10+:
-
-```bash
-git clone https://github.com/robsonek/subiekt-bridge.git
-cd subiekt-bridge
-
-# Build i run lokalnie z mock Sfera (działa na macOS/Linux/Windows):
-dotnet run --project src/SubiektBridge.Api
-# https://localhost:8443/api/v1/health
-# Włączane przez Bridge:UseFakeSfera=true w appsettings.Development.json
-
-# Build pod Windows (self-contained):
-./scripts/publish-win.sh
-# Output: publish/win-x64/SubiektBridge.Api.exe (~108 MB)
+```powershell
+nssm stop SubiektBridge
+# rsync/copy nowego folderu publish/win-x64/* do C:\SubiektBridge\
+nssm start SubiektBridge
 ```
-
-## Wydanie nowej wersji
-
-```bash
-git tag v1.0.1
-git push origin v1.0.1
-```
-
-GitHub Actions auto-buduje `SubiektBridge-1.0.1-win-x64.zip` + SHA256 i publikuje w GitHub Release.
 
 ## Konfiguracja
 
-Wszystkie klucze w `appsettings.Production.json`:
+`appsettings.json` + `appsettings.{Environment}.json` (override).
 
-| Klucz | Opis |
-|---|---|
-| `Bridge.Token` | Statyczny API key (X-Bridge-Token). Wygeneruj losowo, NIE commituj |
-| `Bridge.UseFakeSfera` | `true` — mock dla dev. `false` na produkcji |
-| `Bridge.AllowedRawSferaMethods` | Whitelist dla `/sfera/raw`. Domyślnie pusta |
-| `Bridge.IdempotencyStorePath` | Ścieżka SQLite cache idempotency-keys |
-| `Subiekt.Server` | MSSQL instance (np. `.\SQLEXPRESS` dla lokalnej) |
-| `Subiekt.Database` | Nazwa bazy Subiekta (sprawdź w Subiekt → Plik → Otwórz podmiot) |
-| `Subiekt.DbUser/DbPassword` | SQL Auth do MSSQL |
-| `Subiekt.Operator/OperatorPassword` | Login operatora Subiekta + hasło **plaintext** (Bridge szyfruje przez `InsERT.Dodatki.Szyfruj()`) |
-| `Subiekt.PdfTemplateId` | `null` = domyślny wzorzec, lub int = custom |
+Krytyczne klucze:
+- `Bridge:Token` - statyczny API key z marketplace-manage
+- `Bridge:UseFakeSfera` - true na macOS/dev, false na produkcji
+- `Subiekt:Server`, `Subiekt:Database` - MSSQL Subiekta
+- `Subiekt:Operator`, `Subiekt:OperatorPassword` - login operatora Subiekta
+  (hasło zaszyfrowane przez `InsERT.Dodatki.Szyfruj()` przed zapisaniem)
+- `Subiekt:PdfTemplateId` - null = domyślny wzorzec, int = custom
 
-## Bezpieczeństwo
+## Test (smoke)
 
-- **HTTPS** — Kestrel z self-signed cert generowanym przy pierwszym `dotnet run`
-  (na produkcji warto wystawić Let's Encrypt jeśli host ma publiczny DNS)
-- **Token** w nagłówku `X-Bridge-Token` z constant-time compare (no timing attacks)
-- **IP whitelist** w Windows Firewall (regułę dorzuca `install-windows.ps1`)
-- **Idempotency** — powtórzony POST z tym samym `Idempotency-Key` zwraca cached response,
-  zapobiega duplikatom FV przy retry
-- **Single-thread COM** — wszystkie wywołania Sfery serializowane przez globalny `lock`
-  (MVP — wystarcza dla typowego ruchu kilka FV/min)
+```bash
+# health
+curl -k https://localhost:8443/api/v1/health -H "X-Bridge-Token: dev-token"
 
-## Ograniczenia
-
-- Tylko Windows ma realny COM — na macOS/Linux działa tylko `FakeSferaSession`
-- Polskie znaki w Sferze: encoding Windows-1250 (zarejestrowany przez `CodePagesEncodingProvider`)
-- Bit-level binarki MUSI pasować do Subiekta. Domyślnie x64; dla x86 zbuduj `-r win-x86`
-
-## Licencja
-
-[MIT](./LICENSE)
+# wystaw FV (z FakeSfera - zwróci sztywny response)
+curl -k -X POST https://localhost:8443/api/v1/invoices \
+    -H "X-Bridge-Token: dev-token" \
+    -H "Idempotency-Key: order:1:type:FS" \
+    -H "Content-Type: application/json" \
+    -d @sample-payload.json
+```
