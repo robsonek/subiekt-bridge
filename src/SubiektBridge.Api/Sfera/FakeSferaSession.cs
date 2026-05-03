@@ -109,7 +109,8 @@ public sealed class FakeSferaSession : ISferaSession
         return Task.FromResult(new SferaHealthDto(
             SubiektVersion: "FAKE-1.78.0",
             SessionActive: true,
-            LastInvoiceAt: _lastInvoiceAt));
+            LastInvoiceAt: _lastInvoiceAt,
+            LastError: null));
     }
 
     public Task<object?> InvokeRawAsync(string method, IReadOnlyList<object?> args, CancellationToken ct)

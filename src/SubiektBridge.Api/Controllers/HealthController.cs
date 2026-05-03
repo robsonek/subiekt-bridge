@@ -32,7 +32,8 @@ public sealed class HealthController : ControllerBase
                 SubiektVersion: sfera.SubiektVersion,
                 SferaSession: sfera.SessionActive ? "active" : "down",
                 LastInvoiceAt: sfera.LastInvoiceAt,
-                QueueDepth: 0);
+                QueueDepth: 0,
+                LastError: sfera.LastError);
 
             return sfera.SessionActive ? Ok(response) : StatusCode(503, response);
         }

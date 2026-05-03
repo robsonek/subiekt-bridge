@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
@@ -13,16 +14,17 @@ namespace SubiektBridge.Api.Sfera;
 /// Architektura:
 /// - <c>dynamic</c> + <c>Type.GetTypeFromProgID("InsERT.GT")</c> - late binding, bez TLB.
 /// - Encoding pól tekstowych: UTF-8 -> Windows-1250 (CP1250 wymaga CodePagesEncodingProvider).
+/// - Dedykowany STA thread + kolejka <see cref="BlockingCollection{T}"/> dla wszystkich
+///   wywołań COM. KLUCZOWE: <c>InsERT.GT</c> jest STA (apartment threaded), a thread pool
+///   ASP.NET Core jest MTA. Próba <c>Activator.CreateInstance</c> z MTA threada na STA-only
+///   in-proc COM rzuca <c>0x8000FFFF E_UNEXPECTED</c>. Wszystkie operacje muszą wykonać się
+///   na tym samym STA threadzie.
 /// - Sesja trzymana przez cały czas życia procesu (lazy init), auto-recreate przy crashu.
-/// - Single-threaded apartment: wszystkie wywołania COM serializowane przez globalny <c>lock</c>
-///   (MVP - jeden klient Laravela, niski wolumen kilka FV/min). Dla większego ruchu dorobimy
-///   dedykowany STA thread + Channel queue.
 ///
 /// Wymagania na Windowsie klienta:
-/// - Subiekt GT zainstalowany (rekomendowane x64)
+/// - Subiekt GT zainstalowany (32-bit - cała linia GT jest x86)
 /// - Sfera aktywna i wykupiona dla operatora
-/// - .NET 10 self-contained runtime jest wbudowany w SubiektBridge.Api.exe (nie wymaga instalacji)
-/// - Bit-level binarki Bridge'a MUSI pasować do Subiekta (x64 -> x64). InsERT.GT to in-proc COM.
+/// - Bridge zbudowany jako win-x86 (in-proc COM = bit-level musi pasować)
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class RealSferaSession : ISferaSession
@@ -30,10 +32,13 @@ public sealed class RealSferaSession : ISferaSession
     private readonly SubiektOptions _options;
     private readonly ILogger<RealSferaSession> _logger;
     private readonly Encoding _cp1250;
-    private readonly object _comLock = new();
+    private readonly Thread _staThread;
+    private readonly BlockingCollection<Action> _workQueue = new();
     private dynamic? _subiekt;
     private DateTimeOffset? _lastInvoiceAt;
     private string? _subiektVersion;
+    private string? _lastError;
+    private bool _disposed;
 
     public RealSferaSession(SubiektOptions options, ILogger<RealSferaSession> logger)
     {
@@ -42,6 +47,75 @@ public sealed class RealSferaSession : ISferaSession
 
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         _cp1250 = Encoding.GetEncoding(options.Encoding);
+
+        _staThread = new Thread(WorkerLoop)
+        {
+            Name = "Sfera-STA-Worker",
+            IsBackground = true,
+        };
+        _staThread.SetApartmentState(ApartmentState.STA);
+        _staThread.Start();
+    }
+
+    /// <summary>Ostatni błąd Sfery (do prezentacji w /health endpoint).</summary>
+    public string? LastError => _lastError;
+
+    private void WorkerLoop()
+    {
+        _logger.LogInformation("Sfera STA worker started, ApartmentState={State}",
+            Thread.CurrentThread.GetApartmentState());
+
+        foreach (var work in _workQueue.GetConsumingEnumerable())
+        {
+            try
+            {
+                work();
+            }
+            catch (Exception ex)
+            {
+                // Wyjątki delegowane do TaskCompletionSource w wywołaniu.
+                _logger.LogDebug(ex, "STA worker action threw (delegated to caller)");
+            }
+        }
+
+        // Sesję zamykamy na tym samym STA threadzie.
+        ResetSessionOnSta();
+    }
+
+    /// <summary>
+    /// Wykonuje funkcję na STA threadzie i zwraca Task. Kolejka serializuje wywołania
+    /// (jeden COM call naraz, bez race conditions w sesji Sfery).
+    /// </summary>
+    private Task<T> RunOnStaAsync<T>(Func<T> func, CancellationToken ct)
+    {
+        if (_disposed)
+        {
+            return Task.FromException<T>(new ObjectDisposedException(nameof(RealSferaSession)));
+        }
+
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // Cancellation: jeśli token anulowany przed startem - od razu cancel.
+        ct.Register(() => tcs.TrySetCanceled(ct));
+
+        _workQueue.Add(() =>
+        {
+            if (ct.IsCancellationRequested)
+            {
+                tcs.TrySetCanceled(ct);
+                return;
+            }
+            try
+            {
+                tcs.TrySetResult(func());
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        }, CancellationToken.None);
+
+        return tcs.Task;
     }
 
     private dynamic Session
@@ -58,8 +132,9 @@ public sealed class RealSferaSession : ISferaSession
 
     private dynamic OpenSession()
     {
-        _logger.LogInformation("Opening Sfera session: server={Server}, db={Db}, operator={Operator}",
-            _options.Server, _options.Database, _options.Operator);
+        _logger.LogInformation("Opening Sfera session: server={Server}, db={Db}, operator={Operator}, apartment={Apt}",
+            _options.Server, _options.Database, _options.Operator,
+            Thread.CurrentThread.GetApartmentState());
 
         var gtType = Type.GetTypeFromProgID("InsERT.GT")
             ?? throw new InvalidOperationException(
@@ -85,6 +160,7 @@ public sealed class RealSferaSession : ISferaSession
 
         try { _subiektVersion = (string?)session.Aplikacja?.Wersja; } catch { /* opcjonalne */ }
 
+        _lastError = null;
         return session;
     }
 
@@ -92,21 +168,19 @@ public sealed class RealSferaSession : ISferaSession
 
     public Task<SferaHealthDto> HealthAsync(CancellationToken ct)
     {
-        return Task.Run(() =>
+        return RunOnStaAsync(() =>
         {
-            lock (_comLock)
+            try
             {
-                try
-                {
-                    _ = Session; // trigger lazy open
-                    return new SferaHealthDto(_subiektVersion ?? "unknown", true, _lastInvoiceAt);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Sfera health check failed");
-                    ResetSession();
-                    return new SferaHealthDto("unknown", false, _lastInvoiceAt);
-                }
+                _ = Session; // trigger lazy open
+                return new SferaHealthDto(_subiektVersion ?? "unknown", true, _lastInvoiceAt, null);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Sfera health check failed");
+                _lastError = $"{ex.GetType().Name}: {ex.Message}";
+                ResetSessionOnSta();
+                return new SferaHealthDto("unknown", false, _lastInvoiceAt, _lastError);
             }
         }, ct);
     }
@@ -115,13 +189,7 @@ public sealed class RealSferaSession : ISferaSession
 
     public Task<InvoiceResponseDto> CreateInvoiceAsync(InvoiceRequestDto request, CancellationToken ct)
     {
-        return Task.Run(() =>
-        {
-            lock (_comLock)
-            {
-                return CreateInvoiceCore(request);
-            }
-        }, ct);
+        return RunOnStaAsync(() => CreateInvoiceCore(request), ct);
     }
 
     private InvoiceResponseDto CreateInvoiceCore(InvoiceRequestDto request)
@@ -188,13 +256,7 @@ public sealed class RealSferaSession : ISferaSession
         InvoiceCorrectionRequestDto request,
         CancellationToken ct)
     {
-        return Task.Run(() =>
-        {
-            lock (_comLock)
-            {
-                return CreateCorrectionCore(sourceSubiektId, request);
-            }
-        }, ct);
+        return RunOnStaAsync(() => CreateCorrectionCore(sourceSubiektId, request), ct);
     }
 
     private InvoiceResponseDto CreateCorrectionCore(long sourceSubiektId, InvoiceCorrectionRequestDto request)
@@ -268,95 +330,86 @@ public sealed class RealSferaSession : ISferaSession
 
     public Task<ProductDto?> FindProductByEanAsync(string ean, CancellationToken ct)
     {
-        return Task.Run<ProductDto?>(() =>
+        return RunOnStaAsync<ProductDto?>(() =>
         {
-            lock (_comLock)
+            string symbol = EncodeForSfera(ean);
+            if (!(bool)Session.Towary.Istnieje(symbol))
             {
-                string symbol = EncodeForSfera(ean);
-                if (!(bool)Session.Towary.Istnieje(symbol))
-                {
-                    return null;
-                }
+                return null;
+            }
 
-                dynamic towar = Session.Towary.Wczytaj(symbol);
-                try
-                {
-                    return new ProductDto(
-                        SubiektId: ToInt64(towar.Identyfikator),
-                        Symbol: (string)towar.Symbol,
-                        Ean: ean,
-                        Name: (string)towar.Nazwa,
-                        VatRate: TryReadDecimal(towar, "VatStawka") ?? 23m,
-                        Unit: TryReadString(towar, "JmZakupu") ?? TryReadString(towar, "JmSprzedazy") ?? "szt.",
-                        IsActive: true);
-                }
-                finally
-                {
-                    TryClose(towar);
-                }
+            dynamic towar = Session.Towary.Wczytaj(symbol);
+            try
+            {
+                return new ProductDto(
+                    SubiektId: ToInt64(towar.Identyfikator),
+                    Symbol: (string)towar.Symbol,
+                    Ean: ean,
+                    Name: (string)towar.Nazwa,
+                    VatRate: TryReadDecimal(towar, "VatStawka") ?? 23m,
+                    Unit: TryReadString(towar, "JmZakupu") ?? TryReadString(towar, "JmSprzedazy") ?? "szt.",
+                    IsActive: true);
+            }
+            finally
+            {
+                TryClose(towar);
             }
         }, ct);
     }
 
     public Task<ContractorDto?> FindContractorByNipAsync(string nip, CancellationToken ct)
     {
-        return Task.Run<ContractorDto?>(() =>
+        return RunOnStaAsync<ContractorDto?>(() =>
         {
-            lock (_comLock)
+            string symbol = EncodeForSfera(nip);
+            if (!(bool)Session.Kontrahenci.Istnieje(symbol))
             {
-                string symbol = EncodeForSfera(nip);
-                if (!(bool)Session.Kontrahenci.Istnieje(symbol))
-                {
-                    return null;
-                }
+                return null;
+            }
 
-                dynamic kh = Session.Kontrahenci.Wczytaj(symbol);
-                try
-                {
-                    return new ContractorDto(
-                        IsPerson: TryReadBool(kh, "Osoba") ?? false,
-                        Symbol: (string)kh.Symbol,
-                        Nip: TryReadString(kh, "NIP"),
-                        Name: (string)kh.Nazwa,
-                        FullName: TryReadString(kh, "NazwaPelna"),
-                        FirstName: null,
-                        LastName: null,
-                        Email: TryReadString(kh, "AdresEMail"),
-                        Address: new AddressDto(
-                            Street: TryReadString(kh, "Ulica") ?? "",
-                            PostCode: TryReadString(kh, "KodPocztowy") ?? "",
-                            City: TryReadString(kh, "Miejscowosc") ?? "",
-                            CountryCode: TryReadString(kh, "Kraj") ?? "PL"));
-                }
-                finally
-                {
-                    TryClose(kh);
-                }
+            dynamic kh = Session.Kontrahenci.Wczytaj(symbol);
+            try
+            {
+                return new ContractorDto(
+                    IsPerson: TryReadBool(kh, "Osoba") ?? false,
+                    Symbol: (string)kh.Symbol,
+                    Nip: TryReadString(kh, "NIP"),
+                    Name: (string)kh.Nazwa,
+                    FullName: TryReadString(kh, "NazwaPelna"),
+                    FirstName: null,
+                    LastName: null,
+                    Email: TryReadString(kh, "AdresEMail"),
+                    Address: new AddressDto(
+                        Street: TryReadString(kh, "Ulica") ?? "",
+                        PostCode: TryReadString(kh, "KodPocztowy") ?? "",
+                        City: TryReadString(kh, "Miejscowosc") ?? "",
+                        CountryCode: TryReadString(kh, "Kraj") ?? "PL"));
+            }
+            finally
+            {
+                TryClose(kh);
             }
         }, ct);
     }
 
     public Task<object?> InvokeRawAsync(string method, IReadOnlyList<object?> args, CancellationToken ct)
     {
-        return Task.Run<object?>(() =>
+        return RunOnStaAsync<object?>(() =>
         {
-            lock (_comLock)
+            // Dot-navigated method call: "Magazyny.Liczba" -> Session.Magazyny.Liczba(args)
+            var parts = method.Split('.');
+            object current = Session;
+            for (int i = 0; i < parts.Length - 1; i++)
             {
-                // Dot-navigated method call: "Magazyny.Liczba" -> Session.Magazyny.Liczba(args)
-                var parts = method.Split('.');
-                object current = Session;
-                for (int i = 0; i < parts.Length - 1; i++)
-                {
-                    current = current.GetType().InvokeMember(parts[i],
-                        BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public,
-                        null, current, Array.Empty<object>())!;
-                }
-
-                string lastPart = parts[^1];
-                return current.GetType().InvokeMember(lastPart,
-                    BindingFlags.InvokeMethod | BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public,
-                    null, current, args.ToArray());
+                current = current.GetType().InvokeMember(parts[i],
+                    BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public,
+                    null, current, Array.Empty<object>())!;
             }
+
+            string lastPart = parts[^1];
+            return current.GetType().InvokeMember(lastPart,
+                BindingFlags.InvokeMethod | BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public,
+                null, current, args.ToArray());
         }, ct);
     }
 
@@ -562,7 +615,12 @@ public sealed class RealSferaSession : ISferaSession
         try { Marshal.ReleaseComObject(obj); } catch { /* ignore */ }
     }
 
-    private void ResetSession()
+    /// <summary>
+    /// Resetuje sesję. WAŻNE: musi być wywołane na STA threadzie (z STA worker loop'a).
+    /// Bezpośrednie wywołanie z innego threada zrobiłoby Marshal.ReleaseComObject z MTA
+    /// = potencjalny race / wyjątek.
+    /// </summary>
+    private void ResetSessionOnSta()
     {
         try { _subiekt?.Zakoncz(); } catch { }
         try { if (_subiekt is not null) Marshal.ReleaseComObject(_subiekt); } catch { }
@@ -579,10 +637,20 @@ public sealed class RealSferaSession : ISferaSession
 
     public ValueTask DisposeAsync()
     {
-        lock (_comLock)
+        if (_disposed) return ValueTask.CompletedTask;
+        _disposed = true;
+
+        // Sygnalizuj STA workerowi że ma się zamknąć.
+        // ResetSessionOnSta() wykona się jako ostatnia akcja w workerze.
+        _workQueue.CompleteAdding();
+
+        // Czekamy max 5 sekund na zamknięcie sesji Sfery.
+        if (!_staThread.Join(TimeSpan.FromSeconds(5)))
         {
-            ResetSession();
+            _logger.LogWarning("Sfera STA worker did not exit cleanly within 5s");
         }
+
+        _workQueue.Dispose();
         return ValueTask.CompletedTask;
     }
 }

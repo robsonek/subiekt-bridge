@@ -131,7 +131,8 @@ public sealed record HealthResponseDto(
     [property: JsonPropertyName("subiekt_version")] string SubiektVersion,
     [property: JsonPropertyName("sfera_session")] string SferaSession,
     [property: JsonPropertyName("last_invoice_at")] DateTimeOffset? LastInvoiceAt,
-    [property: JsonPropertyName("queue_depth")] int QueueDepth
+    [property: JsonPropertyName("queue_depth")] int QueueDepth,
+    [property: JsonPropertyName("last_error")] string? LastError = null
 );
 
 // ----------------------------- Raw -----------------------------

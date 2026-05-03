@@ -37,4 +37,5 @@ public interface ISferaSession : IAsyncDisposable
 public sealed record SferaHealthDto(
     string SubiektVersion,
     bool SessionActive,
-    DateTimeOffset? LastInvoiceAt);
+    DateTimeOffset? LastInvoiceAt,
+    string? LastError = null);
