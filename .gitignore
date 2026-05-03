@@ -1,0 +1,27 @@
+# Build outputs
+bin/
+obj/
+out/
+publish/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Local config
+appsettings.Local.json
+appsettings.Development.local.json
+*.pfx
+
+# Idempotency store and logs
+idempotency.db
+idempotency.db-journal
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
