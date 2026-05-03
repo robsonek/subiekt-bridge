@@ -10,6 +10,14 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Każdy item generuje 2 ZIPy (self-contained + framework-dependent).
+        # win-x86 wymagany dla 32-bitowego Subiekta GT (in-proc COM = bit-level musi pasować).
+        rid: [win-x64, win-x86]
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -22,41 +30,41 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      # ---------------- Self-contained build (~108 MB rozpakowane) ----------------
-      - name: Publish win-x64 self-contained
+      - name: Publish self-contained (${{ matrix.rid }})
         run: |
           dotnet publish src/SubiektBridge.Api/SubiektBridge.Api.csproj \
-            -c Release \
-            -r win-x64 \
+            -c Release -r ${{ matrix.rid }} \
             --self-contained true \
-            -p:PublishSingleFile=false \
-            -p:DebugType=None \
-            -p:DebugSymbols=false \
+            -p:PublishSingleFile=false -p:DebugType=None -p:DebugSymbols=false \
             -p:Version=${{ steps.ver.outputs.version }} \
-            -o publish/win-x64-selfcontained
+            -o publish/${{ matrix.rid }}-selfcontained
 
-      # ---------------- Framework-dependent build (~3 MB rozpakowane) -------------
-      # Wymaga zainstalowanego ASP.NET Core Runtime 10 na hoście Windowsa.
-      - name: Publish win-x64 framework-dependent
+      - name: Publish framework-dependent (${{ matrix.rid }})
         run: |
           dotnet publish src/SubiektBridge.Api/SubiektBridge.Api.csproj \
-            -c Release \
-            -r win-x64 \
+            -c Release -r ${{ matrix.rid }} \
             --self-contained false \
-            -p:PublishSingleFile=false \
-            -p:DebugType=None \
-            -p:DebugSymbols=false \
+            -p:PublishSingleFile=false -p:DebugType=None -p:DebugSymbols=false \
             -p:Version=${{ steps.ver.outputs.version }} \
-            -o publish/win-x64-fxdep
+            -o publish/${{ matrix.rid }}-fxdep
 
-      - name: Bundle deploy artifacts (oba warianty)
+      - name: Bundle deploy artifacts
         run: |
-          # Wspólny config template + deployment scripts dla obu wariantów.
           cat > /tmp/appsettings.Production.json.template <<'JSON'
           {
             "//token": "Wygeneruj losowy 64+ znaków, ten sam wpisz w marketplace-manage .env jako SUBIEKT_BRIDGE_TOKEN",
             "Logging": { "LogLevel": { "Default": "Information", "Microsoft.AspNetCore": "Warning" } },
-            "Kestrel": { "Endpoints": { "Https": { "Url": "https://0.0.0.0:8443" } } },
+            "Kestrel": {
+              "Endpoints": {
+                "Https": {
+                  "Url": "https://0.0.0.0:8443",
+                  "Certificate": {
+                    "Path": "data/cert.pfx",
+                    "Password": "subiekt-bridge-self-signed"
+                  }
+                }
+              }
+            },
             "Bridge": {
               "Token": "WSTAW-LOSOWY-64-ZNAKOWY-TOKEN",
               "UseFakeSfera": false,
@@ -80,37 +88,63 @@ jobs:
           JSON
 
           for variant in selfcontained fxdep; do
-            cp deploy/install-windows.ps1 "publish/win-x64-${variant}/"
-            cp deploy/update-windows.ps1 "publish/win-x64-${variant}/"
-            cp /tmp/appsettings.Production.json.template "publish/win-x64-${variant}/"
-            rm -f "publish/win-x64-${variant}/appsettings.Development.json"
+            dir="publish/${{ matrix.rid }}-${variant}"
+            cp deploy/install-windows.ps1 "$dir/"
+            cp deploy/update-windows.ps1 "$dir/"
+            cp /tmp/appsettings.Production.json.template "$dir/"
+            rm -f "$dir/appsettings.Development.json"
           done
 
-          echo "--- self-contained ---"
-          du -sh publish/win-x64-selfcontained
-          echo "--- framework-dependent ---"
-          du -sh publish/win-x64-fxdep
+          du -sh publish/${{ matrix.rid }}-selfcontained publish/${{ matrix.rid }}-fxdep
 
       - name: Create ZIPs
         run: |
           VERSION=${{ steps.ver.outputs.version }}
+          RID=${{ matrix.rid }}
 
-          (cd publish && mv win-x64-selfcontained win-x64 && \
-            zip -qr "../SubiektBridge-${VERSION}-win-x64.zip" win-x64 && \
-            mv win-x64 win-x64-selfcontained)
+          (cd publish && mv ${RID}-selfcontained ${RID} && \
+            zip -qr "../SubiektBridge-${VERSION}-${RID}.zip" ${RID} && \
+            mv ${RID} ${RID}-selfcontained)
 
-          (cd publish && mv win-x64-fxdep win-x64 && \
-            zip -qr "../SubiektBridge-${VERSION}-win-x64-fxdep.zip" win-x64 && \
-            mv win-x64 win-x64-fxdep)
+          (cd publish && mv ${RID}-fxdep ${RID} && \
+            zip -qr "../SubiektBridge-${VERSION}-${RID}-fxdep.zip" ${RID} && \
+            mv ${RID} ${RID}-fxdep)
 
-          ls -lh SubiektBridge-*.zip
+          ls -lh SubiektBridge-${VERSION}-${RID}*.zip
 
       - name: Compute SHA256
         run: |
           VERSION=${{ steps.ver.outputs.version }}
-          for f in SubiektBridge-${VERSION}-win-x64.zip SubiektBridge-${VERSION}-win-x64-fxdep.zip; do
+          RID=${{ matrix.rid }}
+          for f in SubiektBridge-${VERSION}-${RID}.zip SubiektBridge-${VERSION}-${RID}-fxdep.zip; do
             sha256sum "$f" > "${f}.sha256"
           done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.rid }}
+          path: |
+            SubiektBridge-*.zip
+            SubiektBridge-*.zip.sha256
+          retention-days: 1
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      - name: Determine version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -118,20 +152,28 @@ jobs:
           name: SubiektBridge ${{ steps.ver.outputs.version }}
           generate_release_notes: true
           body: |
+            ## Wybór binarki
+
+            **Najpierw sprawdź architekturę swojego Subiekta GT:**
+            ```powershell
+            Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*","HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" |
+              Where DisplayName -Match "Subiekt|InsERT" | Select DisplayName, InstallLocation
+            ```
+            - `Program Files (x86)` → Subiekt **32-bit** → bierz **win-x86**
+            - `Program Files\` → Subiekt **64-bit** → bierz **win-x64**
+
+            > Bridge to in-process COM klient — bit-level **MUSI** pasować, inaczej dostaniesz `0x8000FFFF Katastrofalny błąd`.
+
             ## Pliki do pobrania
 
-            | Plik | Rozmiar | Wymagania |
-            |---|---|---|
-            | `SubiektBridge-${{ steps.ver.outputs.version }}-win-x64.zip` | ~50 MB | **Nic** — runtime wbudowany (self-contained) |
-            | `SubiektBridge-${{ steps.ver.outputs.version }}-win-x64-fxdep.zip` | ~2 MB | **ASP.NET Core Runtime 10** zainstalowany na Windowsie |
+            | Plik | Architektura | Rozmiar | Wymagania |
+            |---|---|---|---|
+            | `SubiektBridge-${{ steps.ver.outputs.version }}-win-x64.zip` | x64 | ~50 MB | Nic — runtime wbudowany |
+            | `SubiektBridge-${{ steps.ver.outputs.version }}-win-x64-fxdep.zip` | x64 | ~2 MB | ASP.NET Core Runtime 10 (x64) |
+            | `SubiektBridge-${{ steps.ver.outputs.version }}-win-x86.zip` | **x86** | ~50 MB | Nic — runtime wbudowany |
+            | `SubiektBridge-${{ steps.ver.outputs.version }}-win-x86-fxdep.zip` | **x86** | ~2 MB | ASP.NET Core Runtime 10 (x86) |
 
-            **Który wybrać?**
-            - Niepewny? Bierz **self-contained** (większy ale działa wszędzie).
-            - Masz już zainstalowany .NET 10 SDK / ASP.NET Core Runtime, chcesz mały update? Bierz **fxdep**.
-
-            ASP.NET Core Runtime 10 dla Windows: https://dotnet.microsoft.com/download/dotnet/10.0 (Hosting Bundle lub ASP.NET Core Runtime).
+            ASP.NET Core Runtime 10 dla Windows: https://dotnet.microsoft.com/download/dotnet/10.0
           files: |
-            SubiektBridge-${{ steps.ver.outputs.version }}-win-x64.zip
-            SubiektBridge-${{ steps.ver.outputs.version }}-win-x64.zip.sha256
-            SubiektBridge-${{ steps.ver.outputs.version }}-win-x64-fxdep.zip
-            SubiektBridge-${{ steps.ver.outputs.version }}-win-x64-fxdep.zip.sha256
+            dist/SubiektBridge-*.zip
+            dist/SubiektBridge-*.zip.sha256
