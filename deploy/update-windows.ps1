@@ -9,7 +9,7 @@
     zachowuje appsettings.Production.json i data/ (idempotency.db), restartuje serwis.
 
 .EXAMPLE
-    cd C:\SubiektBridge\publish\win-x64
+    cd C:\SubiektBridge\new\
     .\update-windows.ps1
 #>
 
@@ -28,8 +28,11 @@ Write-Host "Docel:  $InstallDir"
 
 # Stop
 Write-Host "Zatrzymuję serwis..." -ForegroundColor Yellow
-nssm stop $ServiceName 2>&1 | Out-Null
-Start-Sleep -Seconds 2
+$service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($service -and $service.Status -ne 'Stopped') {
+    Stop-Service -Name $ServiceName -Force
+    Start-Sleep -Seconds 3
+}
 
 # Backup configu (zawsze)
 $configPath = Join-Path $InstallDir "appsettings.Production.json"
@@ -39,8 +42,13 @@ if (Test-Path $configPath) {
     Write-Host "Zachowuję istniejący appsettings.Production.json" -ForegroundColor Green
 }
 
-# Kopiuj wszystko poza appsettings.Production.json i data/
-Get-ChildItem -Path $source -Exclude @("appsettings.Production.json", "data", "logs", "*.log") | ForEach-Object {
+# Kopiuj wszystko poza appsettings.Production.json i data/ i logs/
+Get-ChildItem -Path $source -Exclude @(
+    "appsettings.Production.json",
+    "data",
+    "logs",
+    "*.log"
+) | ForEach-Object {
     Copy-Item $_.FullName -Destination $InstallDir -Recurse -Force
 }
 
@@ -52,7 +60,7 @@ if ($configBackup) {
 
 # Start
 Write-Host "Startuję serwis..." -ForegroundColor Yellow
-nssm start $ServiceName
+Start-Service -Name $ServiceName
 Start-Sleep -Seconds 5
 
 $port = 8443
@@ -62,6 +70,7 @@ try {
     Write-Host "OK: health $($response.StatusCode)" -ForegroundColor Green
     Write-Host $response.Content
 } catch {
-    Write-Host "OSTRZEŻENIE: health endpoint nie odpowiada - sprawdź C:\SubiektBridge\logs\stderr.log" -ForegroundColor Red
+    Write-Host "OSTRZEŻENIE: health endpoint nie odpowiada - sprawdź $InstallDir\logs\" -ForegroundColor Red
+    Write-Host "Status serwisu: $((Get-Service -Name $ServiceName).Status)" -ForegroundColor Yellow
     exit 1
 }

@@ -8,6 +8,13 @@ using SubiektBridge.Api.Sfera;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Native Windows Service integration. No-op gdy proces NIE jest uruchomiony jako serwis
+// (np. dotnet run lokalnie) - pozwala na ten sam binarka działa interaktywnie i jako serwis.
+builder.Host.UseWindowsService(options =>
+{
+    options.ServiceName = "SubiektBridge";
+});
+
 builder.Host.UseSerilog((ctx, cfg) => cfg
     .ReadFrom.Configuration(ctx.Configuration)
     .WriteTo.Console()

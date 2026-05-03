@@ -9,7 +9,10 @@
 | Sfera dla Subiekta | aktywna licencja | sprawdź w InsERT przed deployem |
 | Operator Subiekta | dedykowany dla integracji | rekomendacja: użytkownik "INTEGRACJA" |
 | .NET Runtime | **niepotrzebny** | self-contained binarka ma runtime wbudowany |
-| NSSM | dowolna | https://nssm.cc/download → rozpakuj `nssm.exe` do `C:\Windows\System32\` |
+
+> Bridge rejestruje się jako Windows Service przez wbudowane `sc.exe` (Service Control Manager).
+> Zero zewnętrznych narzędzi typu NSSM/WinSW — wszystko po stronie .NET przez
+> `Microsoft.Extensions.Hosting.WindowsServices`.
 
 > **UWAGA dot. bit-level**: `InsERT.GT` to in-process COM. Bridge x64 NIE połączy się z Subiektem x86. Jeśli klient ma Subiekta 32-bit — przebudujemy Bridge'a jako `win-x86`.
 
@@ -152,7 +155,7 @@ cd C:\SubiektBridge\new\
 
 | Problem | Sprawdź |
 |---|---|
-| Service nie startuje | `Get-Service SubiektBridge`; logi w `C:\SubiektBridge\logs\stderr.log` |
+| Service nie startuje | `Get-Service SubiektBridge`; logi w `C:\SubiektBridge\logs\subiekt-bridge-*.log` lub `Get-WinEvent -LogName Application \| Where-Object Source -eq 'SubiektBridge'` |
 | `/health` zwraca 503 + `sfera_session: down` | Czy Subiekt GT odpalony jako program? Sprawdź `New-Object -ComObject "InsERT.GT"` w PowerShell |
 | 401 z Laravela | Token się nie zgadza między `.env` a `appsettings.Production.json` |
 | 400 `MISSING_IDEMPOTENCY_KEY` | Klient (Laravel) nie wysyła nagłówka `Idempotency-Key` (regression — sprawdź `SubiektBridgeClient::mutate`) |

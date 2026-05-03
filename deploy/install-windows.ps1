@@ -2,14 +2,17 @@
 
 <#
 .SYNOPSIS
-    Instaluje SubiektBridge jako Windows Service (przez NSSM).
+    Instaluje SubiektBridge jako Windows Service (natywnie, bez NSSM).
 
 .DESCRIPTION
     Skrypt do uruchomienia raz, po pierwszym wgraniu binarki na hosta z Subiektem GT.
+    Używa wbudowanego sc.exe + Microsoft.Extensions.Hosting.WindowsServices po stronie .NET
+    (zero zewnętrznych narzędzi).
+
     Robi:
-    - Sanity check (Subiekt zainstalowany, NSSM dostępny, COM ProgID działa)
+    - Sanity check (Subiekt zainstalowany, COM ProgID działa)
     - Tworzy katalog C:\SubiektBridge\data\ (idempotency SQLite, PDFs)
-    - Rejestruje Windows Service z auto-startem przez NSSM
+    - Rejestruje Windows Service przez sc.exe z auto-startem i auto-restart on failure
     - Otwiera port 8443 w Windows Firewall (TYLKO z IP marketplace-manage)
     - Uruchamia serwis i weryfikuje /api/v1/health
 
@@ -25,8 +28,6 @@
 
 .EXAMPLE
     .\install-windows.ps1 -LaravelHostIp 1.2.3.4
-
-    .\install-windows.ps1 -InstallDir D:\SubiektBridge -LaravelHostIp 1.2.3.4
 #>
 
 param(
@@ -72,15 +73,6 @@ try {
     exit 1
 }
 
-# Sprawdź NSSM
-$nssm = Get-Command nssm.exe -ErrorAction SilentlyContinue
-if (-not $nssm) {
-    Write-Host "FAIL: NSSM nie znaleziony w PATH. Zainstaluj z https://nssm.cc/download" -ForegroundColor Red
-    Write-Host "      (rekomendowane: rozpakuj win64\nssm.exe do C:\Windows\System32\)" -ForegroundColor Yellow
-    exit 1
-}
-Test-Or-Die $true "NSSM dostępne: $($nssm.Source)"
-
 # ---------------------- Katalog danych ----------------------
 Write-Section "Przygotowanie katalogu danych"
 
@@ -95,27 +87,42 @@ foreach ($dir in @($dataDir, $logsDir)) {
     }
 }
 
-# ---------------------- Windows Service ----------------------
+# ---------------------- Windows Service (sc.exe) ----------------------
 Write-Section "Windows Service ($ServiceName)"
 
 $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existingService) {
-    Write-Host "Serwis '$ServiceName' już istnieje - aktualizuję konfigurację..." -ForegroundColor Yellow
-    nssm stop $ServiceName 2>&1 | Out-Null
-    nssm remove $ServiceName confirm 2>&1 | Out-Null
+    Write-Host "Serwis '$ServiceName' już istnieje - usuwam i tworzę od nowa..." -ForegroundColor Yellow
+    if ($existingService.Status -ne 'Stopped') {
+        Stop-Service -Name $ServiceName -Force
+        Start-Sleep -Seconds 2
+    }
+    sc.exe delete $ServiceName | Out-Null
+    Start-Sleep -Seconds 2
 }
 
-nssm install $ServiceName $exePath
-nssm set $ServiceName AppDirectory $InstallDir
-nssm set $ServiceName AppEnvironmentExtra "ASPNETCORE_ENVIRONMENT=Production"
-nssm set $ServiceName Start SERVICE_AUTO_START
-nssm set $ServiceName AppStdout "$logsDir\stdout.log"
-nssm set $ServiceName AppStderr "$logsDir\stderr.log"
-nssm set $ServiceName AppRotateFiles 1
-nssm set $ServiceName AppRotateBytes 10485760  # 10 MB rotation
-nssm set $ServiceName Description "HTTP bridge marketplace-manage <-> Subiekt GT (Sfera)"
+# binPath: scPath musi być ABSOLUTNĄ ścieżką, w cudzysłowie jeśli zawiera spacje.
+$binPathArg = "`"$exePath`""
 
-Write-Host "OK: serwis zarejestrowany" -ForegroundColor Green
+sc.exe create $ServiceName binPath= $binPathArg `
+    DisplayName= "Subiekt Bridge" `
+    start= auto `
+    obj= "LocalSystem" | Out-Null
+Test-Or-Die ($LASTEXITCODE -eq 0) "sc.exe create"
+
+sc.exe description $ServiceName "HTTP bridge marketplace-manage <-> Subiekt GT (Sfera)" | Out-Null
+
+# Auto-restart przy crashu: 3 razy z opóźnieniem 60 sekund.
+sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
+Test-Or-Die ($LASTEXITCODE -eq 0) "sc.exe failure (auto-restart skonfigurowany)"
+
+# ASPNETCORE_ENVIRONMENT=Production na poziomie serwisu (Windows 10+)
+# Multi-string na poziomie sc.exe wymaga `\0` separator, więc używamy registry:
+$envKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+Set-ItemProperty -Path $envKey -Name "Environment" -Type MultiString -Value @(
+    "ASPNETCORE_ENVIRONMENT=Production"
+)
+Write-Host "OK: ASPNETCORE_ENVIRONMENT=Production ustawione w rejestrze serwisu" -ForegroundColor Green
 
 # ---------------------- Firewall ----------------------
 Write-Section "Windows Firewall (port $Port -> $LaravelHostIp)"
@@ -135,10 +142,10 @@ Test-Or-Die $true "reguła firewall: $ruleName ($Port/tcp z $LaravelHostIp)"
 # ---------------------- Start ----------------------
 Write-Section "Start serwisu"
 
-nssm start $ServiceName
+Start-Service -Name $ServiceName
 Start-Sleep -Seconds 5
 
-# Health check (lokalnie, bez weryfikacji TLS - self-signed cert OK na początek)
+# Health check
 $healthUrl = "https://localhost:$Port/api/v1/health"
 try {
     $response = Invoke-WebRequest -Uri $healthUrl -SkipCertificateCheck -UseBasicParsing -TimeoutSec 10
@@ -151,17 +158,26 @@ try {
     }
 } catch {
     Write-Host "FAIL: nie udało się zapytać $healthUrl" -ForegroundColor Red
-    Write-Host "      Sprawdź logi: $logsDir\stderr.log" -ForegroundColor Yellow
+    Write-Host "      Sprawdź logi: $logsDir\subiekt-bridge-*.log" -ForegroundColor Yellow
     Write-Host "      Sprawdź status: Get-Service $ServiceName" -ForegroundColor Yellow
+    Write-Host "      Event Log: Get-WinEvent -LogName Application | Where-Object Source -eq '$ServiceName'" -ForegroundColor Yellow
     exit 1
 }
 
 Write-Section "Gotowe"
 Write-Host "Bridge działa jako Windows Service '$ServiceName'." -ForegroundColor Green
 Write-Host ""
+Write-Host "Zarządzanie serwisem:" -ForegroundColor Cyan
+Write-Host "  Start-Service $ServiceName"
+Write-Host "  Stop-Service $ServiceName"
+Write-Host "  Restart-Service $ServiceName"
+Write-Host "  Get-Service $ServiceName"
+Write-Host ""
+Write-Host "Logi:" -ForegroundColor Cyan
+Write-Host "  $logsDir\subiekt-bridge-*.log  (Serilog rolling, 30 dni)"
+Write-Host "  Get-WinEvent -LogName Application | Where-Object Source -eq '$ServiceName' | Select -First 20"
+Write-Host ""
 Write-Host "Następne kroki w marketplace-manage (.env na serwerze Linux):" -ForegroundColor Cyan
 Write-Host "  SUBIEKT_BRIDGE_URL=https://<IP-tego-Windowsa>:$Port"
 Write-Host "  SUBIEKT_BRIDGE_TOKEN=<ten-sam-token-co-w-appsettings.Production.json>"
 Write-Host "  SUBIEKT_BRIDGE_VERIFY_TLS=false  # dla self-signed cert"
-Write-Host ""
-Write-Host "Test z Linuxa: curl -k https://<IP-tego-Windowsa>:$Port/api/v1/health"
