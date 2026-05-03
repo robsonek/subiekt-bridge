@@ -21,7 +21,21 @@ public sealed class IdempotencyStore
 
     public IdempotencyStore(BridgeOptions options, ILogger<IdempotencyStore> logger)
     {
-        _connectionString = $"Data Source={options.IdempotencyStorePath}";
+        var path = options.IdempotencyStorePath;
+
+        // SQLite tworzy plik bazy automatycznie, ale NIE tworzy katalogu rodzica.
+        // Jeśli config wskazuje 'C:\SubiektBridge\data\idempotency.db' a folder data\
+        // nie istnieje - dostaniemy 'SQLite Error 14: unable to open database file'.
+        // Tworzymy folder tu, żeby Bridge działał nawet bez install-windows.ps1.
+        var fullPath = Path.GetFullPath(path);
+        var directory = Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+        {
+            Directory.CreateDirectory(directory);
+            logger.LogInformation("Created idempotency store directory: {Directory}", directory);
+        }
+
+        _connectionString = $"Data Source={path}";
         _logger = logger;
         _ttl = TimeSpan.FromDays(options.IdempotencyTtlDays);
         EnsureSchema();
