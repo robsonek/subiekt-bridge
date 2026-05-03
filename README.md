@@ -34,15 +34,26 @@ Pełen kontrakt: zobacz `src/SubiektBridge.Api/Models/InvoiceModels.cs`.
 
 - Subiekt GT (zgodny z bit-level binarki — domyślnie x64) z wykupioną **Sferą**
 - Windows 10/11/Server 2019+
-- NSSM (https://nssm.cc) — do rejestracji jako Windows Service
-- **Runtime .NET niepotrzebny** — release ZIP jest self-contained (~108 MB rozpakowane)
+- **Brak zewnętrznych narzędzi** — rejestracja jako Windows Service przez wbudowane `sc.exe`
+- **.NET Runtime** — opcjonalny (zobacz "Wybór wariantu" niżej)
+
+## Wybór wariantu
+
+Każdy release ma dwa pliki ZIP:
+
+| Wariant | Rozmiar (ZIP / rozpakowane) | Wymagania na Windowsie |
+|---|---|---|
+| **`SubiektBridge-X.Y.Z-win-x64.zip`** (self-contained) | ~50 MB / ~108 MB | Nic — runtime wbudowany w binarki |
+| **`SubiektBridge-X.Y.Z-win-x64-fxdep.zip`** (framework-dependent) | ~2 MB / ~3 MB | [ASP.NET Core Runtime 10](https://dotnet.microsoft.com/download/dotnet/10.0) |
+
+**Niepewny? Bierz self-contained** — kosztuje 50 MB na dysku, ale eliminuje całą klasę problemów ("brakuje runtime", "zła wersja .NET", konflikt z innymi appkami na hoście).
+
+**Masz już zainstalowane .NET 10 SDK lub ASP.NET Core Runtime?** Bierz fxdep — szybsze pobieranie, mniejszy update na każdą nową wersję (~2 MB zamiast 50 MB).
 
 ## Szybki start (produkcja)
 
-1. **Pobierz** najnowszy ZIP z [Releases](https://github.com/robsonek/subiekt-bridge/releases/latest):
-   ```
-   SubiektBridge-X.Y.Z-win-x64.zip
-   ```
+1. **Pobierz** najnowszy ZIP z [Releases](https://github.com/robsonek/subiekt-bridge/releases/latest)
+   (zobacz "Wybór wariantu" wyżej).
 2. **Rozpakuj** do `C:\SubiektBridge\`
 3. **Skopiuj** `appsettings.Production.json.template` jako `appsettings.Production.json` i wypełnij
    (token, login operatora Subiekta, ścieżki MSSQL).
