@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using SubiektBridge.Api.Idempotency;
 using SubiektBridge.Api.Models;
 using SubiektBridge.Api.Sfera;
+using MissingProductException = SubiektBridge.Api.Sfera.MissingProductException;
 
 namespace SubiektBridge.Api.Controllers;
 
@@ -60,10 +61,15 @@ public sealed class InvoicesController : ControllerBase
             await _idempotency.SaveAsync(idempotencyKey, response, ct);
             return StatusCode(StatusCodes.Status201Created, response);
         }
+        catch (MissingProductException ex)
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "MISSING_PRODUCT",
+                Message: ex.Message,
+                Details: new { missing_eans = new[] { ex.MissingEan } }));
+        }
         catch (NotImplementedException ex)
         {
-            // Stan przejściowy: RealSferaSession (Faza 2.5) jeszcze nie skończony.
-            // Pokazujemy 501 zamiast 500 żeby klient widział że to brak feature, nie crash.
             return StatusCode(StatusCodes.Status501NotImplemented, new ErrorResponseDto(
                 Code: "NOT_IMPLEMENTED",
                 Message: ex.Message));
@@ -102,6 +108,13 @@ public sealed class InvoicesController : ControllerBase
             var response = await _sfera.CreateCorrectionAsync(sourceSubiektId, request, ct);
             await _idempotency.SaveAsync(idempotencyKey, response, ct);
             return StatusCode(StatusCodes.Status201Created, response);
+        }
+        catch (MissingProductException ex)
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "MISSING_PRODUCT",
+                Message: ex.Message,
+                Details: new { missing_eans = new[] { ex.MissingEan } }));
         }
         catch (NotImplementedException ex)
         {

@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using SubiektBridge.Api.Idempotency;
 using SubiektBridge.Api.Models;
 using SubiektBridge.Api.Sfera;
+using MissingProductException = SubiektBridge.Api.Sfera.MissingProductException;
 
 namespace SubiektBridge.Api.Controllers;
 
@@ -62,6 +63,13 @@ public sealed class ReceiptsController : ControllerBase
             var response = await _sfera.CreateReceiptAsync(request, ct);
             await _idempotency.SaveAsync(idempotencyKey, response, ct);
             return StatusCode(StatusCodes.Status201Created, response);
+        }
+        catch (MissingProductException ex)
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "MISSING_PRODUCT",
+                Message: ex.Message,
+                Details: new { missing_eans = new[] { ex.MissingEan } }));
         }
         catch (NotImplementedException ex)
         {

@@ -67,11 +67,16 @@ public sealed record LineDto(
     [property: JsonPropertyName("vat_rate")] decimal VatRate
 );
 
-/// <summary>Pozycja korygująca — quantity_change ujemne dla zwrotów.</summary>
+/// <summary>
+/// Pozycja korygująca - ten sam shape JSON co <see cref="LineDto"/>, ujemna `quantity`
+/// dla zwrotu (pomniejszenie). Laravel używa wspólnego LineDto z tym samym kluczem
+/// `quantity` dla FS/KFS/PZ - C# musi zachować tę zgodność, inaczej KFS ląduje
+/// z pustą ilością i Subiekt księguje 0 sztuk korekty.
+/// </summary>
 public sealed record CorrectionLineDto(
     [property: JsonPropertyName("ean")] string? Ean,
     [property: JsonPropertyName("name_fallback")] string NameFallback,
-    [property: JsonPropertyName("quantity_change")] int QuantityChange,
+    [property: JsonPropertyName("quantity")] int QuantityChange,
     [property: JsonPropertyName("unit")] string Unit,
     [property: JsonPropertyName("unit_price_gross")] decimal UnitPriceGross,
     [property: JsonPropertyName("vat_rate")] decimal VatRate

@@ -576,11 +576,17 @@ public sealed class RealSferaSession : ISferaSession
     {
         dynamic position;
 
-        bool useTowar = !string.IsNullOrEmpty(ean) && (bool)Session.Towary.Istnieje(ean);
-
-        if (useTowar)
+        if (!string.IsNullOrEmpty(ean))
         {
-            dynamic towar = Session.Towary.Wczytaj(ean!);
+            // EAN podany - MUSI istnieć w Subiekcie. Cichy fallback do "usługi jednorazowej"
+            // maskowałby brak synchronizacji towaru: FS/PZ by się wystawił, ale magazyn
+            // by się nie ruszył dla tej pozycji - rozjazd księgowy.
+            if (!(bool)Session.Towary.Istnieje(ean))
+            {
+                throw new MissingProductException(ean);
+            }
+
+            dynamic towar = Session.Towary.Wczytaj(ean);
             try
             {
                 position = document.Pozycje.Dodaj(towar);
@@ -592,6 +598,8 @@ public sealed class RealSferaSession : ISferaSession
         }
         else
         {
+            // EAN pusty/null - świadomie "usługa jednorazowa" (np. wysyłka, korekta
+            // kwotowa zwrotu pieniężnego z InvoiceCorrectionIssuer).
             position = document.Pozycje.DodajUslugeJednorazowa();
             position.UslJednNazwa = name;
         }
