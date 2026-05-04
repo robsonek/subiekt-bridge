@@ -866,9 +866,22 @@ public sealed class RealSferaSession : ISferaSession
     /// </summary>
     private long ResolveOrCreateContractor(ContractorDto c)
     {
+        // 1. Lookup po NIP (firmy) - kontrahent moze juz byc w Subiekcie z innym Symbol-em
+        // (klient utworzyl recznie, lub byl zaimportowany z innego systemu). NIE
+        // nadpisujemy danych - zostawiamy adres wpisany w Subiekcie.
+        if (!string.IsNullOrEmpty(c.Nip))
+        {
+            var byNip = FindContractorIdByNip(c.Nip);
+            if (byNip.HasValue)
+            {
+                _logger.LogInformation("Contractor matched by NIP {Nip} -> kh_Id={Id}", c.Nip, byNip.Value);
+                return byNip.Value;
+            }
+        }
+
         string symbol = c.Symbol;
 
-        // Istnieje: UPDATE danych z biezacego payload (klient mogl sie przeprowadzic
+        // 2. Istnieje po Symbolu: UPDATE danych z biezacego payload (klient mogl sie przeprowadzic
         // / zmienic nazwisko - reuse symbol/Identyfikator, ale ksiegowosc oczekuje
         // aktualnych danych na FV). Update tylko gdy widoczna roznica - mniej write'ow.
         if ((bool)Session.Kontrahenci.Istnieje(symbol))
@@ -926,6 +939,46 @@ public sealed class RealSferaSession : ISferaSession
         if (changed)
         {
             try { existing.Zapisz(); } catch { /* read-only contractor (rzadkie) - skip */ }
+        }
+    }
+
+    /// <summary>
+    /// Lookup kh_Id po NIP. Subiekt trzyma NIP w adr__Ewid (TypAdresu=1, glowny adres)
+    /// JOIN z kh__Kontrahent. Nie ma kolumny NIP w samym kh__Kontrahent.
+    /// Zwraca pierwszy match (mogą być duplikaty - klient widzi sam i konsoliduje recznie).
+    /// </summary>
+    private long? FindContractorIdByNip(string nip)
+    {
+        try
+        {
+            var connStr = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder
+            {
+                DataSource = _options.Server,
+                InitialCatalog = _options.Database,
+                UserID = _options.DbUser,
+                Password = _options.DbPassword,
+                TrustServerCertificate = true,
+                ConnectTimeout = 10,
+            }.ToString();
+
+            using var conn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT TOP 1 k.kh_Id
+                FROM kh__Kontrahent k
+                JOIN adr__Ewid a ON a.adr_IdObiektu = k.kh_Id AND a.adr_TypAdresu = 1
+                WHERE a.adr_NIP = @nip
+                ORDER BY k.kh_Id ASC";
+            cmd.Parameters.AddWithValue("@nip", nip);
+            cmd.CommandTimeout = 10;
+            var result = cmd.ExecuteScalar();
+            return result == null || result == DBNull.Value ? null : Convert.ToInt64(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "FindContractorIdByNip({Nip}) failed", nip);
+            return null;
         }
     }
 
