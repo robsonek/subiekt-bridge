@@ -23,11 +23,14 @@ builder.Host.UseWindowsService(options =>
 // na świeżym Windowsie/Server 2016+ bez zainstalowanego dotnet dev-certs.
 EnsureSelfSignedCertificate(builder.Configuration);
 
+// Logi do absolute path obok exe - Windows Service ma WorkingDirectory=C:\Windows\System32,
+// wiec relative "logs/" trafialo poza C:\SubiektBridge\ i folder logs/ byl pusty.
+var logPath = Path.Combine(AppContext.BaseDirectory, "logs", "subiekt-bridge-.log");
 builder.Host.UseSerilog((ctx, cfg) => cfg
     .ReadFrom.Configuration(ctx.Configuration)
     .WriteTo.Console()
     .WriteTo.File(
-        path: "logs/subiekt-bridge-.log",
+        path: logPath,
         rollingInterval: RollingInterval.Day,
         retainedFileCountLimit: 30));
 
