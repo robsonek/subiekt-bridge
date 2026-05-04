@@ -203,20 +203,62 @@ public sealed class RealSferaSession : ISferaSession
             filter, sort, limit);
 
         dynamic kolekcja = Session.SuDokumentyManager.OtworzKolekcje(filter, sort);
-        int total = (int)kolekcja.Liczba;
-        int take = Math.Min(total, limit);
-        var items = new List<InvoiceQueryItemDto>(take);
 
-        for (int i = 0; i < take; i++)
+        // Liczba moze byc int albo Variant - cast defensywnie.
+        int total;
+        try { total = Convert.ToInt32(kolekcja.Liczba); }
+        catch (Exception ex)
         {
-            dynamic dok = kolekcja.Element[i];
-            try
+            _logger.LogError(ex, "QueryInvoices: nie mozna odczytac kolekcja.Liczba");
+            throw;
+        }
+        _logger.LogInformation("QueryInvoices: kolekcja zwrocila {Total} dokumentow (cap={Limit})", total, limit);
+
+        var items = new List<InvoiceQueryItemDto>(Math.Min(total, limit));
+
+        // Sfera eksportuje IEnumVARIANT (VBA For Each dziala) - uzywamy IEnumerable.
+        // Fallback: Element(i) w razie gdyby IEnumVARIANT nie byl wystawiony.
+        try
+        {
+            int seen = 0;
+            foreach (dynamic dok in (System.Collections.IEnumerable)kolekcja)
             {
-                items.Add(MapDokumentToQueryItem(dok));
+                if (seen >= limit) break;
+                seen++;
+                try
+                {
+                    items.Add(MapDokumentToQueryItem(dok));
+                }
+                catch (Exception mapEx)
+                {
+                    _logger.LogWarning(mapEx, "QueryInvoices: skip dokument (mapping error)");
+                }
+                finally
+                {
+                    try { dok.Zamknij(); } catch { /* best-effort cleanup */ }
+                }
             }
-            finally
+        }
+        catch (InvalidCastException)
+        {
+            // Fallback - indexed access przez Element jako method (VBA-style).
+            _logger.LogInformation("QueryInvoices: IEnumerable nie dostepne - fallback na Element(i)");
+            int take = Math.Min(total, limit);
+            for (int i = 0; i < take; i++)
             {
-                try { dok.Zamknij(); } catch { /* best-effort cleanup */ }
+                dynamic dok = kolekcja.Element(i);
+                try
+                {
+                    items.Add(MapDokumentToQueryItem(dok));
+                }
+                catch (Exception mapEx)
+                {
+                    _logger.LogWarning(mapEx, "QueryInvoices: skip dokument (mapping error)");
+                }
+                finally
+                {
+                    try { dok.Zamknij(); } catch { /* best-effort */ }
+                }
             }
         }
 
