@@ -100,6 +100,17 @@ public sealed class IdempotencyStore
         }
     }
 
+    public async Task DeleteAsync(string key, CancellationToken ct)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM idempotency WHERE key = $key";
+        cmd.Parameters.AddWithValue("$key", key);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task SaveAsync<TResponse>(string key, TResponse response, CancellationToken ct)
         where TResponse : class
     {

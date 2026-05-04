@@ -120,12 +120,22 @@ public sealed class InvoicesController : ControllerBase
         }
 
         // Idempotency: powtórny request z tym samym kluczem = ten sam response.
+        // ALE: weryfikujemy ze cached subiekt_id wciaz istnieje. Jesli user anulowal/usunal
+        // FV w Subiekcie (a nasz Idempotency-Key zostal ten sam, np. ponowny klik 'Wystaw FV'
+        // w UI), nie chcemy zwracac danych ducha - traktujemy request jako nowy.
         var cached = await _idempotency.TryGetAsync<InvoiceResponseDto>(idempotencyKey, ct);
         if (cached is not null)
         {
-            _logger.LogInformation("Idempotent replay for key {Key} -> invoice {Number}",
-                idempotencyKey, cached.Number);
-            return Ok(cached);
+            var stillExists = await _sfera.FindInvoiceByIdAsync(cached.SubiektId, ct);
+            if (stillExists is not null)
+            {
+                _logger.LogInformation("Idempotent replay for key {Key} -> invoice {Number}",
+                    idempotencyKey, cached.Number);
+                return Ok(cached);
+            }
+            _logger.LogWarning("Idempotent cache invalidated: subiekt_id={Id} ({Number}) nie istnieje juz w Subiekcie - traktujemy jako nowy request",
+                cached.SubiektId, cached.Number);
+            await _idempotency.DeleteAsync(idempotencyKey, ct);
         }
 
         // Walidacja totalsum vs Σ(line.qty * line.price_gross + shipping).
