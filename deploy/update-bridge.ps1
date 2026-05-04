@@ -35,12 +35,20 @@
 .PARAMETER KeepZip
     Zachowaj pobrany ZIP w %TEMP% (default: usuwany po update).
 
+.PARAMETER SelfContained
+    Pobierz wariant self-contained (~46 MB, runtime wbudowany w binarki).
+    Default: framework-dependent (~1.5 MB) - wymaga ASP.NET Core 10 Runtime (x86)
+    zainstalowanego na hoscie.
+
 .EXAMPLE
-    # Najprostsze - update do najnowszej wersji
+    # Najprostsze - update do najnowszej wersji (fxdep, maly download)
     .\update-bridge.ps1
 
     # Konkretna wersja
     .\update-bridge.ps1 -Tag v0.7.9
+
+    # Self-contained (gdy nie chcesz instalowac ASP.NET Core 10 Runtime osobno)
+    .\update-bridge.ps1 -SelfContained
 
     # Inny port (jesli zmieniles w appsettings)
     .\update-bridge.ps1 -Port 8443
@@ -48,12 +56,13 @@
 
 param(
     [string] $Tag,
-    [string] $InstallDir   = "C:\SubiektBridge",
-    [string] $ServiceName  = "SubiektBridge",
-    [int]    $Port         = 988,
+    [string] $InstallDir    = "C:\SubiektBridge",
+    [string] $ServiceName   = "SubiektBridge",
+    [int]    $Port          = 988,
     [string] $Token,
     [switch] $Force,
-    [switch] $KeepZip
+    [switch] $KeepZip,
+    [switch] $SelfContained
 )
 
 $ErrorActionPreference = "Stop"
@@ -100,7 +109,22 @@ if (-not $Tag) {
 }
 
 $Version = $Tag.TrimStart('v')
+$variant = if ($SelfContained) { "win-x86" } else { "win-x86-fxdep" }
 Write-Host "Target version: $Tag" -ForegroundColor Yellow
+Write-Host "Variant: $variant" -ForegroundColor Yellow
+
+# Dla fxdep ostrzezenie gdy ASP.NET Core 10 (x86) nie zainstalowany.
+# Self-contained nie wymaga niczego.
+if (-not $SelfContained) {
+    $aspnetX86 = "C:\Program Files (x86)\dotnet\shared\Microsoft.AspNetCore.App"
+    $hasAspnet10 = (Test-Path $aspnetX86) -and
+        (Get-ChildItem $aspnetX86 -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "10.*" })
+    if (-not $hasAspnet10) {
+        Write-Host "OSTRZEZENIE: nie wykryto ASP.NET Core 10 Runtime (x86)." -ForegroundColor Yellow
+        Write-Host "Pobierz: https://dotnet.microsoft.com/download/dotnet/10.0 (Runtime, x86, ASP.NET Core)" -ForegroundColor Yellow
+        Write-Host "Albo uzyj -SelfContained zeby pobrac wariant bez tej zaleznosci." -ForegroundColor Yellow
+    }
+}
 
 # Sprawdz obecna wersje (z health endpoint jesli serwis dziala)
 $currentVersion = $null
@@ -135,7 +159,7 @@ if ($currentVersion -and ($currentVersion -like "$Version*") -and (-not $Force))
 # ---------------------- Download ZIP ----------------------
 Write-Section "Pobieranie ZIP"
 
-$zipName = "SubiektBridge-$Version-win-x86.zip"
+$zipName = "SubiektBridge-$Version-$variant.zip"
 $zipUrl = "https://github.com/$Repo/releases/download/$Tag/$zipName"
 $zipPath = Join-Path $env:TEMP $zipName
 
