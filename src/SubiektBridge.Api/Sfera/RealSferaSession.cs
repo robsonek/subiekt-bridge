@@ -192,8 +192,15 @@ public sealed class RealSferaSession : ISferaSession
     private IReadOnlyList<InvoiceQueryItemDto> QueryInvoicesCore(InvoiceQueryRequestDto request)
     {
         var filter = BuildInvoiceQueryFilter(request);
-        var sort = "dok_DataWystawienia DESC, dok_Id DESC";
+        // Sfera dokumentacja nie udostepnia listy kolumn dok__Dokument; dok_Id jest
+        // bezpieczne (PK), data wystawienia ma rozne nazwy w roznych wersjach Subiekta
+        // (dok_DataWyst vs dok_DataWystawienia) - sortujemy po dok_Id DESC zeby dostac
+        // najnowsze (Subiekt nadaje rosnace ID).
+        var sort = "dok_Id DESC";
         var limit = Math.Clamp(request.Limit <= 0 ? 200 : request.Limit, 1, 1000);
+
+        _logger.LogInformation("QueryInvoices filter={Filter} sort={Sort} limit={Limit}",
+            filter, sort, limit);
 
         dynamic kolekcja = Session.SuDokumentyManager.OtworzKolekcje(filter, sort);
         int total = (int)kolekcja.Liczba;
@@ -225,9 +232,8 @@ public sealed class RealSferaSession : ISferaSession
     {
         var clauses = new List<string>();
 
-        // dok_Typ: enum z bazy Subiekta. Sprawdzane eksperymentalnie - typowe wartości:
-        // FS=1, KFS=4 (z gtaSubiektDokumentEnum: -2 i -26 to są stałe COM, nie wartości w dok_Typ).
-        // Bezpieczniej filtrować po dok_NumerPelny LIKE 'FS %' / 'KFS %' - to jest niezawodne.
+        // Filter po typie - dok_NumerPelny zaczyna sie od typu i spacji ("FS 1/2026").
+        // Bezpieczniej niz dok_Typ ktory ma rozne wartosci w roznych wersjach Subiekta.
         if (!string.IsNullOrWhiteSpace(r.Type))
         {
             var t = r.Type.Trim().ToUpperInvariant();
@@ -237,16 +243,20 @@ public sealed class RealSferaSession : ISferaSession
             }
         }
 
-        if (IsValidIsoDate(r.From)) clauses.Add($"dok_DataWystawienia >= '{r.From}'");
-        if (IsValidIsoDate(r.To))   clauses.Add($"dok_DataWystawienia <= '{r.To}'");
+        // Daty - dok_DataWyst (krotka nazwa kolumny w Subiekt GT, sprawdzona w bazach 1.x).
+        if (IsValidIsoDate(r.From)) clauses.Add($"dok_DataWyst >= '{r.From}'");
+        if (IsValidIsoDate(r.To))   clauses.Add($"dok_DataWyst <= '{r.To}'");
 
         if (!string.IsNullOrWhiteSpace(r.NotesContains))
             clauses.Add($"dok_Uwagi LIKE '%{EscapeSqlLiteral(r.NotesContains)}%'");
 
+        // NIP jest w dok_NabKodSlownik dla nabywcy (kod slownika kontrahenta = NIP dla firm).
         if (!string.IsNullOrWhiteSpace(r.Nip))
-            clauses.Add($"dok_NabKodSlownik = '{EscapeSqlLiteral(r.Nip)}'"); // NIP jest w polu kodSlownika
+            clauses.Add($"dok_NabKodSlownik = '{EscapeSqlLiteral(r.Nip)}'");
 
-        return clauses.Count == 0 ? "1=1" : string.Join(" AND ", clauses);
+        // Pusty filter jest valid w SQL Server (WHERE klauzula opcjonalna w OtworzKolekcje).
+        // Ale Sfera czasem wymaga niepustego - dok_Id > 0 zawsze prawdziwe i uzywa znanej kolumny.
+        return clauses.Count == 0 ? "dok_Id > 0" : string.Join(" AND ", clauses);
     }
 
     private static bool IsValidIsoDate(string? s) =>
@@ -264,7 +274,10 @@ public sealed class RealSferaSession : ISferaSession
         DateTimeOffset? issueDate = TryGetDate(dok, "DataWystawienia");
         long? contractorId = TryGetLong(dok, "KontrahentId");
         string? notes = TryGetString(dok, "Uwagi");
-        decimal? gross = TryGetDecimal(dok, "WartoscBrutto");
+        // WartoscBrutto na atrybucie SuDokument moze nie istniec - sprobuj kilku wariantow.
+        decimal? gross = TryGetDecimal(dok, "WartoscBrutto")
+            ?? TryGetDecimal(dok, "KwotaBrutto")
+            ?? TryGetDecimal(dok, "KwotaDoZaplaty");
 
         // NIP/Nazwa kontrahenta z attached struct - może być null gdy paragon imienny.
         string? nip = null, nazwa = null;
