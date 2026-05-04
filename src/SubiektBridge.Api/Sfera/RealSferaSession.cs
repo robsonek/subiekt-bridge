@@ -501,7 +501,19 @@ public sealed class RealSferaSession : ISferaSession
             }
 
             ApplyPayment(fs, request.Payment);
-            fs.Rozliczony = request.Payment.IsSettled;
+
+            // Rozliczony = true SUCK ujemny efekt dla PlatnoscKredyt: Sfera widzi
+            // PlatnoscPrzelewKwota=0 + Rozliczony=true i AUTOMATYCZNIE konwertuje
+            // PlatnoscKredyt na PlatnoscPrzelew (z dokumentacji Sfery
+            // SuDokument_PlatnoscPrzelewKwota.htm). FV ma wtedy "Zaplacono przelewem"
+            // zamiast wybranej formy ("Allegro Pay").
+            //
+            // Dla kredytu kupieckiego (Allegro Pay) Rozliczony=false - Allegro splaci
+            // kredyt po terminie. Dla Przelew/Gotowka/Karta - Rozliczony=true gdy
+            // is_settled (klient zaplacil bezposrednio).
+            bool isCredit = string.Equals(request.Payment.Attribute, "PlatnoscKredyt", StringComparison.Ordinal)
+                || string.Equals(request.Payment.Attribute, "PlatnoscRaty", StringComparison.Ordinal);
+            fs.Rozliczony = isCredit ? false : request.Payment.IsSettled;
             fs.Uwagi = request.Notes ?? string.Empty;
 
             fs.Zapisz();
