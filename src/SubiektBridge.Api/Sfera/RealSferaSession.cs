@@ -626,15 +626,7 @@ public sealed class RealSferaSession : ISferaSession
         {
             pz.LiczonyOdCenBrutto = true;
 
-            // MagazynOdbiorczyId opcjonalne - gdy null, Sfera użyje magazynu z sesji
-            // operatora (Subiekt.MagazynId), co dla typowego setup'u z 1 magazynem
-            // jest tym czego chcemy.
-            if (request.WarehouseSubiektId is int receiptWarehouseId)
-            {
-                pz.MagazynOdbiorczyId = receiptWarehouseId;
-            }
-
-            // Find-or-create kontrahenta (dostawcy). Symbol = "SUPPLIER-{id}" deterministyczny.
+            // Find-or-create kontrahenta (dostawcy).
             long contractorId = ResolveOrCreateContractor(request.Supplier);
             pz.KontrahentId = contractorId;
 
@@ -645,9 +637,13 @@ public sealed class RealSferaSession : ISferaSession
                 TrySet(pz, "DoDokumentuId", (int) request.SourceInvoiceSubiektId.Value);
             }
 
+            // Magazyn ustawiamy PER POZYCJA (SuPozycja.MagazynId) - to samo co FS w v0.7.18.
+            // SuDokument.MagazynOdbiorczyId jest dla MM (przesuniec miedzymagazynowych),
+            // dla PZ rzuca COM NotImplementedException.
+            int? perLineWarehouseId = request.WarehouseSubiektId;
             foreach (var line in request.Lines)
             {
-                AddLineToDocument(pz, line.Ean, line.NameFallback, line.Quantity, line.Unit, line.UnitPriceGross);
+                AddLineToDocument(pz, line.Ean, line.NameFallback, line.Quantity, line.Unit, line.UnitPriceGross, perLineWarehouseId);
             }
 
             pz.Uwagi = request.Notes ?? string.Empty;

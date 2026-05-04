@@ -160,9 +160,18 @@ public sealed class ReceiptsController : ControllerBase
         }
         catch (NotImplementedException ex)
         {
+            _logger.LogError(ex, "Receipt operation NotImplemented: {Message}", ex.Message);
             return StatusCode(StatusCodes.Status501NotImplemented, new ErrorResponseDto(
                 Code: "NOT_IMPLEMENTED",
                 Message: ex.Message));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Receipt operation failed unexpectedly");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponseDto(
+                Code: "INTERNAL_ERROR",
+                Message: ex.GetType().Name + ": " + ex.Message,
+                Details: new { stack = ex.StackTrace?.Split('\n').Take(10).ToArray() }));
         }
     }
 }
