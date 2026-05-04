@@ -78,9 +78,27 @@ function Fail($msg) {
     exit 1
 }
 
-# ---------------------- TLS 1.2 ----------------------
+# ---------------------- TLS 1.2 + ignore self-signed cert ----------------------
 # PowerShell 5.x (Windows PS) domyslnie uzywa TLS 1.0/1.1, GitHub wymaga 1.2+.
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Bridge ma self-signed cert (data/cert.pfx auto-generated). PS 5.x nie ma
+# -SkipCertificateCheck w Invoke-RestMethod - ustawiamy callback ktory
+# akceptuje wszystkie certy (bezpieczne bo mowimy z localhost).
+if (-not ("TrustAllCertsPolicy" -as [type])) {
+    Add-Type @"
+using System;
+using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
+public class TrustAllCertsPolicy : ICertificatePolicy {
+    public bool CheckValidationResult(ServicePoint sp, X509Certificate cert, WebRequest req, int problem) {
+        return true;
+    }
+}
+"@
+}
+[System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
 
 # ---------------------- Sanity ----------------------
 Write-Section "Sanity check"
@@ -142,7 +160,7 @@ if ($service.Status -eq 'Running') {
         if ($tokenForCheck) {
             $health = Invoke-RestMethod -Uri "https://localhost:$Port/api/v1/health" `
                 -Headers @{ 'X-Bridge-Token' = $tokenForCheck } `
-                -SkipCertificateCheck -UseBasicParsing -TimeoutSec 5
+                -UseBasicParsing -TimeoutSec 5
             $currentVersion = $health.bridge_version
             Write-Host "Aktualna wersja na zywo: $currentVersion" -ForegroundColor Yellow
         }
@@ -215,10 +233,22 @@ if (Test-Path $configPath) {
 # ---------------------- Replace files ----------------------
 Write-Section "Wymiana binariow"
 
+# Detect: GitHub Actions ZIP ma struct $extractDir/win-x86/* (z 1 subfolderem).
+# Jesli w extractDir jest tylko 1 folder - wejdz do niego (faktyczne pliki).
+# Bez tego Copy-Item kopiowal CALY folder do C:\SubiektBridge\win-x86\
+# zostawiajac stare binaria v0.7.x w C:\SubiektBridge\.
+$rootContents = @(Get-ChildItem -Path $extractDir)
+if ($rootContents.Count -eq 1 -and $rootContents[0].PSIsContainer) {
+    $sourceDir = $rootContents[0].FullName
+    Write-Host "INFO: ZIP ma subfolder '$($rootContents[0].Name)' - kopiuje z niego" -ForegroundColor DarkGray
+} else {
+    $sourceDir = $extractDir
+}
+
 # Skopiuj wszystko OPROCZ tych co zachowujemy.
 $excludes = @("appsettings.Production.json", "data", "logs", "*.log")
 
-Get-ChildItem -Path $extractDir -Exclude $excludes | ForEach-Object {
+Get-ChildItem -Path $sourceDir -Exclude $excludes | ForEach-Object {
     Copy-Item $_.FullName -Destination $InstallDir -Recurse -Force
 }
 
@@ -260,7 +290,7 @@ if (-not $tokenForCheck) {
 try {
     $health = Invoke-RestMethod -Uri "https://localhost:$Port/api/v1/health" `
         -Headers @{ 'X-Bridge-Token' = $tokenForCheck } `
-        -SkipCertificateCheck -UseBasicParsing -TimeoutSec 15
+        -UseBasicParsing -TimeoutSec 15
     Write-Host "OK: $($health.status) | bridge=$($health.bridge_version) | subiekt=$($health.subiekt_version) | sfera=$($health.sfera_session)" -ForegroundColor Green
     if ($health.last_error) {
         Write-Host "OSTRZEZENIE last_error: $($health.last_error)" -ForegroundColor Yellow
