@@ -626,6 +626,16 @@ public sealed class RealSferaSession : ISferaSession
         {
             pz.LiczonyOdCenBrutto = true;
 
+            // PZ wymaga MagazynOdbiorczyId NA DOKUMENCIE (mapuje na dok_MagId, sprawdzone
+            // SQL-em na istniejacych PZ klienta - wszystkie maja dok_MagId=1). FS ma
+            // asymetryczna walidacje - dla FS MagazynNadawczyId rzuca NotImplemented,
+            // wystarczy SuPozycja.MagazynId per pozycja (v0.7.18). Dla PZ przeciwnie -
+            // dokument musi miec magazyn, inaczej pz.Zapisz() pada z 0x80004005.
+            if (request.WarehouseSubiektId is int receiptWarehouseId)
+            {
+                pz.MagazynOdbiorczyId = receiptWarehouseId;
+            }
+
             // Find-or-create kontrahenta (dostawcy).
             long contractorId = ResolveOrCreateContractor(request.Supplier);
             pz.KontrahentId = contractorId;
@@ -637,13 +647,11 @@ public sealed class RealSferaSession : ISferaSession
                 TrySet(pz, "DoDokumentuId", (int) request.SourceInvoiceSubiektId.Value);
             }
 
-            // Magazyn ustawiamy PER POZYCJA (SuPozycja.MagazynId) - to samo co FS w v0.7.18.
-            // SuDokument.MagazynOdbiorczyId jest dla MM (przesuniec miedzymagazynowych),
-            // dla PZ rzuca COM NotImplementedException.
-            int? perLineWarehouseId = request.WarehouseSubiektId;
+            // Pozycje bez warehouseId - magazyn juz set na dokumencie. Per-line override
+            // niepotrzebne dla PZ (jednorodne, towar trafia do tego samego magazynu).
             foreach (var line in request.Lines)
             {
-                AddLineToDocument(pz, line.Ean, line.NameFallback, line.Quantity, line.Unit, line.UnitPriceGross, perLineWarehouseId);
+                AddLineToDocument(pz, line.Ean, line.NameFallback, line.Quantity, line.Unit, line.UnitPriceGross);
             }
 
             pz.Uwagi = request.Notes ?? string.Empty;
