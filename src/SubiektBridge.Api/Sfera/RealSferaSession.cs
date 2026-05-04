@@ -192,6 +192,12 @@ public sealed class RealSferaSession : ISferaSession
     private IReadOnlyList<InvoiceQueryItemDto> QueryInvoicesCore(InvoiceQueryRequestDto request)
     {
         var filter = BuildInvoiceQueryFilter(request);
+        // Type filter client-side (kolumna SQL nie istnieje dla NumerPelny).
+        // Pobieramy wiecej niz limit zeby po filtrze nie zabraklo, hard cap = limit*5.
+        var typeFilter = string.IsNullOrWhiteSpace(request.Type)
+            ? null
+            : request.Type.Trim().ToUpperInvariant();
+        var fetchCap = typeFilter != null ? Math.Min(request.Limit * 5, 1000) : Math.Min(request.Limit, 1000);
         // Sfera dokumentacja nie udostepnia listy kolumn dok__Dokument; dok_Id jest
         // bezpieczne (PK), data wystawienia ma rozne nazwy w roznych wersjach Subiekta
         // (dok_DataWyst vs dok_DataWystawienia) - sortujemy po dok_Id DESC zeby dostac
@@ -223,11 +229,15 @@ public sealed class RealSferaSession : ISferaSession
             int seen = 0;
             foreach (dynamic dok in (System.Collections.IEnumerable)kolekcja)
             {
-                if (seen >= limit) break;
+                if (seen >= fetchCap || items.Count >= limit) break;
                 seen++;
                 try
                 {
-                    items.Add(MapDokumentToQueryItem(dok));
+                    var mapped = MapDokumentToQueryItem(dok);
+                    if (typeFilter == null || mapped.Type == typeFilter)
+                    {
+                        items.Add(mapped);
+                    }
                 }
                 catch (Exception mapEx)
                 {
@@ -241,15 +251,18 @@ public sealed class RealSferaSession : ISferaSession
         }
         catch (InvalidCastException)
         {
-            // Fallback - indexed access przez Element jako method (VBA-style).
             _logger.LogInformation("QueryInvoices: IEnumerable nie dostepne - fallback na Element(i)");
-            int take = Math.Min(total, limit);
-            for (int i = 0; i < take; i++)
+            int take = Math.Min(total, fetchCap);
+            for (int i = 0; i < take && items.Count < limit; i++)
             {
                 dynamic dok = kolekcja.Element(i);
                 try
                 {
-                    items.Add(MapDokumentToQueryItem(dok));
+                    var mapped = MapDokumentToQueryItem(dok);
+                    if (typeFilter == null || mapped.Type == typeFilter)
+                    {
+                        items.Add(mapped);
+                    }
                 }
                 catch (Exception mapEx)
                 {
@@ -274,30 +287,20 @@ public sealed class RealSferaSession : ISferaSession
     {
         var clauses = new List<string>();
 
-        // Filter po typie - dok_NumerPelny zaczyna sie od typu i spacji ("FS 1/2026").
-        // Bezpieczniej niz dok_Typ ktory ma rozne wartosci w roznych wersjach Subiekta.
-        if (!string.IsNullOrWhiteSpace(r.Type))
-        {
-            var t = r.Type.Trim().ToUpperInvariant();
-            if (t == "FS" || t == "KFS" || t == "PA" || t == "PZ")
-            {
-                clauses.Add($"dok_NumerPelny LIKE '{t} %'");
-            }
-        }
+        // Type filter NIE w SQL: dok_NumerPelny to atrybut COM (computed), nie kolumna w
+        // dok__Dokument - SQL "LIKE 'FS %'" zwraca 0x80040E14. Filtrujemy client-side
+        // (po MapDokumentToQueryItem) na bazie response.number.
 
-        // Daty - dok_DataWyst (krotka nazwa kolumny w Subiekt GT, sprawdzona w bazach 1.x).
+        // Daty - dok_DataWyst (krotka nazwa kolumny w Subiekt GT).
         if (IsValidIsoDate(r.From)) clauses.Add($"dok_DataWyst >= '{r.From}'");
         if (IsValidIsoDate(r.To))   clauses.Add($"dok_DataWyst <= '{r.To}'");
 
         if (!string.IsNullOrWhiteSpace(r.NotesContains))
             clauses.Add($"dok_Uwagi LIKE '%{EscapeSqlLiteral(r.NotesContains)}%'");
 
-        // NIP jest w dok_NabKodSlownik dla nabywcy (kod slownika kontrahenta = NIP dla firm).
         if (!string.IsNullOrWhiteSpace(r.Nip))
             clauses.Add($"dok_NabKodSlownik = '{EscapeSqlLiteral(r.Nip)}'");
 
-        // Pusty filter jest valid w SQL Server (WHERE klauzula opcjonalna w OtworzKolekcje).
-        // Ale Sfera czasem wymaga niepustego - dok_Id > 0 zawsze prawdziwe i uzywa znanej kolumny.
         return clauses.Count == 0 ? "dok_Id > 0" : string.Join(" AND ", clauses);
     }
 
