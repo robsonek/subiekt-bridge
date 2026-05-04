@@ -21,6 +21,12 @@ public interface ISferaSession : IAsyncDisposable
         InvoiceCorrectionRequestDto request,
         CancellationToken ct);
 
+    /// <summary>
+    /// Wystaw PZ - Przyjęcie Zewnętrzne. Dodaje towar na magazyn z ceną zakupu (dropshipping).
+    /// Powiązanie z FS (jeśli istnieje) przez DoDokumentuId w request.SourceInvoiceSubiektId.
+    /// </summary>
+    Task<InvoiceResponseDto> CreateReceiptAsync(ReceiptIssueRequestDto request, CancellationToken ct);
+
     /// <summary>Znajdź towar po EAN. Zwraca null gdy nie istnieje.</summary>
     Task<ProductDto?> FindProductByEanAsync(string ean, CancellationToken ct);
 

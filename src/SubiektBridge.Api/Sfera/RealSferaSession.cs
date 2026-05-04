@@ -196,6 +196,15 @@ public sealed class RealSferaSession : ISferaSession
         {
             fs.LiczonyOdCenBrutto = true;
 
+            // MagazynNadawczyId = magazyn z którego sprzedajemy. Bez tego FS NIE zmniejsza
+            // stanu magazynowego - po PZ + FS magazyn rośnie zamiast zerować się. WarehouseId
+            // jest opcjonalne w request (gdy null - FS bez magazynu, dla scenariuszy gdzie
+            // klient nie używa magazynu Subiekta).
+            if (request.WarehouseSubiektId is int warehouseId)
+            {
+                fs.MagazynNadawczyId = warehouseId;
+            }
+
             long contractorId = ResolveOrCreateContractor(request.Contractor);
             fs.KontrahentId = contractorId;
 
@@ -256,6 +265,70 @@ public sealed class RealSferaSession : ISferaSession
         CancellationToken ct)
     {
         return RunOnStaAsync(() => CreateCorrectionCore(sourceSubiektId, request), ct);
+    }
+
+    public Task<InvoiceResponseDto> CreateReceiptAsync(ReceiptIssueRequestDto request, CancellationToken ct)
+    {
+        return RunOnStaAsync(() => CreateReceiptCore(request), ct);
+    }
+
+    private InvoiceResponseDto CreateReceiptCore(ReceiptIssueRequestDto request)
+    {
+        // PZ - Przyjęcie Zewnętrzne. Dokument magazynowy (zwiększa stan).
+        // Dostawca (request.Supplier) jest kontrahentem; magazyn = MagazynOdbiorczyId
+        // (do którego trafia towar). Pozycje używają ceny zakupu z OrderItem.purchase_price.
+        dynamic pz = Session.SuDokumentyManager.DodajPZ();
+        try
+        {
+            pz.LiczonyOdCenBrutto = true;
+            pz.MagazynOdbiorczyId = request.WarehouseSubiektId;
+
+            // Find-or-create kontrahenta (dostawcy). Symbol = "SUPPLIER-{id}" deterministyczny.
+            long contractorId = ResolveOrCreateContractor(request.Supplier);
+            pz.KontrahentId = contractorId;
+
+            // Powiązanie z FS jeśli istnieje (workflow: PZ przed FS = sourceSubiektId null;
+            // PZ po FS = sourceSubiektId ustawione, Subiekt linkuje dokumenty).
+            if (request.SourceInvoiceSubiektId.HasValue)
+            {
+                TrySet(pz, "DoDokumentuId", (int) request.SourceInvoiceSubiektId.Value);
+            }
+
+            foreach (var line in request.Lines)
+            {
+                AddLineToDocument(pz, line.Ean, line.NameFallback, line.Quantity, line.Unit, line.UnitPriceGross);
+            }
+
+            pz.Uwagi = request.Notes ?? string.Empty;
+
+            pz.Zapisz();
+
+            long subiektId = ToInt64(pz.Identyfikator);
+            string number = (string)pz.NumerPelny;
+            DateTimeOffset issuedAt = DateTimeOffset.UtcNow;
+            _lastInvoiceAt = issuedAt;
+
+            string? pdfBase64 = TryGeneratePdf(pz, subiektId);
+
+            // PZ to dokument magazynowy - WartoscBrutto opcjonalnie (nie wszystkie wersje
+            // Subiekta wystawiają to pole na PZ). Jeśli brak - liczymy z lines payload.
+            decimal? grossOpt = TryReadDecimal(pz, "WartoscBrutto");
+            decimal gross = grossOpt ?? request.Lines.Sum(l => l.UnitPriceGross * l.Quantity);
+
+            return new InvoiceResponseDto(
+                Id: $"sub_{subiektId}",
+                SubiektId: subiektId,
+                Number: number,
+                IssuedAt: issuedAt,
+                ContractorSubiektId: contractorId,
+                Totals: new InvoiceTotalsDto(Net: null, Vat: null, Gross: gross),
+                PdfUrl: null,
+                PdfBase64: pdfBase64);
+        }
+        finally
+        {
+            TryClose(pz);
+        }
     }
 
     private InvoiceResponseDto CreateCorrectionCore(long sourceSubiektId, InvoiceCorrectionRequestDto request)

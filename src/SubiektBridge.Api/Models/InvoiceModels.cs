@@ -18,7 +18,8 @@ public sealed record InvoiceRequestDto(
     [property: JsonPropertyName("shipping")] ShippingDto Shipping,
     [property: JsonPropertyName("totals")] InvoiceTotalsDto Totals,
     [property: JsonPropertyName("external_reference")] string ExternalReference,
-    [property: JsonPropertyName("notes")] string Notes
+    [property: JsonPropertyName("notes")] string Notes,
+    [property: JsonPropertyName("warehouse_subiekt_id")] int? WarehouseSubiektId = null
 );
 
 public sealed record InvoiceCorrectionRequestDto(
@@ -100,6 +101,22 @@ public sealed record InvoiceResponseDto(
     [property: JsonPropertyName("totals")] InvoiceTotalsDto Totals,
     [property: JsonPropertyName("pdf_url")] string? PdfUrl,
     [property: JsonPropertyName("pdf_base64")] string? PdfBase64
+);
+
+// ----------------------------- Receipt (PZ) -----------------------------
+
+/// <summary>
+/// PZ - Przyjęcie Zewnętrzne. Dropshipping flow: dodaje towar na magazyn z ceną zakupu
+/// po zakupie u dostawcy. Jedno PZ per dostawca (unique supplier per zamówienie).
+/// </summary>
+public sealed record ReceiptIssueRequestDto(
+    [property: JsonPropertyName("issue_date")] string IssueDate,
+    [property: JsonPropertyName("warehouse_subiekt_id")] int WarehouseSubiektId,
+    [property: JsonPropertyName("supplier")] ContractorDto Supplier,
+    [property: JsonPropertyName("lines")] IReadOnlyList<LineDto> Lines,
+    [property: JsonPropertyName("source_invoice_subiekt_id")] long? SourceInvoiceSubiektId,
+    [property: JsonPropertyName("external_reference")] string ExternalReference,
+    [property: JsonPropertyName("notes")] string Notes
 );
 
 // ----------------------------- Reference -----------------------------

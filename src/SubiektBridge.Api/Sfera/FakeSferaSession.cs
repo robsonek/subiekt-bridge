@@ -80,6 +80,29 @@ public sealed class FakeSferaSession : ISferaSession
             IsActive: true));
     }
 
+    public Task<InvoiceResponseDto> CreateReceiptAsync(ReceiptIssueRequestDto request, CancellationToken ct)
+    {
+        var counter = Interlocked.Increment(ref _invoiceCounter);
+        var year = DateTimeOffset.UtcNow.Year;
+        _lastInvoiceAt = DateTimeOffset.UtcNow;
+
+        decimal grossSum = 0m;
+        foreach (var line in request.Lines)
+        {
+            grossSum += line.UnitPriceGross * line.Quantity;
+        }
+
+        return Task.FromResult(new InvoiceResponseDto(
+            Id: $"fake_pz_{counter:D6}",
+            SubiektId: 3_000_000 + counter,
+            Number: $"PZ {counter}/{year}",
+            IssuedAt: _lastInvoiceAt.Value,
+            ContractorSubiektId: HashString(request.Supplier.Symbol) % 100000,
+            Totals: new InvoiceTotalsDto(Net: grossSum, Vat: 0m, Gross: grossSum),
+            PdfUrl: $"/api/v1/receipts/fake_pz_{counter:D6}/pdf",
+            PdfBase64: null));
+    }
+
     public Task<ContractorDto?> FindContractorByNipAsync(string nip, CancellationToken ct)
     {
         // Mock: konkretny NIP testowy "5252344078" istnieje.
