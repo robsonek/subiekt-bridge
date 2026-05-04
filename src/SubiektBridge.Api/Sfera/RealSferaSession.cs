@@ -648,10 +648,40 @@ public sealed class RealSferaSession : ISferaSession
         catch { return null; }
     }
 
+    private int _consecutiveCloseFailures = 0;
+    private const int CloseFailureThreshold = 3;
+
     private void TryClose(dynamic obj)
     {
-        try { obj.Zamknij(); } catch { /* obiekt już zamknięty albo metoda niedostępna */ }
-        try { Marshal.ReleaseComObject(obj); } catch { /* ignore */ }
+        bool zamknijFailed = false;
+
+        try
+        {
+            obj.Zamknij();
+            _consecutiveCloseFailures = 0;
+        }
+        catch (Exception ex)
+        {
+            zamknijFailed = true;
+            _consecutiveCloseFailures++;
+            _logger.LogWarning(ex,
+                "Sfera Zamknij() rzucił ({Count}/{Threshold}). Sesja może być w nieczystym stanie.",
+                _consecutiveCloseFailures, CloseFailureThreshold);
+        }
+
+        try { Marshal.ReleaseComObject(obj); } catch { /* COM RCW already released - bezpieczne */ }
+
+        // Po N pod rząd nieudanych Zamknij() resetujemy sesję - kolejny dokument w skażonej
+        // sesji mógłby dziedziczyć stan poprzedniego (udokumentowane jako nieprzewidywalne
+        // zachowanie Sfery).
+        if (zamknijFailed && _consecutiveCloseFailures >= CloseFailureThreshold)
+        {
+            _logger.LogError(
+                "{Threshold} consecutive Zamknij() failures - resetuję sesję Sfery.",
+                CloseFailureThreshold);
+            ResetSessionOnSta();
+            _consecutiveCloseFailures = 0;
+        }
     }
 
     /// <summary>

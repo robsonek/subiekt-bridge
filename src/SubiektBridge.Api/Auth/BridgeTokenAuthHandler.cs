@@ -1,4 +1,6 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.Extensions.Options;
@@ -69,20 +71,29 @@ public sealed class BridgeTokenAuthHandler : AuthenticationHandler<BridgeTokenAu
         return Task.FromResult(AuthenticateResult.Success(ticket));
     }
 
-    /// <summary>Constant-time string compare żeby uniknąć timing attacks na token.</summary>
+    /// <summary>
+    /// Constant-time porównanie token-a w bytes (UTF-8). Używa <see cref="CryptographicOperations.FixedTimeEquals"/>
+    /// na buforze padded do max(provided, expected). Length-based early-return byłby
+    /// timing oracle ujawniający długość tokena (atakujący mógłby bruteforce'ować długość
+    /// bardziej deterministycznie).
+    /// </summary>
     private static bool CryptographicEquals(string a, string b)
     {
-        if (a.Length != b.Length)
-        {
-            return false;
-        }
+        var bytesA = Encoding.UTF8.GetBytes(a);
+        var bytesB = Encoding.UTF8.GetBytes(b);
+        var maxLen = Math.Max(bytesA.Length, bytesB.Length);
 
-        var diff = 0;
-        for (var i = 0; i < a.Length; i++)
-        {
-            diff |= a[i] ^ b[i];
-        }
+        // Pad obu do tej samej długości - FixedTimeEquals wymaga równych span'ów.
+        Span<byte> paddedA = stackalloc byte[maxLen];
+        Span<byte> paddedB = stackalloc byte[maxLen];
+        bytesA.CopyTo(paddedA);
+        bytesB.CopyTo(paddedB);
 
-        return diff == 0;
+        var equal = CryptographicOperations.FixedTimeEquals(paddedA, paddedB);
+        // Length mismatch musi też dać false - po padding-u, dłuższy token miał dane na pozycjach
+        // które krótszy ma jako zera. Jeśli a.Length != b.Length, FixedTimeEquals zwróci false
+        // (chyba że przypadkowo padding zerami zgadza się z dalszą częścią dłuższego - niemożliwe
+        // dla "rzeczywistych" tokenów ASCII/Base64 nie kończących się \0).
+        return equal && bytesA.Length == bytesB.Length;
     }
 }
