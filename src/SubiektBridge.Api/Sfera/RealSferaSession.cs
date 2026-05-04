@@ -452,6 +452,27 @@ public sealed class RealSferaSession : ISferaSession
 
     private InvoiceResponseDto CreateInvoiceCore(InvoiceRequestDto request)
     {
+        // Anti-duplicate: jesli w Subiekcie juz jest FS z tym external_reference w Uwagach,
+        // odmow wystawienia. Idempotency-Key cache w Bridge zalapie powtorzony request z tym
+        // samym kluczem, ale jak klient wyśle ten sam payload pod innym kluczem (np. retry
+        // z innym job ID, debug curl) - bez tej kontroli powstanie duplikat w ksiegowosci.
+        var existingId = FindExistingInvoiceByReference(request.ExternalReference, "FS");
+        if (existingId.HasValue)
+        {
+            dynamic existing = Session.SuDokumentyManager.WczytajDokument(existingId.Value);
+            try
+            {
+                throw new DuplicateInvoiceException(
+                    existingId.Value,
+                    (string)existing.NumerPelny ?? "",
+                    request.ExternalReference);
+            }
+            finally
+            {
+                try { existing.Zamknij(); } catch { /* cleanup */ }
+            }
+        }
+
         dynamic fs = Session.SuDokumentyManager.DodajFS();
         try
         {
@@ -826,6 +847,59 @@ public sealed class RealSferaSession : ISferaSession
         {
             TryClose(kh);
         }
+    }
+
+    /// <summary>
+    /// Szuka istniejacego dokumentu w Subiekcie po external_reference w polu Uwagi.
+    /// Zwraca subiekt_id najnowszego pasujacego dokumentu typu zgodnego z typePrefix
+    /// (np. "FS"), lub null gdy brak. SQL LIKE skanuje dok_Uwagi - dla typowej bazy
+    /// (kilkadziesiat tysiecy FS) szybkie. Sfera dodatkowo filtruje po magazynie
+    /// operatora.
+    /// </summary>
+    private long? FindExistingInvoiceByReference(string externalReference, string typePrefix)
+    {
+        if (string.IsNullOrWhiteSpace(externalReference))
+        {
+            return null;
+        }
+
+        var escaped = externalReference.Replace("'", "''");
+        var filter = $"dok_Uwagi LIKE '%{escaped}%'";
+
+        try
+        {
+            dynamic kolekcja = Session.SuDokumentyManager.OtworzKolekcje(filter, "dok_Id DESC");
+            int total = Convert.ToInt32(kolekcja.Liczba);
+            if (total == 0)
+            {
+                return null;
+            }
+
+            foreach (dynamic dok in (System.Collections.IEnumerable)kolekcja)
+            {
+                try
+                {
+                    string number = (string)dok.NumerPelny ?? "";
+                    if (number.StartsWith(typePrefix + " ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return ToInt64(dok.Identyfikator);
+                    }
+                }
+                finally
+                {
+                    try { dok.Zamknij(); } catch { /* cleanup */ }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // Anti-duplicate check zawiodl (np. Sfera SQL error). Logujemy i kontynuujemy
+            // jakby duplikatu nie bylo - lepiej miec ewentualny duplikat niz zablokowac
+            // legitymowane wystawianie FV.
+            _logger.LogWarning(ex, "FindExistingInvoiceByReference failed for ref='{Ref}'; assuming no duplicate", externalReference);
+        }
+
+        return null;
     }
 
     private void AddLineToDocument(dynamic document, string? ean, string name, int quantity, string unit, decimal unitPriceGross, int? warehouseId = null)

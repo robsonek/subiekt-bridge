@@ -4,6 +4,7 @@ using SubiektBridge.Api.Idempotency;
 using SubiektBridge.Api.Models;
 using SubiektBridge.Api.Sfera;
 using MissingProductException = SubiektBridge.Api.Sfera.MissingProductException;
+using DuplicateInvoiceException = SubiektBridge.Api.Sfera.DuplicateInvoiceException;
 
 namespace SubiektBridge.Api.Controllers;
 
@@ -147,6 +148,21 @@ public sealed class InvoicesController : ControllerBase
                 Message: ex.Message,
                 Details: new { missing_eans = new[] { ex.MissingEan } }));
         }
+        catch (DuplicateInvoiceException ex)
+        {
+            _logger.LogWarning("Duplicate invoice blocked: ref={Ref}, existing={Number} (subiekt_id={Id})",
+                ex.ExternalReference, ex.ExistingNumber, ex.ExistingSubiektId);
+            return Conflict(new ErrorResponseDto(
+                Code: "DUPLICATE_INVOICE",
+                Message: ex.Message,
+                Details: new
+                {
+                    existing_subiekt_id = ex.ExistingSubiektId,
+                    existing_number = ex.ExistingNumber,
+                    existing_bridge_id = $"sub_{ex.ExistingSubiektId}",
+                    external_reference = ex.ExternalReference,
+                }));
+        }
         catch (NotImplementedException ex)
         {
             _logger.LogError(ex, "Invoice operation NotImplemented: {Message}", ex.Message);
@@ -203,6 +219,21 @@ public sealed class InvoicesController : ControllerBase
                 Code: "MISSING_PRODUCT",
                 Message: ex.Message,
                 Details: new { missing_eans = new[] { ex.MissingEan } }));
+        }
+        catch (DuplicateInvoiceException ex)
+        {
+            _logger.LogWarning("Duplicate invoice blocked: ref={Ref}, existing={Number} (subiekt_id={Id})",
+                ex.ExternalReference, ex.ExistingNumber, ex.ExistingSubiektId);
+            return Conflict(new ErrorResponseDto(
+                Code: "DUPLICATE_INVOICE",
+                Message: ex.Message,
+                Details: new
+                {
+                    existing_subiekt_id = ex.ExistingSubiektId,
+                    existing_number = ex.ExistingNumber,
+                    existing_bridge_id = $"sub_{ex.ExistingSubiektId}",
+                    external_reference = ex.ExternalReference,
+                }));
         }
         catch (NotImplementedException ex)
         {
