@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
-using System.Text;
 using SubiektBridge.Api.Configuration;
 using SubiektBridge.Api.Models;
 
@@ -13,7 +12,9 @@ namespace SubiektBridge.Api.Sfera;
 ///
 /// Architektura:
 /// - <c>dynamic</c> + <c>Type.GetTypeFromProgID("InsERT.GT")</c> - late binding, bez TLB.
-/// - Encoding pól tekstowych: UTF-8 -> Windows-1250 (CP1250 wymaga CodePagesEncodingProvider).
+/// - Stringi przekazujemy do COM jako standardowe .NET <c>string</c> (UTF-16). COM marshaler
+///   konwertuje je do <c>BSTR</c> automatycznie. Subiekt wewnętrznie konwertuje na CP1250
+///   przy zapisie do MSSQL - my się tym nie zajmujemy.
 /// - Dedykowany STA thread + kolejka <see cref="BlockingCollection{T}"/> dla wszystkich
 ///   wywołań COM. KLUCZOWE: <c>InsERT.GT</c> jest STA (apartment threaded), a thread pool
 ///   ASP.NET Core jest MTA. Próba <c>Activator.CreateInstance</c> z MTA threada na STA-only
@@ -31,7 +32,6 @@ public sealed class RealSferaSession : ISferaSession
 {
     private readonly SubiektOptions _options;
     private readonly ILogger<RealSferaSession> _logger;
-    private readonly Encoding _cp1250;
     private readonly Thread _staThread;
     private readonly BlockingCollection<Action> _workQueue = new();
     private dynamic? _subiekt;
@@ -44,9 +44,6 @@ public sealed class RealSferaSession : ISferaSession
     {
         _options = options;
         _logger = logger;
-
-        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
-        _cp1250 = Encoding.GetEncoding(options.Encoding);
 
         _staThread = new Thread(WorkerLoop)
         {
@@ -219,7 +216,7 @@ public sealed class RealSferaSession : ISferaSession
 
             ApplyPayment(fs, request.Payment);
             fs.Rozliczony = request.Payment.IsSettled;
-            fs.Uwagi = EncodeForSfera(request.Notes ?? string.Empty);
+            fs.Uwagi = request.Notes ?? string.Empty;
 
             fs.Zapisz();
 
@@ -230,10 +227,12 @@ public sealed class RealSferaSession : ISferaSession
 
             string? pdfBase64 = TryGeneratePdf(fs, subiektId);
 
-            // Net/VAT po zapisaniu - Sfera wylicza bo LiczonyOdCenBrutto=true
-            decimal net = TryReadDecimal(fs, "WartoscNetto") ?? Math.Round(request.Totals.Gross / 1.23m, 2);
-            decimal vat = TryReadDecimal(fs, "WartoscPodatku") ?? (request.Totals.Gross - net);
-            decimal gross = TryReadDecimal(fs, "WartoscBrutto") ?? request.Totals.Gross;
+            // Net/VAT po zapisaniu - Sfera wylicza bo LiczonyOdCenBrutto=true.
+            // Brak WartoscBrutto po Zapisz() to zaskoczenie - FV jest w bazie ale czytanie pól
+            // failuje (zmiana nazw w wersji Subiekta? błąd COM?). Lepszy hard fail niż zwracać
+            // Laravel-owi totals z requestu, bo Subiekt mógł wyliczyć inaczej (mieszane VAT,
+            // zaokrąglenia per pozycja).
+            var totals = ReadDocumentTotalsOrThrow(fs, subiektId, number);
 
             return new InvoiceResponseDto(
                 Id: $"sub_{subiektId}",
@@ -241,7 +240,7 @@ public sealed class RealSferaSession : ISferaSession
                 Number: number,
                 IssuedAt: issuedAt,
                 ContractorSubiektId: contractorId,
-                Totals: new InvoiceTotalsDto(net, vat, gross),
+                Totals: totals,
                 PdfUrl: null,
                 PdfBase64: pdfBase64);
         }
@@ -276,7 +275,7 @@ public sealed class RealSferaSession : ISferaSession
             {
                 if (!string.IsNullOrEmpty(request.SourceInvoiceNumber))
                 {
-                    kfs.DoDokumentuNumerPelny = EncodeForSfera(request.SourceInvoiceNumber);
+                    kfs.DoDokumentuNumerPelny = request.SourceInvoiceNumber;
                 }
                 if (!string.IsNullOrEmpty(request.SourceInvoiceDate))
                 {
@@ -295,7 +294,7 @@ public sealed class RealSferaSession : ISferaSession
                     unitPriceGross: line.UnitPriceGross);
             }
 
-            kfs.Uwagi = EncodeForSfera($"Korekta: {request.Reason} | ref: {request.ExternalReference}");
+            kfs.Uwagi = $"Korekta: {request.Reason} | ref: {request.ExternalReference}";
 
             kfs.Zapisz();
 
@@ -306,9 +305,8 @@ public sealed class RealSferaSession : ISferaSession
 
             string? pdfBase64 = TryGeneratePdf(kfs, subiektId);
 
-            decimal net = TryReadDecimal(kfs, "WartoscNetto") ?? 0m;
-            decimal vat = TryReadDecimal(kfs, "WartoscPodatku") ?? 0m;
-            decimal gross = TryReadDecimal(kfs, "WartoscBrutto") ?? 0m;
+            // Patrz komentarz w CreateInvoiceCore - hard fail przy braku totals.
+            var totals = ReadDocumentTotalsOrThrow(kfs, subiektId, number);
 
             return new InvoiceResponseDto(
                 Id: $"sub_{subiektId}",
@@ -316,7 +314,7 @@ public sealed class RealSferaSession : ISferaSession
                 Number: number,
                 IssuedAt: issuedAt,
                 ContractorSubiektId: 0,
-                Totals: new InvoiceTotalsDto(net, vat, gross),
+                Totals: totals,
                 PdfUrl: null,
                 PdfBase64: pdfBase64);
         }
@@ -326,13 +324,40 @@ public sealed class RealSferaSession : ISferaSession
         }
     }
 
+    /// <summary>
+    /// Odczytuje totals (net/vat/gross) z zapisanego dokumentu. Hard fail jeśli WartoscBrutto
+    /// nieczytelne - FV jest w bazie Subiekta ale Bridge nie może wiarygodnie raportować kwot.
+    /// Lepszy 5xx niż zwracać Laravelowi nieprawdziwe sumy z request payloadu (Subiekt mógł
+    /// wyliczyć inaczej dla mieszanych stawek VAT lub zaokrągleń per pozycja).
+    /// </summary>
+    private InvoiceTotalsDto ReadDocumentTotalsOrThrow(dynamic document, long subiektId, string number)
+    {
+        decimal? grossOpt = TryReadDecimal(document, "WartoscBrutto");
+        if (grossOpt is not decimal gross)
+        {
+            _logger.LogError(
+                "Sfera nie zwróciła WartoscBrutto po Zapisz() dla {Number} (subiekt_id={SubiektId}). " +
+                "FV jest w bazie Subiekta - sprawdź ręcznie.", number, subiektId);
+            throw new InvalidOperationException(
+                $"Nie można odczytać WartoscBrutto dla zapisanego dokumentu {number}. " +
+                "Możliwa zmiana nazwy pola w wersji Subiekta. FV jest w bazie - wymaga ręcznego sprawdzenia.");
+        }
+
+        decimal? net = TryReadDecimal(document, "WartoscNetto");
+        decimal? vat = TryReadDecimal(document, "WartoscPodatku");
+
+        // Net/Vat są pomocnicze (Subiekt sam wylicza, my je tylko persystujemy w Laravel
+        // dla audytu). Brak nie zatrzymuje flow - zostawiamy null.
+        return new InvoiceTotalsDto(net, vat, gross);
+    }
+
     // -------------------------- Lookup --------------------------
 
     public Task<ProductDto?> FindProductByEanAsync(string ean, CancellationToken ct)
     {
         return RunOnStaAsync<ProductDto?>(() =>
         {
-            string symbol = EncodeForSfera(ean);
+            string symbol = ean;
             if (!(bool)Session.Towary.Istnieje(symbol))
             {
                 return null;
@@ -361,7 +386,7 @@ public sealed class RealSferaSession : ISferaSession
     {
         return RunOnStaAsync<ContractorDto?>(() =>
         {
-            string symbol = EncodeForSfera(nip);
+            string symbol = nip;
             if (!(bool)Session.Kontrahenci.Istnieje(symbol))
             {
                 return null;
@@ -421,7 +446,7 @@ public sealed class RealSferaSession : ISferaSession
     /// </summary>
     private long ResolveOrCreateContractor(ContractorDto c)
     {
-        string symbol = EncodeForSfera(c.Symbol);
+        string symbol = c.Symbol;
 
         if ((bool)Session.Kontrahenci.Istnieje(symbol))
         {
@@ -441,17 +466,17 @@ public sealed class RealSferaSession : ISferaSession
         {
             kh.Osoba = c.IsPerson;
             kh.Symbol = symbol;
-            kh.Nazwa = EncodeForSfera(c.Name);
-            kh.NazwaPelna = EncodeForSfera(c.FullName ?? c.Name);
+            kh.Nazwa = c.Name;
+            kh.NazwaPelna = c.FullName ?? c.Name;
 
             if (!string.IsNullOrEmpty(c.Nip))
             {
                 kh.NIP = c.Nip;
             }
 
-            kh.Miejscowosc = EncodeForSfera(c.Address.City);
+            kh.Miejscowosc = c.Address.City;
             kh.KodPocztowy = c.Address.PostCode;
-            kh.Ulica = EncodeForSfera(c.Address.Street);
+            kh.Ulica = c.Address.Street;
 
             if (!string.IsNullOrEmpty(c.Email))
             {
@@ -471,11 +496,11 @@ public sealed class RealSferaSession : ISferaSession
     {
         dynamic position;
 
-        bool useTowar = !string.IsNullOrEmpty(ean) && (bool)Session.Towary.Istnieje(EncodeForSfera(ean));
+        bool useTowar = !string.IsNullOrEmpty(ean) && (bool)Session.Towary.Istnieje(ean);
 
         if (useTowar)
         {
-            dynamic towar = Session.Towary.Wczytaj(EncodeForSfera(ean!));
+            dynamic towar = Session.Towary.Wczytaj(ean!);
             try
             {
                 position = document.Pozycje.Dodaj(towar);
@@ -488,7 +513,7 @@ public sealed class RealSferaSession : ISferaSession
         else
         {
             position = document.Pozycje.DodajUslugeJednorazowa();
-            position.UslJednNazwa = EncodeForSfera(name);
+            position.UslJednNazwa = name;
         }
 
         position.IloscJm = quantity;
@@ -499,7 +524,7 @@ public sealed class RealSferaSession : ISferaSession
     private void AddShippingLineToDocument(dynamic document, ShippingDto shipping)
     {
         dynamic position = document.Pozycje.DodajUslugeJednorazowa();
-        position.UslJednNazwa = EncodeForSfera(shipping.Name);
+        position.UslJednNazwa = shipping.Name;
         position.IloscJm = 1;
         position.Jm = "szt.";
         position.CenaBruttoPrzedRabatem = (double)shipping.UnitPriceGross;
@@ -508,8 +533,22 @@ public sealed class RealSferaSession : ISferaSession
     private void ApplyPayment(dynamic document, PaymentDto payment)
     {
         // payment.Attribute = "PlatnoscPrzelew" -> setujemy "PlatnoscPrzelewId" + "PlatnoscPrzelewKwota"
-        TrySet(document, payment.Attribute + "Id", payment.MethodSubiektId);
-        TrySet(document, payment.Attribute + "Kwota", (double)payment.Amount);
+        // SetCom (NIE TrySet) - literówka w configu Laravela ('PlatnoscPrzelw') MUSI dać 500
+        // zamiast cicho zapisać FV bez formy płatności.
+        SetCom(document, payment.Attribute + "Id", payment.MethodSubiektId);
+        SetCom(document, payment.Attribute + "Kwota", (double)payment.Amount);
+    }
+
+    /// <summary>
+    /// Ustawia property na obiekcie COM przez reflection. Wyjątek propaguje
+    /// (w przeciwieństwie do <see cref="TrySet"/> które połyka błąd).
+    /// Używaj dla pól krytycznych biznesowo (np. forma płatności).
+    /// </summary>
+    private static void SetCom(object target, string propName, object value)
+    {
+        target.GetType().InvokeMember(propName,
+            BindingFlags.SetProperty | BindingFlags.Instance | BindingFlags.Public,
+            null, target, new[] { value });
     }
 
     /// <summary>
@@ -625,14 +664,6 @@ public sealed class RealSferaSession : ISferaSession
         try { _subiekt?.Zakoncz(); } catch { }
         try { if (_subiekt is not null) Marshal.ReleaseComObject(_subiekt); } catch { }
         _subiekt = null;
-    }
-
-    /// <summary>UTF-8 z JSONa -> string CP1250 dla COM Sfery.</summary>
-    public string EncodeForSfera(string utf8Input)
-    {
-        if (string.IsNullOrEmpty(utf8Input)) return utf8Input;
-        var bytes = _cp1250.GetBytes(utf8Input);
-        return _cp1250.GetString(bytes);
     }
 
     public ValueTask DisposeAsync()

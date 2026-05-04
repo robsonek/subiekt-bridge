@@ -90,9 +90,12 @@ public sealed class InvoicesController : ControllerBase
             return Ok(cached);
         }
 
-        // Resolve source FV id w SQLite (idempotency keeps mapping bridge_id -> subiekt_id).
-        // TODO Faza 2.5: prawdziwy lookup; teraz używamy parsed id dla fake'a.
-        long sourceSubiektId = ParseSubiektIdFromBridgeId(id);
+        if (!TryParseSubiektIdFromBridgeId(id, out long sourceSubiektId))
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "INVALID_BRIDGE_ID",
+                Message: $"Bridge ID '{id}' ma nieznany format. Oczekiwane: 'sub_<id>' (real Sfera) lub 'fake_inv_<id>' (dev mock)."));
+        }
 
         try
         {
@@ -133,14 +136,33 @@ public sealed class InvoicesController : ControllerBase
         return null;
     }
 
-    private static long ParseSubiektIdFromBridgeId(string bridgeId)
+    /// <summary>
+    /// Parsuje bridge_id na subiekt_id. Dwa formaty:
+    /// - "sub_{N}" - prawdziwy dokument w Subiekcie (RealSferaSession)
+    /// - "fake_inv_{NNNNNN}" - mock (FakeSferaSession, dev tylko)
+    /// Zwraca false dla nieznanych formatów, żeby controller mógł zwrócić 422
+    /// zamiast cicho użyć 0 i wystawić korektę do nieistniejącego dokumentu.
+    /// </summary>
+    private static bool TryParseSubiektIdFromBridgeId(string bridgeId, out long subiektId)
     {
-        // Fake bridge_id format: "fake_inv_NNNNNN" -> 1_000_000 + NNNNNN.
-        if (bridgeId.StartsWith("fake_inv_") &&
-            int.TryParse(bridgeId.AsSpan("fake_inv_".Length), out var counter))
+        subiektId = 0;
+
+        const string realPrefix = "sub_";
+        if (bridgeId.StartsWith(realPrefix, StringComparison.Ordinal) &&
+            long.TryParse(bridgeId.AsSpan(realPrefix.Length), out var realId))
         {
-            return 1_000_000 + counter;
+            subiektId = realId;
+            return true;
         }
-        return 0;
+
+        const string fakePrefix = "fake_inv_";
+        if (bridgeId.StartsWith(fakePrefix, StringComparison.Ordinal) &&
+            int.TryParse(bridgeId.AsSpan(fakePrefix.Length), out var counter))
+        {
+            subiektId = 1_000_000 + counter;
+            return true;
+        }
+
+        return false;
     }
 }

@@ -47,27 +47,57 @@ public sealed class IdempotencyStore
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
 
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT response_json, created_at FROM idempotency WHERE key = $key LIMIT 1";
-        cmd.Parameters.AddWithValue("$key", key);
+        // Krok 1: pobierz JSON i timestamp. Zamykamy reader przed dalszymi operacjami,
+        // bo SQLite nie pozwala na concurrent commands na tym samym connection.
+        string? json = null;
+        DateTimeOffset? createdAt = null;
 
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        if (!await reader.ReadAsync(ct))
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT response_json, created_at FROM idempotency WHERE key = $key LIMIT 1";
+            cmd.Parameters.AddWithValue("$key", key);
+
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct))
+            {
+                json = reader.GetString(0);
+                createdAt = DateTimeOffset.Parse(reader.GetString(1));
+            }
+        }
+
+        if (json is null || createdAt is null)
         {
             return null;
         }
 
-        var json = reader.GetString(0);
-        var createdAt = DateTimeOffset.Parse(reader.GetString(1));
-
-        if (DateTimeOffset.UtcNow - createdAt > _ttl)
+        if (DateTimeOffset.UtcNow - createdAt.Value > _ttl)
         {
             _logger.LogInformation("Idempotency key {Key} expired (age > {Ttl} days), ignoring",
                 key, _ttl.TotalDays);
             return null;
         }
 
-        return JsonSerializer.Deserialize<TResponse>(json);
+        try
+        {
+            return JsonSerializer.Deserialize<TResponse>(json);
+        }
+        catch (JsonException ex)
+        {
+            // Korupcja JSON-u (np. po crash/disk full). Bez tego catch'a Bridge zwracałby
+            // 500 → Laravel BridgeUnavailableException → retry → znowu corrupt → infinite loop.
+            // Usuwamy zepsuty wpis i zwracamy null - request zostanie wykonany od nowa.
+            _logger.LogError(ex,
+                "Corrupt idempotency entry {Key} (JsonException: {Message}). " +
+                "Usuwam wpis - kolejne wywołanie wykona pełen flow.",
+                key, ex.Message);
+
+            await using var deleteCmd = conn.CreateCommand();
+            deleteCmd.CommandText = "DELETE FROM idempotency WHERE key = $key";
+            deleteCmd.Parameters.AddWithValue("$key", key);
+            await deleteCmd.ExecuteNonQueryAsync(ct);
+
+            return null;
+        }
     }
 
     public async Task SaveAsync<TResponse>(string key, TResponse response, CancellationToken ct)
