@@ -457,15 +457,6 @@ public sealed class RealSferaSession : ISferaSession
         {
             fs.LiczonyOdCenBrutto = true;
 
-            // MagazynNadawczyId = magazyn z którego sprzedajemy. Bez tego FS NIE zmniejsza
-            // stanu magazynowego - po PZ + FS magazyn rośnie zamiast zerować się. WarehouseId
-            // jest opcjonalne w request (gdy null - FS bez magazynu, dla scenariuszy gdzie
-            // klient nie używa magazynu Subiekta).
-            if (request.WarehouseSubiektId is int warehouseId)
-            {
-                fs.MagazynNadawczyId = warehouseId;
-            }
-
             long contractorId = ResolveOrCreateContractor(request.Contractor);
             fs.KontrahentId = contractorId;
 
@@ -474,9 +465,13 @@ public sealed class RealSferaSession : ISferaSession
                 fs.FormaDokumentu = 1; // FV firmowa
             }
 
+            // Magazyn na FS ustawiamy PER POZYCJA (SuPozycja.MagazynId), NIE na dokumencie.
+            // SuDokument.MagazynNadawczyId jest dla MM (przesuniec miedzymagazynowych),
+            // dla FS rzuca COM NotImplementedException 0x80004001.
+            int? perLineWarehouseId = request.WarehouseSubiektId;
             foreach (var line in request.Lines)
             {
-                AddLineToDocument(fs, line.Ean, line.NameFallback, line.Quantity, line.Unit, line.UnitPriceGross);
+                AddLineToDocument(fs, line.Ean, line.NameFallback, line.Quantity, line.Unit, line.UnitPriceGross, perLineWarehouseId);
             }
 
             if (request.Shipping.Include)
@@ -833,9 +828,10 @@ public sealed class RealSferaSession : ISferaSession
         }
     }
 
-    private void AddLineToDocument(dynamic document, string? ean, string name, int quantity, string unit, decimal unitPriceGross)
+    private void AddLineToDocument(dynamic document, string? ean, string name, int quantity, string unit, decimal unitPriceGross, int? warehouseId = null)
     {
         dynamic position;
+        bool isTowar = false;
 
         if (!string.IsNullOrEmpty(ean))
         {
@@ -851,6 +847,7 @@ public sealed class RealSferaSession : ISferaSession
             try
             {
                 position = document.Pozycje.Dodaj(towar);
+                isTowar = true;
             }
             finally
             {
@@ -863,6 +860,14 @@ public sealed class RealSferaSession : ISferaSession
             // kwotowa zwrotu pieniężnego z InvoiceCorrectionIssuer).
             position = document.Pozycje.DodajUslugeJednorazowa();
             position.UslJednNazwa = name;
+        }
+
+        // SuPozycja.MagazynId - magazyn z ktorego towar wychodzi (dla FS) lub do ktorego
+        // wchodzi (dla PZ). Ustawiamy tylko dla towarow (nie dla uslug jednorazowych
+        // ktore nie maja stanu magazynowego).
+        if (isTowar && warehouseId.HasValue)
+        {
+            TrySet(position, "MagazynId", warehouseId.Value);
         }
 
         position.IloscJm = quantity;
