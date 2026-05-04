@@ -394,66 +394,54 @@ public sealed class RealSferaSession : ISferaSession
 
     public Task<QueryResultDto> QueryAsync(string sql, int maxRows, CancellationToken ct)
     {
-        return RunOnStaAsync<QueryResultDto>(() =>
+        // SQL przez bezposredni SqlConnection (nie Sfera) - Sfera.Baza.PolaczenieAdoNet
+        // zwraca SqlConnection wrapped jako ComObject i dynamic binder nie widzi metod
+        // (CreateCommand etc nie sa bindable). Connection string budujemy z opcji
+        // Subiekta - te same dane co Sfera uzywa do logowania.
+        return Task.Run(() =>
         {
-            // Sfera.Baza.PolaczenieAdoNet zwraca obiekt jako COM proxy - wszystkie operacje
-            // przez dynamic invocation (nie mozemy castowac na SqlConnection bezposrednio).
-            // Subiekt sam zarzadza ConnectionString + Open w 'PolaczenieAdoNet' getter -
-            // wedlug docs "Przy każdym wywołaniu tego atrybutu tworzony jest nowy obiekt".
-            dynamic conn = Session.Baza.PolaczenieAdoNet;
-            try
+            var connStr = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder
             {
-                try { conn.Open(); } catch { /* moze byc juz otwarte */ }
+                DataSource = _options.Server,
+                InitialCatalog = _options.Database,
+                UserID = _options.DbUser,
+                Password = _options.DbPassword,
+                TrustServerCertificate = true,
+                ConnectTimeout = 10,
+            }.ToString();
 
-                dynamic cmd = conn.CreateCommand();
-                try
-                {
-                    cmd.CommandText = sql;
-                    cmd.CommandTimeout = 30;
+            using var conn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
+            conn.Open();
 
-                    dynamic reader = cmd.ExecuteReader();
-                    try
-                    {
-                        int fieldCount = (int)reader.FieldCount;
-                        var columns = new List<string>(fieldCount);
-                        for (int i = 0; i < fieldCount; i++)
-                        {
-                            columns.Add((string)reader.GetName(i));
-                        }
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.CommandTimeout = 30;
 
-                        var rows = new List<IReadOnlyList<object?>>();
-                        int count = 0;
-                        while ((bool)reader.Read())
-                        {
-                            if (count >= maxRows)
-                            {
-                                return new QueryResultDto(columns, rows, true);
-                            }
-                            var row = new object?[fieldCount];
-                            for (int i = 0; i < fieldCount; i++)
-                            {
-                                row[i] = (bool)reader.IsDBNull(i) ? null : reader.GetValue(i);
-                            }
-                            rows.Add(row);
-                            count++;
-                        }
-
-                        return new QueryResultDto(columns, rows, false);
-                    }
-                    finally
-                    {
-                        try { reader.Close(); } catch { /* cleanup */ }
-                    }
-                }
-                finally
-                {
-                    try { cmd.Dispose(); } catch { try { (cmd as IDisposable)?.Dispose(); } catch { /* cleanup */ } }
-                }
-            }
-            finally
+            using var reader = cmd.ExecuteReader();
+            var columns = new List<string>(reader.FieldCount);
+            for (int i = 0; i < reader.FieldCount; i++)
             {
-                try { conn.Close(); } catch { /* cleanup */ }
+                columns.Add(reader.GetName(i));
             }
+
+            var rows = new List<IReadOnlyList<object?>>();
+            int count = 0;
+            while (reader.Read())
+            {
+                if (count >= maxRows)
+                {
+                    return new QueryResultDto(columns, rows, true);
+                }
+                var row = new object?[reader.FieldCount];
+                for (int i = 0; i < reader.FieldCount; i++)
+                {
+                    row[i] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                }
+                rows.Add(row);
+                count++;
+            }
+
+            return new QueryResultDto(columns, rows, false);
         }, ct);
     }
 
