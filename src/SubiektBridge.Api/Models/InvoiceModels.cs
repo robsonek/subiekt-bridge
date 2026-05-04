@@ -111,7 +111,7 @@ public sealed record InvoiceResponseDto(
 /// </summary>
 public sealed record ReceiptIssueRequestDto(
     [property: JsonPropertyName("issue_date")] string IssueDate,
-    [property: JsonPropertyName("warehouse_subiekt_id")] int WarehouseSubiektId,
+    [property: JsonPropertyName("warehouse_subiekt_id")] int? WarehouseSubiektId,
     [property: JsonPropertyName("supplier")] ContractorDto Supplier,
     [property: JsonPropertyName("lines")] IReadOnlyList<LineDto> Lines,
     [property: JsonPropertyName("source_invoice_subiekt_id")] long? SourceInvoiceSubiektId,
@@ -129,6 +129,13 @@ public sealed record ProductDto(
     [property: JsonPropertyName("vat_rate")] decimal VatRate,
     [property: JsonPropertyName("unit")] string Unit,
     [property: JsonPropertyName("is_active")] bool IsActive
+);
+
+public sealed record WarehouseDto(
+    [property: JsonPropertyName("subiekt_id")] int SubiektId,
+    [property: JsonPropertyName("symbol")] string Symbol,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("is_main")] bool IsMain
 );
 
 // ----------------------------- Error -----------------------------

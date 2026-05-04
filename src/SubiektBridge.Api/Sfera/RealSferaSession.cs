@@ -281,7 +281,14 @@ public sealed class RealSferaSession : ISferaSession
         try
         {
             pz.LiczonyOdCenBrutto = true;
-            pz.MagazynOdbiorczyId = request.WarehouseSubiektId;
+
+            // MagazynOdbiorczyId opcjonalne - gdy null, Sfera użyje magazynu z sesji
+            // operatora (Subiekt.MagazynId), co dla typowego setup'u z 1 magazynem
+            // jest tym czego chcemy.
+            if (request.WarehouseSubiektId is int receiptWarehouseId)
+            {
+                pz.MagazynOdbiorczyId = receiptWarehouseId;
+            }
 
             // Find-or-create kontrahenta (dostawcy). Symbol = "SUPPLIER-{id}" deterministyczny.
             long contractorId = ResolveOrCreateContractor(request.Supplier);
