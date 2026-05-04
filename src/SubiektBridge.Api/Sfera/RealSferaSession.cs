@@ -963,9 +963,33 @@ public sealed class RealSferaSession : ISferaSession
                 try
                 {
                     string number = (string)dok.NumerPelny ?? "";
-                    if (number.StartsWith(typePrefix + " ", StringComparison.OrdinalIgnoreCase))
+                    if (!number.StartsWith(typePrefix + " ", StringComparison.OrdinalIgnoreCase))
                     {
-                        return ToInt64(dok.Identyfikator);
+                        continue;
+                    }
+
+                    long candidateId = ToInt64(dok.Identyfikator);
+
+                    // OtworzKolekcje czasem zwraca rekordy z dok__Dokument ktore zostaly
+                    // soft-deleted/anulowane (Sfera nie filtruje per default). Weryfikujemy
+                    // ze dokument NAPRAWDE istnieje przez WczytajDokument - jesli rzuca,
+                    // skip (kolekcja zawiera "ducha", nie traktujemy jako duplikat).
+                    try
+                    {
+                        dynamic verify = Session.SuDokumentyManager.WczytajDokument(candidateId);
+                        try
+                        {
+                            return candidateId;
+                        }
+                        finally
+                        {
+                            try { verify.Zamknij(); } catch { /* cleanup */ }
+                        }
+                    }
+                    catch (Exception verifyEx)
+                    {
+                        _logger.LogInformation(verifyEx, "Anti-duplicate: kolekcja zwrocila {Id} ale WczytajDokument padl - traktuje jako duch", candidateId);
+                        continue;
                     }
                 }
                 finally
