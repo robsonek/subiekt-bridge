@@ -21,7 +21,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $source = (Resolve-Path $SourceDir).Path
-$installPath = (Resolve-Path $InstallDir -ErrorAction SilentlyContinue)?.Path ?? $InstallDir
+# PowerShell 5.x (Windows PS) nie ma null-conditional ?. - klasyczny if dla zgodności.
+$resolvedInstall = Resolve-Path $InstallDir -ErrorAction SilentlyContinue
+if ($resolvedInstall) {
+    $installPath = $resolvedInstall.Path
+} else {
+    $installPath = $InstallDir
+}
 
 Write-Host "=== Update SubiektBridge ===" -ForegroundColor Cyan
 Write-Host "Źródło: $source"
