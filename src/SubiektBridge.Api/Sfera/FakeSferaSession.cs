@@ -140,6 +140,8 @@ public sealed class FakeSferaSession : ISferaSession
                 ContractorId: 1,
                 ContractorNip: "1234567890",
                 ContractorName: "Mock Klient Sp. z o.o.",
+                NetAmount: 100.37m,
+                VatAmount: 23.08m,
                 GrossAmount: 123.45m,
                 Notes: "Zamowienie test-1"),
             new InvoiceQueryItemDto(
@@ -150,6 +152,8 @@ public sealed class FakeSferaSession : ISferaSession
                 ContractorId: 2,
                 ContractorNip: null,
                 ContractorName: "Mock Osoba",
+                NetAmount: 55.20m,
+                VatAmount: 12.69m,
                 GrossAmount: 67.89m,
                 Notes: "Zamowienie test-2"),
         };
@@ -166,6 +170,8 @@ public sealed class FakeSferaSession : ISferaSession
             ContractorId: 1,
             ContractorNip: "1234567890",
             ContractorName: "Mock Klient",
+            NetAmount: 81.30m,
+            VatAmount: 18.70m,
             GrossAmount: 100.00m,
             Notes: "fake"));
     }

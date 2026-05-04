@@ -151,6 +151,8 @@ public sealed record InvoiceQueryItemDto(
     [property: JsonPropertyName("contractor_id")] long? ContractorId,
     [property: JsonPropertyName("contractor_nip")] string? ContractorNip,
     [property: JsonPropertyName("contractor_name")] string? ContractorName,
+    [property: JsonPropertyName("net_amount")] decimal? NetAmount,
+    [property: JsonPropertyName("vat_amount")] decimal? VatAmount,
     [property: JsonPropertyName("gross_amount")] decimal? GrossAmount,
     [property: JsonPropertyName("notes")] string? Notes
 );

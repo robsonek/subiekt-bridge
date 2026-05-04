@@ -322,6 +322,8 @@ public sealed class RealSferaSession : ISferaSession
         decimal? gross = TryGetDecimal(dok, "WartoscBrutto")
             ?? TryGetDecimal(dok, "KwotaBrutto")
             ?? TryGetDecimal(dok, "KwotaDoZaplaty");
+        decimal? net = TryGetDecimal(dok, "WartoscNetto");
+        decimal? vat = TryGetDecimal(dok, "WartoscVat");
 
         // NIP/Nazwa kontrahenta - NabywcaInfo na SuDokument bywa pusty.
         // Lookup do Kontrahenci.Wczytaj(KontrahentId) jest niezbedny do uzyskania
@@ -356,6 +358,8 @@ public sealed class RealSferaSession : ISferaSession
             ContractorId: contractorId,
             ContractorNip: nip,
             ContractorName: nazwa,
+            NetAmount: net,
+            VatAmount: vat,
             GrossAmount: gross,
             Notes: notes);
     }
