@@ -126,6 +126,35 @@ public sealed record ReceiptIssueRequestDto(
     [property: JsonPropertyName("notes")] string Notes
 );
 
+// ----------------------------- Query (GET /invoices) -----------------------------
+
+/// <summary>
+/// Filtr zapytania o istniejące FV w Subiekcie. Bridge wykonuje przez Sferę
+/// SuDokumentyManager.OtworzKolekcje(filtr, sort) - filtr to SQL WHERE clause
+/// budowany z białej listy pól (klient nie podaje raw SQL).
+/// </summary>
+public sealed record InvoiceQueryRequestDto(
+    [property: JsonPropertyName("from")] string? From,                    // YYYY-MM-DD
+    [property: JsonPropertyName("to")] string? To,                        // YYYY-MM-DD
+    [property: JsonPropertyName("type")] string? Type,                    // FS / KFS / null=oba
+    [property: JsonPropertyName("notes_contains")] string? NotesContains, // LIKE %X% w dok_Uwagi
+    [property: JsonPropertyName("nip")] string? Nip,                      // NIP kontrahenta
+    [property: JsonPropertyName("limit")] int Limit = 200                 // hard cap 1000
+);
+
+/// <summary>Pojedynczy wpis listy FV - wystarczające metadata do dopasowania do Order.</summary>
+public sealed record InvoiceQueryItemDto(
+    [property: JsonPropertyName("subiekt_id")] long SubiektId,
+    [property: JsonPropertyName("number")] string Number,
+    [property: JsonPropertyName("type")] string Type,
+    [property: JsonPropertyName("issue_date")] string? IssueDate,
+    [property: JsonPropertyName("contractor_id")] long? ContractorId,
+    [property: JsonPropertyName("contractor_nip")] string? ContractorNip,
+    [property: JsonPropertyName("contractor_name")] string? ContractorName,
+    [property: JsonPropertyName("gross_amount")] decimal? GrossAmount,
+    [property: JsonPropertyName("notes")] string? Notes
+);
+
 // ----------------------------- Reference -----------------------------
 
 public sealed record ProductDto(

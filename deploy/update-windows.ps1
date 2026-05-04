@@ -21,10 +21,24 @@ param(
 
 $ErrorActionPreference = "Stop"
 $source = (Resolve-Path $SourceDir).Path
+$installPath = (Resolve-Path $InstallDir -ErrorAction SilentlyContinue)?.Path ?? $InstallDir
 
 Write-Host "=== Update SubiektBridge ===" -ForegroundColor Cyan
 Write-Host "Źródło: $source"
-Write-Host "Docel:  $InstallDir"
+Write-Host "Docel:  $installPath"
+
+# Sanity check: $source nie może być tym samym folderem co $InstallDir.
+# Inaczej Copy-Item rzuca "Cannot overwrite the item with itself" w środku
+# operacji i zostawia serwis zatrzymany.
+if ($source -ieq $installPath) {
+    Write-Host ""
+    Write-Host "BŁĄD: skrypt uruchomiony z $installPath - tego samego co InstallDir." -ForegroundColor Red
+    Write-Host "Rozwiązanie:" -ForegroundColor Yellow
+    Write-Host "  1. Rozpakuj nowy ZIP do osobnego folderu, np. C:\SubiektBridge_new\"
+    Write-Host "  2. cd C:\SubiektBridge_new\"
+    Write-Host "  3. .\update-windows.ps1"
+    exit 1
+}
 
 # Stop
 Write-Host "Zatrzymuję serwis..." -ForegroundColor Yellow

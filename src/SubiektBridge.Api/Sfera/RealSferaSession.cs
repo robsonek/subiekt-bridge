@@ -182,6 +182,133 @@ public sealed class RealSferaSession : ISferaSession
         }, ct);
     }
 
+    // -------------------------- Query (read-only listing) --------------------------
+
+    public Task<IReadOnlyList<InvoiceQueryItemDto>> QueryInvoicesAsync(InvoiceQueryRequestDto request, CancellationToken ct)
+    {
+        return RunOnStaAsync<IReadOnlyList<InvoiceQueryItemDto>>(() => QueryInvoicesCore(request), ct);
+    }
+
+    private IReadOnlyList<InvoiceQueryItemDto> QueryInvoicesCore(InvoiceQueryRequestDto request)
+    {
+        var filter = BuildInvoiceQueryFilter(request);
+        var sort = "dok_DataWystawienia DESC, dok_Id DESC";
+        var limit = Math.Clamp(request.Limit <= 0 ? 200 : request.Limit, 1, 1000);
+
+        dynamic kolekcja = Session.SuDokumentyManager.OtworzKolekcje(filter, sort);
+        int total = (int)kolekcja.Liczba;
+        int take = Math.Min(total, limit);
+        var items = new List<InvoiceQueryItemDto>(take);
+
+        for (int i = 0; i < take; i++)
+        {
+            dynamic dok = kolekcja.Element[i];
+            try
+            {
+                items.Add(MapDokumentToQueryItem(dok));
+            }
+            finally
+            {
+                try { dok.Zamknij(); } catch { /* best-effort cleanup */ }
+            }
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// Buduje SQL WHERE clause z białej listy pól. Klient nie podaje raw SQL —
+    /// strony są escapeowane (single quote -&gt; double single quote), daty walidowane
+    /// po regex YYYY-MM-DD.
+    /// </summary>
+    private static string BuildInvoiceQueryFilter(InvoiceQueryRequestDto r)
+    {
+        var clauses = new List<string>();
+
+        // dok_Typ: enum z bazy Subiekta. Sprawdzane eksperymentalnie - typowe wartości:
+        // FS=1, KFS=4 (z gtaSubiektDokumentEnum: -2 i -26 to są stałe COM, nie wartości w dok_Typ).
+        // Bezpieczniej filtrować po dok_NumerPelny LIKE 'FS %' / 'KFS %' - to jest niezawodne.
+        if (!string.IsNullOrWhiteSpace(r.Type))
+        {
+            var t = r.Type.Trim().ToUpperInvariant();
+            if (t == "FS" || t == "KFS" || t == "PA" || t == "PZ")
+            {
+                clauses.Add($"dok_NumerPelny LIKE '{t} %'");
+            }
+        }
+
+        if (IsValidIsoDate(r.From)) clauses.Add($"dok_DataWystawienia >= '{r.From}'");
+        if (IsValidIsoDate(r.To))   clauses.Add($"dok_DataWystawienia <= '{r.To}'");
+
+        if (!string.IsNullOrWhiteSpace(r.NotesContains))
+            clauses.Add($"dok_Uwagi LIKE '%{EscapeSqlLiteral(r.NotesContains)}%'");
+
+        if (!string.IsNullOrWhiteSpace(r.Nip))
+            clauses.Add($"dok_NabKodSlownik = '{EscapeSqlLiteral(r.Nip)}'"); // NIP jest w polu kodSlownika
+
+        return clauses.Count == 0 ? "1=1" : string.Join(" AND ", clauses);
+    }
+
+    private static bool IsValidIsoDate(string? s) =>
+        !string.IsNullOrWhiteSpace(s) && System.Text.RegularExpressions.Regex.IsMatch(s, @"^\d{4}-\d{2}-\d{2}$");
+
+    private static string EscapeSqlLiteral(string s) => s.Replace("'", "''");
+
+    private static InvoiceQueryItemDto MapDokumentToQueryItem(dynamic dok)
+    {
+        long subiektId = (long)dok.Identyfikator;
+        string number = (string)dok.NumerPelny ?? "";
+        string type = number.Split(' ', 2)[0]; // "FS 1/2026" -> "FS"
+
+        // Pola czasem nieobecne dla niektórych typów - czytamy defensywnie.
+        DateTimeOffset? issueDate = TryGetDate(dok, "DataWystawienia");
+        long? contractorId = TryGetLong(dok, "KontrahentId");
+        string? notes = TryGetString(dok, "Uwagi");
+        decimal? gross = TryGetDecimal(dok, "WartoscBrutto");
+
+        // NIP/Nazwa kontrahenta z attached struct - może być null gdy paragon imienny.
+        string? nip = null, nazwa = null;
+        try
+        {
+            dynamic kontr = dok.NabywcaInfo;
+            nip = TryGetString(kontr, "NIP");
+            nazwa = TryGetString(kontr, "Nazwa");
+        }
+        catch { /* brak NabywcaInfo - zostaje null */ }
+
+        return new InvoiceQueryItemDto(
+            SubiektId: subiektId,
+            Number: number,
+            Type: type,
+            IssueDate: issueDate?.ToString("yyyy-MM-dd"),
+            ContractorId: contractorId,
+            ContractorNip: nip,
+            ContractorName: nazwa,
+            GrossAmount: gross,
+            Notes: notes);
+    }
+
+    private static string? TryGetString(dynamic obj, string prop)
+    {
+        try { var v = obj.GetType().InvokeMember(prop, BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public, null, obj, null); return v?.ToString(); }
+        catch { return null; }
+    }
+    private static long? TryGetLong(dynamic obj, string prop)
+    {
+        try { var v = obj.GetType().InvokeMember(prop, BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public, null, obj, null); return v == null ? null : Convert.ToInt64(v); }
+        catch { return null; }
+    }
+    private static decimal? TryGetDecimal(dynamic obj, string prop)
+    {
+        try { var v = obj.GetType().InvokeMember(prop, BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public, null, obj, null); return v == null ? null : Convert.ToDecimal(v); }
+        catch { return null; }
+    }
+    private static DateTimeOffset? TryGetDate(dynamic obj, string prop)
+    {
+        try { var v = obj.GetType().InvokeMember(prop, BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public, null, obj, null); return v == null ? null : new DateTimeOffset(Convert.ToDateTime(v)); }
+        catch { return null; }
+    }
+
     // -------------------------- Invoices --------------------------
 
     public Task<InvoiceResponseDto> CreateInvoiceAsync(InvoiceRequestDto request, CancellationToken ct)

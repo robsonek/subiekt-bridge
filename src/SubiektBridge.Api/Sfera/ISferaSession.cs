@@ -33,6 +33,12 @@ public interface ISferaSession : IAsyncDisposable
     /// <summary>Znajdź kontrahenta po NIP. Zwraca null gdy nie istnieje.</summary>
     Task<ContractorDto?> FindContractorByNipAsync(string nip, CancellationToken ct);
 
+    /// <summary>
+    /// Pobierz listę istniejących FV/KFS z Subiekta (read-only, do dopasowania do
+    /// zamówień zafakturowanych przez inny system).
+    /// </summary>
+    Task<IReadOnlyList<InvoiceQueryItemDto>> QueryInvoicesAsync(InvoiceQueryRequestDto request, CancellationToken ct);
+
     /// <summary>Health: zwraca wersję Subiekta + status sesji.</summary>
     Task<SferaHealthDto> HealthAsync(CancellationToken ct);
 

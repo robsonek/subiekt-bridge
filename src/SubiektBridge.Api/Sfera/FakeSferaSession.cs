@@ -127,6 +127,35 @@ public sealed class FakeSferaSession : ISferaSession
                 CountryCode: "PL")));
     }
 
+    public Task<IReadOnlyList<InvoiceQueryItemDto>> QueryInvoicesAsync(InvoiceQueryRequestDto request, CancellationToken ct)
+    {
+        // Mock: 2 sample FV w odpowiedzi.
+        IReadOnlyList<InvoiceQueryItemDto> items = new[]
+        {
+            new InvoiceQueryItemDto(
+                SubiektId: 50001,
+                Number: "FS 1/2026",
+                Type: "FS",
+                IssueDate: "2026-01-15",
+                ContractorId: 1,
+                ContractorNip: "1234567890",
+                ContractorName: "Mock Klient Sp. z o.o.",
+                GrossAmount: 123.45m,
+                Notes: "Zamowienie test-1"),
+            new InvoiceQueryItemDto(
+                SubiektId: 50002,
+                Number: "FS 2/2026",
+                Type: "FS",
+                IssueDate: "2026-01-16",
+                ContractorId: 2,
+                ContractorNip: null,
+                ContractorName: "Mock Osoba",
+                GrossAmount: 67.89m,
+                Notes: "Zamowienie test-2"),
+        };
+        return Task.FromResult(items);
+    }
+
     public Task<SferaHealthDto> HealthAsync(CancellationToken ct)
     {
         return Task.FromResult(new SferaHealthDto(

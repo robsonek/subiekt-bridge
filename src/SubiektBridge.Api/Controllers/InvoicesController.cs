@@ -26,6 +26,43 @@ public sealed class InvoicesController : ControllerBase
         _logger = logger;
     }
 
+    /// <summary>
+    /// Listing istniejących FV/KFS w Subiekcie (read-only). Używamy do
+    /// dopasowania zamówień zafakturowanych przez inny system - po imporcie
+    /// metadata FV trafia do tabeli invoices i nie próbujemy fakturować ponownie.
+    /// </summary>
+    [HttpGet]
+    public async Task<ActionResult<IReadOnlyList<InvoiceQueryItemDto>>> Query(
+        [FromQuery] string? from,
+        [FromQuery] string? to,
+        [FromQuery] string? type,
+        [FromQuery(Name = "notes_contains")] string? notesContains,
+        [FromQuery] string? nip,
+        [FromQuery] int limit,
+        CancellationToken ct)
+    {
+        var request = new InvoiceQueryRequestDto(
+            From: from,
+            To: to,
+            Type: type,
+            NotesContains: notesContains,
+            Nip: nip,
+            Limit: limit > 0 ? limit : 200);
+
+        try
+        {
+            var items = await _sfera.QueryInvoicesAsync(request, ct);
+            return Ok(items);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "QueryInvoices failed");
+            return StatusCode(StatusCodes.Status502BadGateway, new ErrorResponseDto(
+                Code: "SUBIEKT_QUERY_FAILED",
+                Message: ex.Message));
+        }
+    }
+
     [HttpPost]
     public async Task<ActionResult<InvoiceResponseDto>> Create(
         [FromBody] InvoiceRequestDto request,
