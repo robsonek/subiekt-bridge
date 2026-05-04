@@ -20,12 +20,62 @@ namespace SubiektBridge.Api.Controllers;
 public sealed class AdminController : ControllerBase
 {
     private readonly BridgeOptions _options;
+    private readonly ISferaSession _sfera;
     private readonly ILogger<AdminController> _logger;
 
-    public AdminController(IOptions<BridgeOptions> options, ILogger<AdminController> logger)
+    public AdminController(IOptions<BridgeOptions> options, ISferaSession sfera, ILogger<AdminController> logger)
     {
         _options = options.Value;
+        _sfera = sfera;
         _logger = logger;
+    }
+
+    [HttpPost("query")]
+    public async Task<ActionResult<QueryResultDto>> Query(
+        [FromBody] QueryRequestDto request,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request.Sql))
+        {
+            return BadRequest(new ErrorResponseDto("EMPTY_SQL", "Pole 'sql' wymagane."));
+        }
+
+        // Whitelist: tylko read-only operations.
+        var sqlTrimmed = request.Sql.TrimStart();
+        var firstWord = new string(sqlTrimmed.TakeWhile(char.IsLetter).ToArray()).ToUpperInvariant();
+        if (firstWord != "SELECT" && firstWord != "WITH")
+        {
+            return BadRequest(new ErrorResponseDto(
+                "READONLY_ONLY",
+                "Tylko SELECT/WITH dozwolone. Bridge nie wykonuje INSERT/UPDATE/DELETE/DROP."));
+        }
+
+        // Reject DML/DDL slow w srodku query (np. WITH ... INSERT ... SELECT)
+        var upper = request.Sql.ToUpperInvariant();
+        foreach (var forbidden in new[] { "INSERT ", "UPDATE ", "DELETE ", "DROP ", "TRUNCATE ", "ALTER ", "CREATE ", "EXEC ", "EXECUTE ", "MERGE ", "GRANT ", "REVOKE " })
+        {
+            if (upper.Contains(forbidden))
+            {
+                return BadRequest(new ErrorResponseDto(
+                    "READONLY_ONLY",
+                    $"Wykryto slowo kluczowe '{forbidden.Trim()}' - tylko SELECT/WITH dozwolone."));
+            }
+        }
+
+        var maxRows = Math.Clamp(request.MaxRows ?? 100, 1, 1000);
+
+        try
+        {
+            var result = await _sfera.QueryAsync(request.Sql, maxRows, ct);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "QueryAsync failed: {Sql}", request.Sql);
+            return StatusCode(500, new ErrorResponseDto(
+                "QUERY_FAILED",
+                ex.GetType().Name + ": " + ex.Message));
+        }
     }
 
     [HttpPost("update")]

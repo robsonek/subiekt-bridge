@@ -390,6 +390,57 @@ public sealed class RealSferaSession : ISferaSession
         catch { return null; }
     }
 
+    // -------------------------- SQL Query (read-only) --------------------------
+
+    public Task<QueryResultDto> QueryAsync(string sql, int maxRows, CancellationToken ct)
+    {
+        return RunOnStaAsync<QueryResultDto>(() =>
+        {
+            dynamic conn = Session.Baza.PolaczenieAdoNet;
+            try
+            {
+                if (conn.State != System.Data.ConnectionState.Open)
+                {
+                    conn.Open();
+                }
+
+                using var cmd = (System.Data.Common.DbCommand)conn.CreateCommand();
+                cmd.CommandText = sql;
+                cmd.CommandTimeout = 30;
+
+                using var reader = cmd.ExecuteReader();
+                var columns = new List<string>(reader.FieldCount);
+                for (int i = 0; i < reader.FieldCount; i++)
+                {
+                    columns.Add(reader.GetName(i));
+                }
+
+                var rows = new List<IReadOnlyList<object?>>();
+                int count = 0;
+                while (reader.Read())
+                {
+                    if (count >= maxRows)
+                    {
+                        return new QueryResultDto(columns, rows, true);
+                    }
+                    var row = new object?[reader.FieldCount];
+                    for (int i = 0; i < reader.FieldCount; i++)
+                    {
+                        row[i] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                    }
+                    rows.Add(row);
+                    count++;
+                }
+
+                return new QueryResultDto(columns, rows, false);
+            }
+            finally
+            {
+                try { conn.Close(); } catch { /* cleanup */ }
+            }
+        }, ct);
+    }
+
     // -------------------------- Single FV lookup + retro PDF --------------------------
 
     public Task<InvoiceQueryItemDto?> FindInvoiceByIdAsync(long subiektId, CancellationToken ct)

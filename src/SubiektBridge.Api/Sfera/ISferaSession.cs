@@ -48,6 +48,12 @@ public interface ISferaSession : IAsyncDisposable
     /// <summary>Health: zwraca wersję Subiekta + status sesji.</summary>
     Task<SferaHealthDto> HealthAsync(CancellationToken ct);
 
+    /// <summary>
+    /// Wykonaj read-only SQL query na bazie Subiekta przez Subiekt.Baza.PolaczenieAdoNet.
+    /// Tylko SELECT/WITH (whitelist po stronie controllera). Hard cap maxRows=1000.
+    /// </summary>
+    Task<QueryResultDto> QueryAsync(string sql, int maxRows, CancellationToken ct);
+
     /// <summary>Escape hatch - generic call do dowolnej metody Sfery (whitelist w configu).</summary>
     Task<object?> InvokeRawAsync(string method, IReadOnlyList<object?> args, CancellationToken ct);
 }

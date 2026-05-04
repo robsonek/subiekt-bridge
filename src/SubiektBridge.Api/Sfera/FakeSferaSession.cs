@@ -183,6 +183,14 @@ public sealed class FakeSferaSession : ISferaSession
         return Task.FromResult<byte[]?>(minimalPdf);
     }
 
+    public Task<QueryResultDto> QueryAsync(string sql, int maxRows, CancellationToken ct)
+    {
+        return Task.FromResult(new QueryResultDto(
+            Columns: new[] { "fake_col" },
+            Rows: new IReadOnlyList<object?>[] { new object?[] { "fake_value" } },
+            Truncated: false));
+    }
+
     public Task<SferaHealthDto> HealthAsync(CancellationToken ct)
     {
         return Task.FromResult(new SferaHealthDto(
