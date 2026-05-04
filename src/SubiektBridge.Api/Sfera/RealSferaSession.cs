@@ -306,7 +306,7 @@ public sealed class RealSferaSession : ISferaSession
 
     private static string EscapeSqlLiteral(string s) => s.Replace("'", "''");
 
-    private static InvoiceQueryItemDto MapDokumentToQueryItem(dynamic dok)
+    private InvoiceQueryItemDto MapDokumentToQueryItem(dynamic dok)
     {
         long subiektId = (long)dok.Identyfikator;
         string number = (string)dok.NumerPelny ?? "";
@@ -316,20 +316,34 @@ public sealed class RealSferaSession : ISferaSession
         DateTimeOffset? issueDate = TryGetDate(dok, "DataWystawienia");
         long? contractorId = TryGetLong(dok, "KontrahentId");
         string? notes = TryGetString(dok, "Uwagi");
-        // WartoscBrutto na atrybucie SuDokument moze nie istniec - sprobuj kilku wariantow.
         decimal? gross = TryGetDecimal(dok, "WartoscBrutto")
             ?? TryGetDecimal(dok, "KwotaBrutto")
             ?? TryGetDecimal(dok, "KwotaDoZaplaty");
 
-        // NIP/Nazwa kontrahenta z attached struct - może być null gdy paragon imienny.
+        // NIP/Nazwa kontrahenta - NabywcaInfo na SuDokument bywa pusty.
+        // Lookup do Kontrahenci.Wczytaj(KontrahentId) jest niezbedny do uzyskania
+        // pelnych metadanych. N+1 (200 lookupow per listing) ale Sfera dziala lokalnie.
         string? nip = null, nazwa = null;
-        try
+        if (contractorId.HasValue)
         {
-            dynamic kontr = dok.NabywcaInfo;
-            nip = TryGetString(kontr, "NIP");
-            nazwa = TryGetString(kontr, "Nazwa");
+            try
+            {
+                dynamic kontr = Session.Kontrahenci.Wczytaj(contractorId.Value);
+                try
+                {
+                    nip = TryGetString(kontr, "NIP");
+                    nazwa = TryGetString(kontr, "Nazwa");
+                }
+                finally
+                {
+                    try { kontr.Zamknij(); } catch { /* best-effort */ }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "MapDokumentToQueryItem: Kontrahenci.Wczytaj({Id}) failed", contractorId.Value);
+            }
         }
-        catch { /* brak NabywcaInfo - zostaje null */ }
 
         return new InvoiceQueryItemDto(
             SubiektId: subiektId,
@@ -343,6 +357,11 @@ public sealed class RealSferaSession : ISferaSession
             Notes: notes);
     }
 
+    /// <summary>
+    /// Mapuje dokument przez statyczny pomocnik (bez session lookup) - dla foreach gdzie
+    /// nie chcemy ryzykowac N+1 obciaznia Sfery na duzych kolekcjach. Aktualnie nie uzywamy,
+    /// ale zostawiamy dla przyszlosci.
+    /// </summary>
     private static string? TryGetString(dynamic obj, string prop)
     {
         try { var v = obj.GetType().InvokeMember(prop, BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public, null, obj, null); return v?.ToString(); }
