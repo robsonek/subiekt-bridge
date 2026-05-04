@@ -620,10 +620,13 @@ public sealed class RealSferaSession : ISferaSession
 
     private void ApplyPayment(dynamic document, PaymentDto payment)
     {
-        // payment.Attribute = "PlatnoscPrzelew" -> setujemy "PlatnoscPrzelewId" + "PlatnoscPrzelewKwota"
-        // SetCom (NIE TrySet) - literówka w configu Laravela ('PlatnoscPrzelw') MUSI dać 500
-        // zamiast cicho zapisać FV bez formy płatności.
-        SetCom(document, payment.Attribute + "Id", payment.MethodSubiektId);
+        // Sfera nie ma *Id dla wszystkich form: PlatnoscGotowka i PlatnoscPrzelew mają tylko Kwota.
+        // PlatnoscKredyt/PlatnoscKarta/PlatnoscRaty/PlatnoscKredyt mają *Id (słowniki sl_FormaPlatnosci itd.).
+        // SetCom (NIE TrySet) gwarantuje że literówka w atrybucie da 500 zamiast cicho zapisać FV bez formy.
+        if (payment.MethodSubiektId.HasValue)
+        {
+            SetCom(document, payment.Attribute + "Id", payment.MethodSubiektId.Value);
+        }
         SetCom(document, payment.Attribute + "Kwota", (double)payment.Amount);
     }
 

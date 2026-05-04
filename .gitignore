@@ -25,3 +25,9 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# InsERT Sfera reference docs (oryginalny CHM + rozpakowane HTML).
+# Trzymamy lokalnie do dev, ale nie wrzucamy do public repo:
+# - 35 MB referencji nie ma sensu w releaseach
+# - licencja InsERTu nie pokrywa redystrybucji
+InsERT/

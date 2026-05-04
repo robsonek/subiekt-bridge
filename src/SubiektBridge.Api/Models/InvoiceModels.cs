@@ -34,7 +34,9 @@ public sealed record InvoiceCorrectionRequestDto(
 
 public sealed record PaymentDto(
     [property: JsonPropertyName("attribute")] string Attribute,
-    [property: JsonPropertyName("method_subiekt_id")] int MethodSubiektId,
+    // Null gdy atrybut nie ma odpowiednika *Id w Sferze (PlatnoscGotowka, PlatnoscPrzelew).
+    // Wtedy Bridge ustawia tylko {Attribute}Kwota.
+    [property: JsonPropertyName("method_subiekt_id")] int? MethodSubiektId,
     [property: JsonPropertyName("amount")] decimal Amount,
     [property: JsonPropertyName("is_settled")] bool IsSettled
 );
