@@ -805,12 +805,17 @@ public sealed class RealSferaSession : ISferaSession
     {
         string symbol = c.Symbol;
 
+        // Istnieje: UPDATE danych z biezacego payload (klient mogl sie przeprowadzic
+        // / zmienic nazwisko - reuse symbol/Identyfikator, ale ksiegowosc oczekuje
+        // aktualnych danych na FV). Update tylko gdy widoczna roznica - mniej write'ow.
         if ((bool)Session.Kontrahenci.Istnieje(symbol))
         {
             dynamic existing = Session.Kontrahenci.Wczytaj(symbol);
             try
             {
-                return ToInt64(existing.Identyfikator);
+                long id = ToInt64(existing.Identyfikator);
+                UpdateContractorIfChanged(existing, c);
+                return id;
             }
             finally
             {
@@ -823,29 +828,95 @@ public sealed class RealSferaSession : ISferaSession
         {
             kh.Osoba = c.IsPerson;
             kh.Symbol = symbol;
-            kh.Nazwa = c.Name;
-            kh.NazwaPelna = c.FullName ?? c.Name;
-
-            if (!string.IsNullOrEmpty(c.Nip))
-            {
-                kh.NIP = c.Nip;
-            }
-
-            kh.Miejscowosc = c.Address.City;
-            kh.KodPocztowy = c.Address.PostCode;
-            kh.Ulica = c.Address.Street;
-
-            if (!string.IsNullOrEmpty(c.Email))
-            {
-                TrySet(kh, "AdresEMail", c.Email);
-            }
-
+            ApplyContractorFields(kh, c);
             kh.Zapisz();
             return ToInt64(kh.Identyfikator);
         }
         finally
         {
             TryClose(kh);
+        }
+    }
+
+    /// <summary>
+    /// Update istniejacego kontrahenta wartosciami z DTO. Sprawdza czy cos sie
+    /// zmienilo zeby uniknac niepotrzebnego Zapisz() (audit trail w Subiekcie
+    /// + konflikty miedzy rownoleglymi sesjami).
+    /// </summary>
+    private static void UpdateContractorIfChanged(dynamic existing, ContractorDto c)
+    {
+        bool changed = false;
+        changed |= TryUpdate(existing, "Nazwa", c.Name);
+        changed |= TryUpdate(existing, "NazwaPelna", c.FullName ?? c.Name);
+        changed |= TryUpdate(existing, "Miejscowosc", c.Address.City);
+        changed |= TryUpdate(existing, "KodPocztowy", c.Address.PostCode);
+        changed |= TryUpdate(existing, "Ulica", c.Address.Street);
+        if (!string.IsNullOrEmpty(c.Email))
+        {
+            changed |= TryUpdate(existing, "AdresEMail", c.Email);
+        }
+        if (!string.IsNullOrEmpty(c.Nip))
+        {
+            changed |= TryUpdate(existing, "NIP", c.Nip);
+        }
+
+        if (changed)
+        {
+            try { existing.Zapisz(); } catch { /* read-only contractor (rzadkie) - skip */ }
+        }
+    }
+
+    /// <summary>Ustawia pola na nowo tworzonym kontrahencie (Symbol musi byc juz set).</summary>
+    private static void ApplyContractorFields(dynamic kh, ContractorDto c)
+    {
+        kh.Nazwa = c.Name;
+        kh.NazwaPelna = c.FullName ?? c.Name;
+
+        if (!string.IsNullOrEmpty(c.Nip))
+        {
+            kh.NIP = c.Nip;
+        }
+
+        kh.Miejscowosc = c.Address.City;
+        kh.KodPocztowy = c.Address.PostCode;
+        kh.Ulica = c.Address.Street;
+
+        if (!string.IsNullOrEmpty(c.Email))
+        {
+            TrySet(kh, "AdresEMail", c.Email);
+        }
+    }
+
+    /// <summary>
+    /// Set property na ComObject jezeli nowa wartosc rozni sie od starej.
+    /// Zwraca true gdy faktycznie ustawiono. Pomija set gdy nowa wartosc null/empty.
+    /// </summary>
+    private static bool TryUpdate(dynamic obj, string prop, string? newValue)
+    {
+        if (string.IsNullOrEmpty(newValue))
+        {
+            return false;
+        }
+
+        try
+        {
+            var current = obj.GetType().InvokeMember(prop,
+                BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public,
+                null, obj, null);
+            string currentStr = current?.ToString() ?? string.Empty;
+            if (string.Equals(currentStr, newValue, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            obj.GetType().InvokeMember(prop,
+                BindingFlags.SetProperty | BindingFlags.Instance | BindingFlags.Public,
+                null, obj, new object[] { newValue });
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 
