@@ -396,43 +396,59 @@ public sealed class RealSferaSession : ISferaSession
     {
         return RunOnStaAsync<QueryResultDto>(() =>
         {
+            // Sfera.Baza.PolaczenieAdoNet zwraca obiekt jako COM proxy - wszystkie operacje
+            // przez dynamic invocation (nie mozemy castowac na SqlConnection bezposrednio).
+            // Subiekt sam zarzadza ConnectionString + Open w 'PolaczenieAdoNet' getter -
+            // wedlug docs "Przy każdym wywołaniu tego atrybutu tworzony jest nowy obiekt".
             dynamic conn = Session.Baza.PolaczenieAdoNet;
             try
             {
-                if (conn.State != System.Data.ConnectionState.Open)
-                {
-                    conn.Open();
-                }
+                try { conn.Open(); } catch { /* moze byc juz otwarte */ }
 
-                using var cmd = (System.Data.Common.DbCommand)conn.CreateCommand();
-                cmd.CommandText = sql;
-                cmd.CommandTimeout = 30;
-
-                using var reader = cmd.ExecuteReader();
-                var columns = new List<string>(reader.FieldCount);
-                for (int i = 0; i < reader.FieldCount; i++)
+                dynamic cmd = conn.CreateCommand();
+                try
                 {
-                    columns.Add(reader.GetName(i));
-                }
+                    cmd.CommandText = sql;
+                    cmd.CommandTimeout = 30;
 
-                var rows = new List<IReadOnlyList<object?>>();
-                int count = 0;
-                while (reader.Read())
-                {
-                    if (count >= maxRows)
+                    dynamic reader = cmd.ExecuteReader();
+                    try
                     {
-                        return new QueryResultDto(columns, rows, true);
-                    }
-                    var row = new object?[reader.FieldCount];
-                    for (int i = 0; i < reader.FieldCount; i++)
-                    {
-                        row[i] = reader.IsDBNull(i) ? null : reader.GetValue(i);
-                    }
-                    rows.Add(row);
-                    count++;
-                }
+                        int fieldCount = (int)reader.FieldCount;
+                        var columns = new List<string>(fieldCount);
+                        for (int i = 0; i < fieldCount; i++)
+                        {
+                            columns.Add((string)reader.GetName(i));
+                        }
 
-                return new QueryResultDto(columns, rows, false);
+                        var rows = new List<IReadOnlyList<object?>>();
+                        int count = 0;
+                        while ((bool)reader.Read())
+                        {
+                            if (count >= maxRows)
+                            {
+                                return new QueryResultDto(columns, rows, true);
+                            }
+                            var row = new object?[fieldCount];
+                            for (int i = 0; i < fieldCount; i++)
+                            {
+                                row[i] = (bool)reader.IsDBNull(i) ? null : reader.GetValue(i);
+                            }
+                            rows.Add(row);
+                            count++;
+                        }
+
+                        return new QueryResultDto(columns, rows, false);
+                    }
+                    finally
+                    {
+                        try { reader.Close(); } catch { /* cleanup */ }
+                    }
+                }
+                finally
+                {
+                    try { cmd.Dispose(); } catch { try { (cmd as IDisposable)?.Dispose(); } catch { /* cleanup */ } }
+                }
             }
             finally
             {
