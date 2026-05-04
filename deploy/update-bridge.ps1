@@ -5,11 +5,11 @@
     Self-contained update SubiektBridge'a do najnowszej wersji z GitHub Releases.
 
 .DESCRIPTION
-    Skrypt do uruchamiania przy każdym update - sam pobiera najnowszy release ZIP,
-    rozpakowuje, wymienia binarki (zachowując appsettings.Production.json i data/),
+    Skrypt do uruchamiania przy kazdym update - sam pobiera najnowszy release ZIP,
+    rozpakowuje, wymienia binarki (zachowujac appsettings.Production.json i data/),
     restartuje Windows Service i sprawdza /health.
 
-    Idempotentny: jeśli wersja jest już ta sama, użyj -Force żeby wymusić.
+    Idempotentny: jesli wersja jest juz ta sama, uzyj -Force zeby wymusic.
 
     Wszystko w jednym pliku - zapisz raz w C:\SubiektBridge\update-bridge.ps1
     i odpalaj kiedy chcesz update.
@@ -42,7 +42,7 @@
     # Konkretna wersja
     .\update-bridge.ps1 -Tag v0.7.9
 
-    # Inny port (jeśli zmieniłeś w appsettings)
+    # Inny port (jesli zmieniles w appsettings)
     .\update-bridge.ps1 -Port 8443
 #>
 
@@ -65,24 +65,24 @@ function Write-Section($text) {
 }
 
 function Fail($msg) {
-    Write-Host "BŁĄD: $msg" -ForegroundColor Red
+    Write-Host "BLAD: $msg" -ForegroundColor Red
     exit 1
 }
 
 # ---------------------- TLS 1.2 ----------------------
-# PowerShell 5.x (Windows PS) domyślnie używa TLS 1.0/1.1, GitHub wymaga 1.2+.
+# PowerShell 5.x (Windows PS) domyslnie uzywa TLS 1.0/1.1, GitHub wymaga 1.2+.
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # ---------------------- Sanity ----------------------
 Write-Section "Sanity check"
 
 if (!(Test-Path $InstallDir)) {
-    Fail "InstallDir '$InstallDir' nie istnieje. Pierwsza instalacja - użyj install-windows.ps1."
+    Fail "InstallDir '$InstallDir' nie istnieje. Pierwsza instalacja - uzyj install-windows.ps1."
 }
 
 $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if (-not $service) {
-    Fail "Service '$ServiceName' nie zarejestrowany. Pierwsza instalacja - użyj install-windows.ps1."
+    Fail "Service '$ServiceName' nie zarejestrowany. Pierwsza instalacja - uzyj install-windows.ps1."
 }
 Write-Host "OK: service '$ServiceName' istnieje (status: $($service.Status))" -ForegroundColor Green
 
@@ -95,20 +95,20 @@ if (-not $Tag) {
         $latest = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing
         $Tag = $latest.tag_name
     } catch {
-        Fail "Nie mogę pobrać latest tag: $($_.Exception.Message)"
+        Fail "Nie moge pobrac latest tag: $($_.Exception.Message)"
     }
 }
 
 $Version = $Tag.TrimStart('v')
 Write-Host "Target version: $Tag" -ForegroundColor Yellow
 
-# Sprawdź obecną wersję (z health endpoint jeśli serwis działa)
+# Sprawdz obecna wersje (z health endpoint jesli serwis dziala)
 $currentVersion = $null
 if ($service.Status -eq 'Running') {
     try {
         $tokenForCheck = $Token
         if (-not $tokenForCheck) {
-            # spróbuj wyciągnąć z appsettings.Production.json
+            # sprobuj wyciagnac z appsettings.Production.json
             $configPath = Join-Path $InstallDir "appsettings.Production.json"
             if (Test-Path $configPath) {
                 $config = Get-Content $configPath -Raw | ConvertFrom-Json
@@ -120,15 +120,15 @@ if ($service.Status -eq 'Running') {
                 -Headers @{ 'X-Bridge-Token' = $tokenForCheck } `
                 -SkipCertificateCheck -UseBasicParsing -TimeoutSec 5
             $currentVersion = $health.bridge_version
-            Write-Host "Aktualna wersja na żywo: $currentVersion" -ForegroundColor Yellow
+            Write-Host "Aktualna wersja na zywo: $currentVersion" -ForegroundColor Yellow
         }
     } catch {
-        Write-Host "Nie udało się sprawdzić obecnej wersji ($($_.Exception.Message)) - kontynuuję" -ForegroundColor DarkYellow
+        Write-Host "Nie udalo sie sprawdzic obecnej wersji ($($_.Exception.Message)) - kontynuuje" -ForegroundColor DarkYellow
     }
 }
 
 if ($currentVersion -and ($currentVersion -like "$Version*") -and (-not $Force)) {
-    Write-Host "Wersja $currentVersion już zainstalowana. Użyj -Force żeby wymusić." -ForegroundColor Green
+    Write-Host "Wersja $currentVersion juz zainstalowana. Uzyj -Force zeby wymusic." -ForegroundColor Green
     exit 0
 }
 
@@ -147,7 +147,7 @@ try {
     $sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
     Write-Host "OK: pobrano $sizeMB MB" -ForegroundColor Green
 } catch {
-    Fail "Download zawiódł: $($_.Exception.Message)"
+    Fail "Download zawiodl: $($_.Exception.Message)"
 }
 
 # ---------------------- Extract ----------------------
@@ -158,7 +158,7 @@ try {
     Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
     Write-Host "OK: rozpakowano do $extractDir" -ForegroundColor Green
 } catch {
-    Fail "Rozpakowanie zawiodło: $($_.Exception.Message)"
+    Fail "Rozpakowanie zawiodlo: $($_.Exception.Message)"
 }
 
 # ---------------------- Stop service ----------------------
@@ -166,7 +166,7 @@ Write-Section "Stop service"
 
 if ($service.Status -ne 'Stopped') {
     Stop-Service -Name $ServiceName -Force
-    # Czekaj aż faktycznie się zatrzyma (process unlock plików .exe/.dll)
+    # Czekaj az faktycznie sie zatrzyma (process unlock plikow .exe/.dll)
     $svc = Get-Service -Name $ServiceName
     $tries = 0
     while ($svc.Status -ne 'Stopped' -and $tries -lt 20) {
@@ -175,7 +175,7 @@ if ($service.Status -ne 'Stopped') {
         $tries++
     }
     if ($svc.Status -ne 'Stopped') {
-        Fail "Service nie zatrzymał się w 10s (status: $($svc.Status))"
+        Fail "Service nie zatrzymal sie w 10s (status: $($svc.Status))"
     }
 }
 Write-Host "OK: service zatrzymany" -ForegroundColor Green
@@ -189,22 +189,22 @@ if (Test-Path $configPath) {
 }
 
 # ---------------------- Replace files ----------------------
-Write-Section "Wymiana binariów"
+Write-Section "Wymiana binariow"
 
-# Skopiuj wszystko OPRÓCZ tych co zachowujemy.
+# Skopiuj wszystko OPROCZ tych co zachowujemy.
 $excludes = @("appsettings.Production.json", "data", "logs", "*.log")
 
 Get-ChildItem -Path $extractDir -Exclude $excludes | ForEach-Object {
     Copy-Item $_.FullName -Destination $InstallDir -Recurse -Force
 }
 
-# Przywróć config
+# Przywroc config
 if ($configBackup) {
     Set-Content -Path $configPath -Value $configBackup -NoNewline
-    Write-Host "OK: przywrócony appsettings.Production.json" -ForegroundColor Green
+    Write-Host "OK: przywrocony appsettings.Production.json" -ForegroundColor Green
 }
 
-# Sprzątanie tymczasowe
+# Sprzatanie tymczasowe
 Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue
 if (-not $KeepZip) {
     Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
@@ -229,7 +229,7 @@ if (-not $tokenForCheck -and (Test-Path $configPath)) {
 }
 
 if (-not $tokenForCheck) {
-    Write-Host "Brak tokenu - pomijam health check. Sprawdź ręcznie." -ForegroundColor Yellow
+    Write-Host "Brak tokenu - pomijam health check. Sprawdz recznie." -ForegroundColor Yellow
     exit 0
 }
 
@@ -239,13 +239,13 @@ try {
         -SkipCertificateCheck -UseBasicParsing -TimeoutSec 15
     Write-Host "OK: $($health.status) | bridge=$($health.bridge_version) | subiekt=$($health.subiekt_version) | sfera=$($health.sfera_session)" -ForegroundColor Green
     if ($health.last_error) {
-        Write-Host "OSTRZEŻENIE last_error: $($health.last_error)" -ForegroundColor Yellow
+        Write-Host "OSTRZEZENIE last_error: $($health.last_error)" -ForegroundColor Yellow
     }
 } catch {
-    Write-Host "OSTRZEŻENIE: health endpoint nie odpowiada - sprawdź $InstallDir\logs\" -ForegroundColor Red
+    Write-Host "OSTRZEZENIE: health endpoint nie odpowiada - sprawdz $InstallDir\logs\" -ForegroundColor Red
     Write-Host "Status serwisu: $($svc.Status)" -ForegroundColor Yellow
     exit 1
 }
 
-Write-Section "Update zakończony"
+Write-Section "Update zakonczony"
 Write-Host "Wersja: $Tag" -ForegroundColor Green
