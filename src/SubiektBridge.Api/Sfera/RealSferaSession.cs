@@ -309,6 +309,59 @@ public sealed class RealSferaSession : ISferaSession
         catch { return null; }
     }
 
+    // -------------------------- Single FV lookup + retro PDF --------------------------
+
+    public Task<InvoiceQueryItemDto?> FindInvoiceByIdAsync(long subiektId, CancellationToken ct)
+    {
+        return RunOnStaAsync<InvoiceQueryItemDto?>(() =>
+        {
+            try
+            {
+                dynamic dok = Session.SuDokumentyManager.WczytajDokument(subiektId);
+                try
+                {
+                    return MapDokumentToQueryItem(dok);
+                }
+                finally
+                {
+                    try { dok.Zamknij(); } catch { /* best-effort */ }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Sfera rzuca COMException dla nieistniejącego ID. Logujemy info bo
+                // użytkownik może świadomie zapytać o zły ID; nie traktujemy jako błąd serwera.
+                _logger.LogInformation(ex, "FindInvoiceById: dokument {Id} nie znaleziony", subiektId);
+                return null;
+            }
+        }, ct);
+    }
+
+    public Task<byte[]?> GetInvoicePdfAsync(long subiektId, CancellationToken ct)
+    {
+        return RunOnStaAsync<byte[]?>(() =>
+        {
+            try
+            {
+                dynamic dok = Session.SuDokumentyManager.WczytajDokument(subiektId);
+                try
+                {
+                    string? base64 = TryGeneratePdf(dok, subiektId);
+                    return base64 == null ? null : Convert.FromBase64String(base64);
+                }
+                finally
+                {
+                    try { dok.Zamknij(); } catch { /* best-effort */ }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogInformation(ex, "GetInvoicePdf: dokument {Id} nie znaleziony albo PDF padł", subiektId);
+                return null;
+            }
+        }, ct);
+    }
+
     // -------------------------- Invoices --------------------------
 
     public Task<InvoiceResponseDto> CreateInvoiceAsync(InvoiceRequestDto request, CancellationToken ct)

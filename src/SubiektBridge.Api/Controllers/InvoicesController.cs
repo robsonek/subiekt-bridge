@@ -63,6 +63,48 @@ public sealed class InvoicesController : ControllerBase
         }
     }
 
+    /// <summary>Metadata pojedynczej FV po Bridge ID (sub_&lt;subiektId&gt;).</summary>
+    [HttpGet("{id}")]
+    public async Task<ActionResult<InvoiceQueryItemDto>> Get(string id, CancellationToken ct)
+    {
+        if (!TryParseSubiektIdFromBridgeId(id, out long subiektId))
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "INVALID_BRIDGE_ID",
+                Message: $"Bridge ID '{id}' ma nieznany format. Oczekiwane: 'sub_<id>'."));
+        }
+
+        var item = await _sfera.FindInvoiceByIdAsync(subiektId, ct);
+        if (item == null)
+        {
+            return NotFound(new ErrorResponseDto(
+                Code: "INVOICE_NOT_FOUND",
+                Message: $"FV o subiekt_id={subiektId} nie istnieje w Subiekcie."));
+        }
+        return Ok(item);
+    }
+
+    /// <summary>Retroaktywny PDF download. Generuje świeży wydruk przez Sferę.</summary>
+    [HttpGet("{id}/pdf")]
+    public async Task<IActionResult> GetPdf(string id, CancellationToken ct)
+    {
+        if (!TryParseSubiektIdFromBridgeId(id, out long subiektId))
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "INVALID_BRIDGE_ID",
+                Message: $"Bridge ID '{id}' ma nieznany format. Oczekiwane: 'sub_<id>'."));
+        }
+
+        var bytes = await _sfera.GetInvoicePdfAsync(subiektId, ct);
+        if (bytes == null)
+        {
+            return NotFound(new ErrorResponseDto(
+                Code: "PDF_UNAVAILABLE",
+                Message: $"PDF dla subiekt_id={subiektId} niedostępny (FV nie istnieje albo generowanie padło)."));
+        }
+        return File(bytes, "application/pdf", $"invoice_{subiektId}.pdf");
+    }
+
     [HttpPost]
     public async Task<ActionResult<InvoiceResponseDto>> Create(
         [FromBody] InvoiceRequestDto request,

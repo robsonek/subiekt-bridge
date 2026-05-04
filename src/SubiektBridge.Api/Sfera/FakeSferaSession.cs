@@ -156,6 +156,27 @@ public sealed class FakeSferaSession : ISferaSession
         return Task.FromResult(items);
     }
 
+    public Task<InvoiceQueryItemDto?> FindInvoiceByIdAsync(long subiektId, CancellationToken ct)
+    {
+        return Task.FromResult<InvoiceQueryItemDto?>(new InvoiceQueryItemDto(
+            SubiektId: subiektId,
+            Number: $"FS {subiektId}/2026",
+            Type: "FS",
+            IssueDate: "2026-01-15",
+            ContractorId: 1,
+            ContractorNip: "1234567890",
+            ContractorName: "Mock Klient",
+            GrossAmount: 100.00m,
+            Notes: "fake"));
+    }
+
+    public Task<byte[]?> GetInvoicePdfAsync(long subiektId, CancellationToken ct)
+    {
+        // Minimal valid empty PDF stream
+        var minimalPdf = System.Text.Encoding.ASCII.GetBytes("%PDF-1.4\n%fake bridge\n");
+        return Task.FromResult<byte[]?>(minimalPdf);
+    }
+
     public Task<SferaHealthDto> HealthAsync(CancellationToken ct)
     {
         return Task.FromResult(new SferaHealthDto(

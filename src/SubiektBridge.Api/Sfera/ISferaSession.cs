@@ -39,6 +39,12 @@ public interface ISferaSession : IAsyncDisposable
     /// </summary>
     Task<IReadOnlyList<InvoiceQueryItemDto>> QueryInvoicesAsync(InvoiceQueryRequestDto request, CancellationToken ct);
 
+    /// <summary>Pobierz metadata pojedynczej FV po Subiekt ID. Null gdy nie istnieje.</summary>
+    Task<InvoiceQueryItemDto?> FindInvoiceByIdAsync(long subiektId, CancellationToken ct);
+
+    /// <summary>Wygeneruj PDF pojedynczej FV (retroaktywnie). Null gdy nie istnieje lub generowanie padło.</summary>
+    Task<byte[]?> GetInvoicePdfAsync(long subiektId, CancellationToken ct);
+
     /// <summary>Health: zwraca wersję Subiekta + status sesji.</summary>
     Task<SferaHealthDto> HealthAsync(CancellationToken ct);
 
