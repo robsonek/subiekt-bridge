@@ -619,22 +619,16 @@ public sealed class RealSferaSession : ISferaSession
     private InvoiceResponseDto CreateReceiptCore(ReceiptIssueRequestDto request)
     {
         // PZ - Przyjęcie Zewnętrzne. Dokument magazynowy (zwiększa stan).
-        // Dostawca (request.Supplier) jest kontrahentem; magazyn = MagazynOdbiorczyId
-        // (do którego trafia towar). Pozycje używają ceny zakupu z OrderItem.purchase_price.
+        // Dostawca (request.Supplier) jest kontrahentem.
+        // Magazyn ustawiamy PER POZYCJA (SuPozycja.MagazynId), NIE na dokumencie -
+        // MagazynOdbiorczyId/NadawczyId są atrybutami dla MM (przesunięć miedzymagazynowych)
+        // wg pomocy Sfery. Dla PZ ustawienie pz.MagazynOdbiorczyId rzuca NotImplemented
+        // z ComObject (sprawdzone empirycznie v0.7.29). Subiekt sam wpisze dok_MagId
+        // z magazynu pierwszej pozycji.
         dynamic pz = Session.SuDokumentyManager.DodajPZ();
         try
         {
             pz.LiczonyOdCenBrutto = true;
-
-            // PZ wymaga MagazynOdbiorczyId NA DOKUMENCIE (mapuje na dok_MagId, sprawdzone
-            // SQL-em na istniejacych PZ klienta - wszystkie maja dok_MagId=1). FS ma
-            // asymetryczna walidacje - dla FS MagazynNadawczyId rzuca NotImplemented,
-            // wystarczy SuPozycja.MagazynId per pozycja (v0.7.18). Dla PZ przeciwnie -
-            // dokument musi miec magazyn, inaczej pz.Zapisz() pada z 0x80004005.
-            if (request.WarehouseSubiektId is int receiptWarehouseId)
-            {
-                pz.MagazynOdbiorczyId = receiptWarehouseId;
-            }
 
             // Find-or-create kontrahenta (dostawcy).
             long contractorId = ResolveOrCreateContractor(request.Supplier);
@@ -647,11 +641,10 @@ public sealed class RealSferaSession : ISferaSession
                 TrySet(pz, "DoDokumentuId", (int) request.SourceInvoiceSubiektId.Value);
             }
 
-            // Pozycje bez warehouseId - magazyn juz set na dokumencie. Per-line override
-            // niepotrzebne dla PZ (jednorodne, towar trafia do tego samego magazynu).
+            int? perLineWarehouseId = request.WarehouseSubiektId;
             foreach (var line in request.Lines)
             {
-                AddLineToDocument(pz, line.Ean, line.NameFallback, line.Quantity, line.Unit, line.UnitPriceGross);
+                AddLineToDocument(pz, line.Ean, line.NameFallback, line.Quantity, line.Unit, line.UnitPriceGross, perLineWarehouseId);
             }
 
             pz.Uwagi = request.Notes ?? string.Empty;
