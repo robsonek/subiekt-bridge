@@ -634,7 +634,14 @@ public sealed class RealSferaSession : ISferaSession
 
             // Find-or-create kontrahenta (dostawcy).
             long contractorId = ResolveOrCreateContractor(request.Supplier);
-            pz.KontrahentId = contractorId;
+
+            // KLUCZOWE dla dokumentow MAGAZYNOWYCH (PZ, WZ, MM): uzywamy OdbiorcaId, NIE
+            // KontrahentId. Pomoc Sfery wprost: "Dla dokumentow magazynowych pole to zawiera
+            // identyfikator kontrahenta, dla ktorego ma byc dokument magazynowy wystawiony.
+            // Z tego wzgledu dla dokumentow magazynowych nalezy poslugiwac sie atrybutem
+            // OdbiorcaId a nie KontrahentId." (SuDokument_OdbiorcaId.htm). Setowanie
+            // KontrahentId na PZ powodowalo 0x80004005 na Zapisz().
+            pz.OdbiorcaId = contractorId;
 
             // Powiązanie z FS jeśli istnieje (workflow: PZ przed FS = sourceSubiektId null;
             // PZ po FS = sourceSubiektId ustawione, Subiekt linkuje dokumenty).
