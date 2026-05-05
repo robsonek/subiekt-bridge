@@ -628,7 +628,9 @@ public sealed class RealSferaSession : ISferaSession
         dynamic pz = Session.SuDokumentyManager.DodajPZ();
         try
         {
-            pz.LiczonyOdCenBrutto = true;
+            // PZ liczy od cen netto (default Sfery). NIE ustawiamy LiczonyOdCenBrutto=true -
+            // dla PZ rzuca 0x80004005 (E_FAIL) na Zapisz(). Sprawdzone empirycznie + spojne
+            // z istniejacymi PZ klienta (ob_CenaNetto wpisane wprost, ob_CenaBrutto wyliczone).
 
             // Find-or-create kontrahenta (dostawcy).
             long contractorId = ResolveOrCreateContractor(request.Supplier);
@@ -644,7 +646,7 @@ public sealed class RealSferaSession : ISferaSession
             int? perLineWarehouseId = request.WarehouseSubiektId;
             foreach (var line in request.Lines)
             {
-                AddLineToDocument(pz, line.Ean, line.NameFallback, line.Quantity, line.Unit, line.UnitPriceGross, perLineWarehouseId);
+                AddLineToDocument(pz, line.Ean, line.NameFallback, line.Quantity, line.Unit, line.UnitPriceGross, perLineWarehouseId, useNetPrice: true, vatRate: line.VatRate);
             }
 
             pz.Uwagi = request.Notes ?? string.Empty;
@@ -657,9 +659,8 @@ public sealed class RealSferaSession : ISferaSession
                 int liczbaPozycji = 0;
                 try { liczbaPozycji = (int)pz.Pozycje.Liczba; } catch { /* best effort */ }
                 _logger.LogInformation(
-                    "PZ przed Zapisz: KontrahentId={KontrahentId}, LiczonyOdBrutto={Brutto}, Pozycji={Liczba}, Uwagi.len={UwagiLen}, MagPerLine={Mag}",
+                    "PZ przed Zapisz: KontrahentId={KontrahentId}, Pozycji={Liczba}, Uwagi.len={UwagiLen}, MagPerLine={Mag}, NetMode=true",
                     contractorId,
-                    true,
                     liczbaPozycji,
                     (request.Notes ?? "").Length,
                     perLineWarehouseId);
@@ -1155,7 +1156,7 @@ public sealed class RealSferaSession : ISferaSession
         return null;
     }
 
-    private void AddLineToDocument(dynamic document, string? ean, string name, int quantity, string unit, decimal unitPriceGross, int? warehouseId = null)
+    private void AddLineToDocument(dynamic document, string? ean, string name, int quantity, string unit, decimal unitPriceGross, int? warehouseId = null, bool useNetPrice = false, decimal vatRate = 23m)
     {
         dynamic position;
         bool isTowar = false;
@@ -1199,7 +1200,20 @@ public sealed class RealSferaSession : ISferaSession
 
         position.IloscJm = quantity;
         position.Jm = string.IsNullOrEmpty(unit) ? "szt." : unit;
-        position.CenaBruttoPrzedRabatem = (double)unitPriceGross;
+
+        if (useNetPrice)
+        {
+            // PZ liczy od cen NETTO (LiczonyOdCenBrutto=true rzuca 0x80004005 na Zapisz()
+            // dla PZ - sprawdzone empirycznie + istniejace PZ klienta maja ob_CenaNetto
+            // ustawione, ob_CenaBrutto wyliczone z VatProc). Przeliczamy brutto -> netto
+            // po VAT-cie z LineDto.
+            decimal unitPriceNet = unitPriceGross / (1m + (vatRate / 100m));
+            position.CenaNettoPrzedRabatem = (double)unitPriceNet;
+        }
+        else
+        {
+            position.CenaBruttoPrzedRabatem = (double)unitPriceGross;
+        }
     }
 
     private void AddShippingLineToDocument(dynamic document, ShippingDto shipping)
