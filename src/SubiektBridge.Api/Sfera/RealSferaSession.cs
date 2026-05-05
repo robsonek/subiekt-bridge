@@ -649,7 +649,48 @@ public sealed class RealSferaSession : ISferaSession
 
             pz.Uwagi = request.Notes ?? string.Empty;
 
-            pz.Zapisz();
+            // Diagnostyka: log stanu PZ tuz przed Zapisz(). 0x80004005 z Sfery to ogolny
+            // E_FAIL bez szczegolow (excepInfo gubione przez RuntimeBinder), wiec logujemy
+            // co wgralismy zeby porownac z istniejacymi PZ klienta.
+            try
+            {
+                int liczbaPozycji = 0;
+                try { liczbaPozycji = (int)pz.Pozycje.Liczba; } catch { /* best effort */ }
+                _logger.LogInformation(
+                    "PZ przed Zapisz: KontrahentId={KontrahentId}, LiczonyOdBrutto={Brutto}, Pozycji={Liczba}, Uwagi.len={UwagiLen}, MagPerLine={Mag}",
+                    contractorId,
+                    true,
+                    liczbaPozycji,
+                    (request.Notes ?? "").Length,
+                    perLineWarehouseId);
+            }
+            catch { /* logging best-effort */ }
+
+            try
+            {
+                pz.Zapisz();
+            }
+            catch (Exception ex)
+            {
+                // Sfera zwraca opisy bledow przez IErrorInfo - dynamic binder czesto je traci.
+                // Marshal.GetExceptionForHR z aktualnym error info pozwala odzyskac tekst.
+                string detail = ex.Message;
+                if (ex is COMException com)
+                {
+                    var resolved = Marshal.GetExceptionForHR(com.ErrorCode);
+                    if (resolved != null && !string.IsNullOrEmpty(resolved.Message)
+                        && resolved.Message != ex.Message)
+                    {
+                        detail = $"{ex.Message} | IErrorInfo: {resolved.Message}";
+                    }
+                    _logger.LogError(ex, "PZ.Zapisz() COM HRESULT=0x{HR:X8}: {Detail}", com.ErrorCode, detail);
+                }
+                else
+                {
+                    _logger.LogError(ex, "PZ.Zapisz() failed: {Detail}", detail);
+                }
+                throw;
+            }
 
             long subiektId = ToInt64(pz.Identyfikator);
             string number = (string)pz.NumerPelny;
