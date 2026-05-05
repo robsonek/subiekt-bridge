@@ -130,12 +130,24 @@ public sealed class ReceiptsController : ControllerBase
                 Message: "Nagłówek 'Idempotency-Key' jest wymagany."));
         }
 
+        // Idempotency: powtórny request z tym samym kluczem = ten sam response.
+        // ALE: weryfikujemy ze cached subiekt_id wciaz istnieje. Jesli user anulowal/usunal
+        // PZ w Subiekcie (a nasz Idempotency-Key zostal ten sam, np. ponowny klik 'Wystaw PZ'
+        // w UI po manualnym usunieciu z Subiekta), nie chcemy zwracac danych ducha -
+        // traktujemy request jako nowy. Wzorzec analogiczny do InvoicesController v0.7.23.
         var cached = await _idempotency.TryGetAsync<InvoiceResponseDto>(idempotencyKey, ct);
         if (cached is not null)
         {
-            _logger.LogInformation("Idempotent replay for key {Key} -> PZ {Number}",
-                idempotencyKey, cached.Number);
-            return Ok(cached);
+            var stillExists = await _sfera.FindInvoiceByIdAsync(cached.SubiektId, ct);
+            if (stillExists is not null)
+            {
+                _logger.LogInformation("Idempotent replay for key {Key} -> PZ {Number}",
+                    idempotencyKey, cached.Number);
+                return Ok(cached);
+            }
+            _logger.LogWarning("Idempotent cache invalidated: subiekt_id={Id} ({Number}) nie istnieje juz w Subiekcie - traktujemy jako nowy request",
+                cached.SubiektId, cached.Number);
+            await _idempotency.DeleteAsync(idempotencyKey, ct);
         }
 
         if (request.Lines.Count == 0)
