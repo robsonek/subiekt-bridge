@@ -643,6 +643,16 @@ public sealed class RealSferaSession : ISferaSession
             // KontrahentId na PZ powodowalo 0x80004005 na Zapisz().
             pz.OdbiorcaId = contractorId;
 
+            // NumerOryginalny - login kupujacego z Allegro (dla dropshippingu identyfikuje
+            // dla kogo PZ wystawione). Sfera limituje do 30 znakow + nie dopuszcza NULL.
+            if (!string.IsNullOrEmpty(request.OriginalNumber))
+            {
+                string numerOryg = request.OriginalNumber.Length > 30
+                    ? request.OriginalNumber.Substring(0, 30)
+                    : request.OriginalNumber;
+                TrySet(pz, "NumerOryginalny", numerOryg);
+            }
+
             // Powiązanie z FS jeśli istnieje (workflow: PZ przed FS = sourceSubiektId null;
             // PZ po FS = sourceSubiektId ustawione, Subiekt linkuje dokumenty).
             if (request.SourceInvoiceSubiektId.HasValue)

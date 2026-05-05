@@ -123,7 +123,11 @@ public sealed record ReceiptIssueRequestDto(
     [property: JsonPropertyName("lines")] IReadOnlyList<LineDto> Lines,
     [property: JsonPropertyName("source_invoice_subiekt_id")] long? SourceInvoiceSubiektId,
     [property: JsonPropertyName("external_reference")] string ExternalReference,
-    [property: JsonPropertyName("notes")] string Notes
+    [property: JsonPropertyName("notes")] string Notes,
+    // Numer oryginalny - mapuje na SuDokument.NumerOryginalny (max 30 znakow w Sferze,
+    // Bridge tnie wejscie). Dla PZ z Allegro wpisujemy tutaj login kupujacego, dla
+    // ktorego wystawiamy dropshipping.
+    [property: JsonPropertyName("original_number")] string? OriginalNumber = null
 );
 
 // ----------------------------- Query (GET /invoices) -----------------------------
