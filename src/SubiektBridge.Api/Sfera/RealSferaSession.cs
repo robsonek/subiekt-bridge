@@ -982,7 +982,8 @@ public sealed class RealSferaSession : ISferaSession
     private static void UpdateContractorIfChanged(dynamic existing, ContractorDto c)
     {
         bool changed = false;
-        changed |= TryUpdate(existing, "Nazwa", c.Name);
+        var truncatedName = c.Name.Length > SubiektNazwaMaxLen ? c.Name[..SubiektNazwaMaxLen] : c.Name;
+        changed |= TryUpdate(existing, "Nazwa", truncatedName);
         changed |= TryUpdate(existing, "NazwaPelna", c.FullName ?? c.Name);
         changed |= TryUpdate(existing, "Miejscowosc", c.Address.City);
         changed |= TryUpdate(existing, "KodPocztowy", c.Address.PostCode);
@@ -1043,9 +1044,11 @@ public sealed class RealSferaSession : ISferaSession
     }
 
     /// <summary>Ustawia pola na nowo tworzonym kontrahencie (Symbol musi byc juz set).</summary>
+    private const int SubiektNazwaMaxLen = 50;
+
     private static void ApplyContractorFields(dynamic kh, ContractorDto c)
     {
-        kh.Nazwa = c.Name;
+        kh.Nazwa = c.Name.Length > SubiektNazwaMaxLen ? c.Name[..SubiektNazwaMaxLen] : c.Name;
         kh.NazwaPelna = c.FullName ?? c.Name;
 
         if (!string.IsNullOrEmpty(c.Nip))
