@@ -121,11 +121,32 @@ public sealed class AdminController : ControllerBase
                          "Invoke-WebRequest https://raw.githubusercontent.com/robsonek/subiekt-bridge/main/deploy/update-bridge.ps1 -OutFile " + scriptPath));
         }
 
-        // Buduj argumenty PowerShell.
+        // Resolve tag: jesli klient nie podal, pobierz latest z GitHub.
+        // Robimy to tutaj (C# / .NET Core) bo PS 5.x na Windows Server 2016
+        // nie radzi sobie z TLS do api.github.com (brak wymaganych cipher suites).
+        var resolvedTag = request.Tag;
+        if (string.IsNullOrWhiteSpace(resolvedTag))
+        {
+            try
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+                http.DefaultRequestHeaders.Add("User-Agent", "SubiektBridge-SelfUpdate/1.0");
+                var json = http.GetStringAsync($"https://api.github.com/repos/robsonek/subiekt-bridge/releases/latest")
+                    .GetAwaiter().GetResult();
+                var doc = System.Text.Json.JsonDocument.Parse(json);
+                resolvedTag = doc.RootElement.GetProperty("tag_name").GetString();
+                _logger.LogInformation("Resolved latest tag from GitHub: {Tag}", resolvedTag);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Nie udalo sie pobrac latest tag z GitHub - skrypt PS sprobuje sam");
+            }
+        }
+
         var scriptArgs = new StringBuilder();
-        scriptArgs.Append(" -Force"); // wymus update nawet jesli ta sama wersja
-        if (!string.IsNullOrWhiteSpace(request.Tag))
-            scriptArgs.Append(" -Tag ").Append(request.Tag);
+        scriptArgs.Append(" -Force");
+        if (!string.IsNullOrWhiteSpace(resolvedTag))
+            scriptArgs.Append(" -Tag ").Append(resolvedTag);
         if (request.SelfContained)
             scriptArgs.Append(" -SelfContained");
 

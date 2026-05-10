@@ -100,9 +100,14 @@ function Fail($msg) {
     exit 1
 }
 
-# ---------------------- TLS 1.2 + ignore self-signed cert ----------------------
+# ---------------------- TLS 1.2+ + ignore self-signed cert ----------------------
 # PowerShell 5.x (Windows PS) domyslnie uzywa TLS 1.0/1.1, GitHub wymaga 1.2+.
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Probuj TLS 1.3 jesli dostepne (PS 5.x na starszym .NET moze nie miec Tls13 enum).
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+} catch {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+}
 
 # Bridge ma self-signed cert (data/cert.pfx auto-generated).
 # ServerCertificateValidationCallback dziala na .NET Framework i .NET Core.
@@ -124,13 +129,19 @@ Write-Host "OK: service '$ServiceName' istnieje (status: $($service.Status))" -F
 # ---------------------- Detect latest tag ----------------------
 Write-Section "GitHub Releases"
 
+$ghHeaders = @{ 'User-Agent' = 'SubiektBridge-Updater/1.0' }
+
 if (-not $Tag) {
     Write-Host "Pobieranie najnowszego tagu z GitHub..."
+    $ghUrl = "https://api.github.com/repos/$Repo/releases/latest"
     try {
-        $latest = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing
+        $latest = Invoke-RestMethod -Uri $ghUrl -Headers $ghHeaders -UseBasicParsing
         $Tag = $latest.tag_name
     } catch {
-        Fail "Nie moge pobrac latest tag: $($_.Exception.Message)"
+        Write-Host "Invoke-RestMethod padl: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "Na Windows Server 2016 PowerShell 5.x nie obsluguje cipher suites wymaganych przez GitHub." -ForegroundColor Yellow
+        Write-Host "Uzyj self-update przez Bridge (POST /api/v1/admin/update) - Bridge pobierze tag sam." -ForegroundColor Yellow
+        Fail "Podaj -Tag recznie (np. .\update-bridge.ps1 -Tag v0.7.29)"
     }
 }
 
@@ -193,11 +204,19 @@ Write-Host "URL: $zipUrl"
 Write-Host "Local: $zipPath"
 
 try {
-    Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+    Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -Headers $ghHeaders -UseBasicParsing
     $sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
     Write-Host "OK: pobrano $sizeMB MB" -ForegroundColor Green
 } catch {
-    Fail "Download zawiodl: $($_.Exception.Message)"
+    Write-Host "Invoke-WebRequest padl ($($_.Exception.Message)) - probuje Start-BitsTransfer..." -ForegroundColor Yellow
+    try {
+        Import-Module BitsTransfer -ErrorAction Stop
+        Start-BitsTransfer -Source $zipUrl -Destination $zipPath -ErrorAction Stop
+        $sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
+        Write-Host "OK: pobrano $sizeMB MB (BITS)" -ForegroundColor Green
+    } catch {
+        Fail "Download zawiodl (Invoke-WebRequest + BITS). Sprawdz lacznosc z github.com: $($_.Exception.Message)"
+    }
 }
 
 # ---------------------- Extract ----------------------
