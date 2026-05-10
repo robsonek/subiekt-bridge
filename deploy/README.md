@@ -99,8 +99,8 @@ Skrypt zrobi:
 1. Sanity check: czy plik `.exe` istnieje, czy NSSM jest w PATH, czy `New-Object -ComObject "InsERT.GT"` działa.
 2. Utworzy katalogi `C:\SubiektBridge\data\` (idempotency SQLite) i `C:\SubiektBridge\logs\`.
 3. Zarejestruje Windows Service `SubiektBridge` z auto-startem.
-4. Doda regułę firewall: TCP 8443 dostępny **tylko z IP Laravela**.
-5. Wystartuje serwis i sprawdzi `https://localhost:8443/api/v1/health`.
+4. Doda regułę firewall: TCP 988 dostępny **tylko z IP Laravela**.
+5. Wystartuje serwis i sprawdzi `https://localhost:988/api/v1/health`.
 
 Jeśli któryś krok zawiedzie — skrypt pokaże dokładnie co (z kodem wyjścia ≠ 0).
 
@@ -109,7 +109,7 @@ Jeśli któryś krok zawiedzie — skrypt pokaże dokładnie co (z kodem wyjści
 Na serwerze marketplace-manage, edytuj `.env`:
 
 ```bash
-SUBIEKT_BRIDGE_URL=https://WIN-HOST-IP:8443
+SUBIEKT_BRIDGE_URL=https://WIN-HOST-IP:988
 SUBIEKT_BRIDGE_TOKEN=<dokładnie ten sam co w appsettings.Production.json>
 SUBIEKT_BRIDGE_VERIFY_TLS=false   # self-signed cert na początek
 SUBIEKT_BRIDGE_TIMEOUT=60         # FV może wystawiać się kilkanaście sekund
@@ -130,7 +130,7 @@ php artisan config:clear
 ### a) Z Linuxa, smoke health:
 
 ```bash
-curl -k https://WIN-HOST-IP:8443/api/v1/health
+curl -k https://WIN-HOST-IP:988/api/v1/health
 # Powinien zwrócić: {"status":"ok","subiekt_version":"1.78.0",...}
 ```
 
@@ -185,5 +185,5 @@ cd C:\SubiektBridge\new\
 ## Bezpieczeństwo
 
 - Token w `appsettings.Production.json` ma uprawnienia 0600 (read-only przez user serwisu) — `icacls C:\SubiektBridge\appsettings.Production.json /inheritance:r /grant:r "NT AUTHORITY\SYSTEM:R"`.
-- Firewall otwiera 8443 **tylko z IP Laravela** (parametr `-LaravelHostIp` w `install-windows.ps1`).
+- Firewall otwiera 988 **tylko z IP Laravela** (parametr `-LaravelHostIp` w `install-windows.ps1`).
 - Self-signed cert na MVP — wystarczy bo `SUBIEKT_BRIDGE_VERIFY_TLS=false` po stronie Laravela. Dla pełnej produkcji można później wystawić Let's Encrypt jeśli host ma publiczny DNS.

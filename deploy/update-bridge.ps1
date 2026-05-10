@@ -53,7 +53,7 @@
     .\update-bridge.ps1 -SelfContained
 
     # Inny port (jesli zmieniles w appsettings)
-    .\update-bridge.ps1 -Port 8443
+    .\update-bridge.ps1 -Port 988
 #>
 
 param(
@@ -334,7 +334,8 @@ try {
         Write-Host "OSTRZEZENIE last_error: $($health.last_error)" -ForegroundColor Yellow
     }
 } catch {
-    Write-Host "OSTRZEZENIE: health endpoint nie odpowiada - sprawdz $InstallDir\logs\" -ForegroundColor Red
+    $logDir = Join-Path $InstallDir "logs"
+    Write-Host "OSTRZEZENIE: health endpoint nie odpowiada - sprawdz $logDir" -ForegroundColor Red
     Write-Host "Status serwisu: $($svc.Status)" -ForegroundColor Yellow
     exit 1
 }

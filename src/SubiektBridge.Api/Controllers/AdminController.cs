@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
@@ -20,6 +21,10 @@ namespace SubiektBridge.Api.Controllers;
 [Authorize(AuthenticationSchemes = Auth.BridgeTokenAuthOptions.Scheme)]
 public sealed class AdminController : ControllerBase
 {
+    private static readonly Regex ReleaseTagRegex = new(
+        @"^v?\d+\.\d+\.\d+(?:[-.][0-9A-Za-z]+)*$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     private readonly BridgeOptions _options;
     private readonly ISferaSession _sfera;
     private readonly ILogger<AdminController> _logger;
@@ -91,6 +96,16 @@ public sealed class AdminController : ControllerBase
 
         request ??= new UpdateRequestDto(null, false, true);
 
+        if (!string.IsNullOrWhiteSpace(request.Tag))
+            request = request with { Tag = request.Tag.Trim() };
+
+        if (!string.IsNullOrWhiteSpace(request.Tag) && !IsValidReleaseTag(request.Tag))
+        {
+            return BadRequest(new ErrorResponseDto(
+                Code: "INVALID_TAG",
+                Message: "Tag release ma nieprawidlowy format. Oczekiwany format: v1.2.3 lub v1.2.3-suffix."));
+        }
+
         var installDir = ResolveInstallDir();
         var scriptPath = Path.Combine(installDir, "update-bridge.ps1");
 
@@ -134,13 +149,21 @@ public sealed class AdminController : ControllerBase
                 var json = http.GetStringAsync($"https://api.github.com/repos/robsonek/subiekt-bridge/releases/latest")
                     .GetAwaiter().GetResult();
                 var doc = System.Text.Json.JsonDocument.Parse(json);
-                resolvedTag = doc.RootElement.GetProperty("tag_name").GetString();
+                resolvedTag = doc.RootElement.GetProperty("tag_name").GetString()?.Trim();
                 _logger.LogInformation("Resolved latest tag from GitHub: {Tag}", resolvedTag);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Nie udalo sie pobrac latest tag z GitHub - skrypt PS sprobuje sam");
             }
+        }
+
+        if (!string.IsNullOrWhiteSpace(resolvedTag) && !IsValidReleaseTag(resolvedTag))
+        {
+            _logger.LogError("GitHub latest tag has invalid format: {Tag}", resolvedTag);
+            return StatusCode(StatusCodes.Status502BadGateway, new ErrorResponseDto(
+                Code: "INVALID_RELEASE_TAG",
+                Message: "GitHub Releases zwrocil tag w nieprawidlowym formacie."));
         }
 
         var scriptArgs = new StringBuilder();
@@ -190,6 +213,9 @@ public sealed class AdminController : ControllerBase
             Message: "Update zaplanowany. Bridge zostanie zatrzymany za " + delaySeconds + "s. " +
                      "Sprawdz /health w petli (~30-60s) zeby wiedziec kiedy nowa wersja wstala."));
     }
+
+    private static bool IsValidReleaseTag(string tag) =>
+        ReleaseTagRegex.IsMatch(tag);
 
     private string ResolveInstallDir()
     {

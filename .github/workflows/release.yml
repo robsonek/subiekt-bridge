@@ -59,7 +59,7 @@ jobs:
             "Kestrel": {
               "Endpoints": {
                 "Https": {
-                  "Url": "https://0.0.0.0:8443",
+                  "Url": "https://0.0.0.0:988",
                   "Certificate": {
                     "Path": "data/cert.pfx",
                     "Password": "subiekt-bridge-self-signed"
@@ -93,6 +93,7 @@ jobs:
             dir="publish/${{ matrix.rid }}-${variant}"
             cp deploy/install-windows.ps1 "$dir/"
             cp deploy/update-windows.ps1 "$dir/"
+            cp deploy/update-bridge.ps1 "$dir/"
             cp /tmp/appsettings.Production.json.template "$dir/"
             rm -f "$dir/appsettings.Development.json"
           done

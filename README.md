@@ -64,7 +64,7 @@ Subiekt GT jest tylko 32-bit, więc Bridge musi być **win-x86** (in-process COM
    ```
 5. **Test**:
    ```bash
-   curl -k https://WIN-HOST:8443/api/v1/health
+   curl -k https://WIN-HOST:988/api/v1/health
    # {"status":"ok","subiekt_version":"1.78.0",...}
    ```
 
@@ -91,7 +91,7 @@ cd subiekt-bridge
 
 # Build i run lokalnie z mock Sfera (działa na macOS/Linux/Windows):
 dotnet run --project src/SubiektBridge.Api
-# https://localhost:8443/api/v1/health
+# https://localhost:988/api/v1/health
 # Włączane przez Bridge:UseFakeSfera=true w appsettings.Development.json
 
 # Build pod Windows (self-contained):
