@@ -749,17 +749,17 @@ public sealed class RealSferaSession : ISferaSession
 
             if (!request.SourceIsExternal)
             {
-                kfs.DoDokumentuId = (int)sourceSubiektId;
+                SetComProperty(kfs, "DoDokumentuId", (int)sourceSubiektId);
             }
             else
             {
                 if (!string.IsNullOrEmpty(request.SourceInvoiceNumber))
                 {
-                    kfs.DoDokumentuNumerPelny = request.SourceInvoiceNumber;
+                    SetComProperty(kfs, "DoDokumentuNumerPelny", request.SourceInvoiceNumber);
                 }
                 if (!string.IsNullOrEmpty(request.SourceInvoiceDate))
                 {
-                    kfs.DoDokumentuDataWystawienia = DateTime.Parse(request.SourceInvoiceDate);
+                    SetComProperty(kfs, "DoDokumentuDataWystawienia", DateTime.Parse(request.SourceInvoiceDate));
                 }
             }
 
@@ -1328,6 +1328,13 @@ public sealed class RealSferaSession : ISferaSession
         {
             // Property może nie istnieć w tej wersji Subiekta - silently skip.
         }
+    }
+
+    private static void SetComProperty(object target, string propName, object value)
+    {
+        target.GetType().InvokeMember(propName,
+            BindingFlags.SetProperty | BindingFlags.Instance | BindingFlags.Public,
+            null, target, new[] { value });
     }
 
     private static decimal? TryReadDecimal(object target, string propName)
