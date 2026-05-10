@@ -64,8 +64,28 @@ param(
     [string] $Token,
     [switch] $Force,
     [switch] $KeepZip,
-    [switch] $SelfContained
+    [switch] $SelfContained,
+    [switch] $Detached
 )
+
+# --- Self-detach: jesli jestesmy child processem serwisu Bridge'a, Stop-Service
+# zabije cale drzewo procesow (w tym nas). Rozwiazanie: re-launch jako niezalezny
+# proces i wyjdz. Flaga -Detached zapobiega nieskonczonej petli.
+if (-not $Detached) {
+    $relaunchArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath, "-Detached", "-Force")
+    if ($Tag)           { $relaunchArgs += "-Tag";           $relaunchArgs += $Tag }
+    if ($Token)         { $relaunchArgs += "-Token";         $relaunchArgs += $Token }
+    if ($InstallDir -ne "C:\SubiektBridge") { $relaunchArgs += "-InstallDir"; $relaunchArgs += $InstallDir }
+    if ($ServiceName -ne "SubiektBridge")   { $relaunchArgs += "-ServiceName"; $relaunchArgs += $ServiceName }
+    if ($Port -ne 988)  { $relaunchArgs += "-Port";          $relaunchArgs += $Port }
+    if ($KeepZip)       { $relaunchArgs += "-KeepZip" }
+    if ($SelfContained) { $relaunchArgs += "-SelfContained" }
+
+    $logFile = Join-Path $InstallDir "logs\update-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    Start-Process powershell.exe -ArgumentList $relaunchArgs -WindowStyle Hidden `
+        -RedirectStandardOutput $logFile -RedirectStandardError "$logFile.err"
+    exit 0
+}
 
 $ErrorActionPreference = "Stop"
 $Repo = "robsonek/subiekt-bridge"
