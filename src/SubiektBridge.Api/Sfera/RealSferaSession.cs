@@ -1277,7 +1277,9 @@ public sealed class RealSferaSession : ISferaSession
         try { pozCount = (int)document.Pozycje.Liczba; }
         catch { return false; }
 
-        for (int i = 0; i < pozCount; i++)
+        // Sfera Pozycje.Element jest 1-indexed (COM Automation standard).
+        // Element(0) rzuca ArgumentException "Value does not fall within the expected range".
+        for (int i = 1; i <= pozCount; i++)
         {
             dynamic? poz = null;
             try
