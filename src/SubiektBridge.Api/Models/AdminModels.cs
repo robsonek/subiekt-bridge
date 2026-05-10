@@ -12,6 +12,13 @@ public sealed record UpdateRequestDto(
     [property: JsonPropertyName("refresh_script")] bool RefreshScript = true
 );
 
+public sealed record LogsResponseDto(
+    [property: JsonPropertyName("file")] string File,
+    [property: JsonPropertyName("total_lines")] int TotalLines,
+    [property: JsonPropertyName("returned")] int Returned,
+    [property: JsonPropertyName("lines")] string[] Lines
+);
+
 public sealed record UpdateResponseDto(
     [property: JsonPropertyName("scheduled_at")] DateTimeOffset ScheduledAt,
     [property: JsonPropertyName("delay_seconds")] int DelaySeconds,

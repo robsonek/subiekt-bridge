@@ -769,37 +769,32 @@ public sealed class RealSferaSession : ISferaSession
 
             kfs.LiczonyOdCenBrutto = true;
 
-            // Mapowanie request.Lines:
-            //  - line.Ean ustawione + match w skopiowanych pozycjach KFS  -> modyfikuj IloscJmPoKorekcie
-            //    (zwrot fizyczny towaru, magazyn rośnie o zwracaną ilość)
-            //  - line.Ean pusty (AMOUNT residual) lub brak match po EAN  -> dodaj nową usługową
-            //    pozycję z ujemną wartością (zwrot pieniężny / kwotowy, bez ruchu magazynowego)
-            //
-            // KFS po NaPodstawie nie pozwala na Pozycje.Dodaj(towar) - rzuca COMException.
-            // Dla nie-matchującego EAN dodajemy usługową (ean=null) z opisem zawierającym EAN
-            // żeby ksiegowy mial info ze chodzilo o konkretny towar nieobecny na FS.
+            // Mapowanie request.Lines: dla kazdej linii z EAN szukamy pozycji w skopiowanych
+            // pozycjach KFS i ustawiamy IloscJmPoKorekcie. KFS po NaPodstawie() NIE POZWALA
+            // dodawac nowych pozycji (Pozycje.Dodaj/DodajUslugeJednorazowa rzucaja COMException).
+            // Linie bez EAN (AMOUNT residual) lub bez matchu = blad walidacji - rzucamy
+            // konkretny exception, lepiej fail-fast niz wystawic KFS bez prawidlowych korekt.
+            var unmatched = new List<string>();
             foreach (var line in request.Lines)
             {
-                bool adjusted = false;
-                if (!request.SourceIsExternal && !string.IsNullOrEmpty(line.Ean))
+                if (request.SourceIsExternal || string.IsNullOrEmpty(line.Ean))
                 {
-                    adjusted = TryAdjustExistingPosition(kfs, line.Ean, line.QuantityChange);
+                    unmatched.Add($"line ean={line.Ean ?? "<null>"} name='{line.NameFallback}' qty={line.QuantityChange}");
+                    continue;
                 }
-
-                if (!adjusted)
+                if (!TryAdjustExistingPosition(kfs, line.Ean, line.QuantityChange))
                 {
-                    string fallbackName = !string.IsNullOrEmpty(line.Ean)
-                        ? $"{line.NameFallback} (EAN {line.Ean})"
-                        : line.NameFallback;
-
-                    AddLineToDocument(
-                        document: kfs,
-                        ean: null, // wymusza DodajUslugeJednorazowa - KFS pozwala dorzucac uslugi
-                        name: fallbackName,
-                        quantity: line.QuantityChange,
-                        unit: line.Unit,
-                        unitPriceGross: line.UnitPriceGross);
+                    unmatched.Add($"line ean={line.Ean} name='{line.NameFallback}' qty={line.QuantityChange}");
                 }
+            }
+
+            if (unmatched.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    "KFS: nie udalo sie zmapowac " + unmatched.Count + " linii na pozycje skopiowane z FS. " +
+                    "KFS po NaPodstawie() nie pozwala dodawac nowych pozycji - kazda linia musi pasowac " +
+                    "do istniejacej pozycji FS po Towar.Identyfikator. Niezmapowane: " +
+                    string.Join("; ", unmatched));
             }
 
             kfs.Uwagi = $"Korekta: {request.Reason} | ref: {request.ExternalReference}";
@@ -1274,10 +1269,14 @@ public sealed class RealSferaSession : ISferaSession
     }
 
     /// <summary>
-    /// Po NaPodstawie() KFS ma skopiowane pozycje z FS - znajdujemy pozycję po EAN/Symbol towaru
-    /// i ustawiamy IloscJmPoKorekcie. Pozycje nieobjęte korektą zostają z defaultem (IloscJmPoKorekcie = IloscJm).
-    /// Zwraca true gdy pozycja znaleziona; false oznacza że trzeba dodać nową pozycję usługową
-    /// (np. zwrot pieniężny bez fizycznego towaru, lub EAN nieobecny w oryginalnym FS).
+    /// Po NaPodstawie() KFS ma skopiowane pozycje z FS - znajdujemy pozycję po Towar.Identyfikator
+    /// (numeric tw_Id, stabilny match) i ustawiamy IloscJmPoKorekcie. Pozycje nieobjęte korektą
+    /// zostają z defaultem. Zwraca true gdy match znaleziony.
+    ///
+    /// Strategie matchowania (kolejność):
+    /// 1. EAN → tw_Id przez Towary.Wczytaj(ean), porównanie z poz.TowarId
+    /// 2. Sequential: jeśli pozCount == 1 i to jedyny call dla tego KFS - bierz pozycję 1
+    ///    (1:1 mapping w przypadkach single-item refund)
     /// </summary>
     private bool TryAdjustExistingPosition(dynamic document, string ean, int deltaQuantity)
     {
@@ -1289,11 +1288,27 @@ public sealed class RealSferaSession : ISferaSession
             return false;
         }
 
-        _logger.LogInformation("TryAdjustExistingPosition: szukam ean={Ean}, delta={Delta}, pozCount={Count}",
-            ean, deltaQuantity, pozCount);
+        // Pre-resolve EAN -> tw_Id przez Session.Towary.Wczytaj.
+        long? targetTowarId = null;
+        try
+        {
+            if ((bool)Session.Towary.Istnieje(ean))
+            {
+                dynamic towar = Session.Towary.Wczytaj(ean);
+                try { targetTowarId = ToInt64(towar.Identyfikator); }
+                finally { TryClose(towar); }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "TryAdjustExistingPosition: nie udalo sie zresolvowac EAN={Ean} -> tw_Id", ean);
+        }
+
+        _logger.LogInformation(
+            "TryAdjustExistingPosition: szukam ean={Ean} (tw_Id={TwId}), delta={Delta}, pozCount={Count}",
+            ean, targetTowarId?.ToString() ?? "<unresolved>", deltaQuantity, pozCount);
 
         // Sfera Pozycje.Element jest 1-indexed (COM Automation standard).
-        // Element(0) rzuca ArgumentException "Value does not fall within the expected range".
         for (int i = 1; i <= pozCount; i++)
         {
             dynamic? poz = null;
@@ -1307,21 +1322,50 @@ public sealed class RealSferaSession : ISferaSession
                 }
                 if (poz == null) continue;
 
-                // Pozycje usługowe (DodajUslugeJednorazowa) nie mają Towara - skip silently.
-                dynamic? towar = null;
-                try { towar = poz.Towar; } catch { /* ignore */ }
-
-                string? posSymbol = towar != null ? TryReadString(towar, "Symbol") : null;
-                string? posEan = towar != null ? TryReadString(towar, "EAN") : null;
+                // Diagnostyka: jakie property faktycznie sa dostepne na pozycji KFS po NaPodstawie.
+                long? posTowarId = TryReadInt64(poz, "TowarId");
+                long? posIdentyfikator = TryReadInt64(poz, "Identyfikator");
                 int posIloscJm = -1;
                 try { posIloscJm = Convert.ToInt32(poz.IloscJm); } catch { /* ignore */ }
 
-                _logger.LogInformation(
-                    "  poz[{I}]: Symbol={Symbol}, EAN={Ean}, IloscJm={Qty}",
-                    i, posSymbol ?? "<null>", posEan ?? "<null>", posIloscJm);
+                long? posTowarIdFromTowar = null;
+                string? posSymbol = null, posEan = null;
+                try
+                {
+                    dynamic towar = poz.Towar;
+                    if (towar != null)
+                    {
+                        posTowarIdFromTowar = TryReadInt64(towar, "Identyfikator");
+                        posSymbol = TryReadString(towar, "Symbol");
+                        posEan = TryReadString(towar, "EAN");
+                    }
+                }
+                catch { /* ignore - poz moze nie miec Towar (uslugowa) */ }
 
-                bool match = string.Equals(posSymbol, ean, StringComparison.OrdinalIgnoreCase)
-                          || string.Equals(posEan, ean, StringComparison.OrdinalIgnoreCase);
+                _logger.LogInformation(
+                    "  poz[{I}]: TowarId={TowarId}, Identyfikator={Ident}, Towar.Identyfikator={TI}, " +
+                    "Towar.Symbol={Symbol}, Towar.EAN={Ean}, IloscJm={Qty}",
+                    i,
+                    posTowarId?.ToString() ?? "<null>",
+                    posIdentyfikator?.ToString() ?? "<null>",
+                    posTowarIdFromTowar?.ToString() ?? "<null>",
+                    posSymbol ?? "<null>",
+                    posEan ?? "<null>",
+                    posIloscJm);
+
+                // Match priority: TowarId via dispatch -> Towar.Identyfikator -> Symbol/EAN string
+                bool match = false;
+                if (targetTowarId.HasValue)
+                {
+                    match = posTowarId == targetTowarId
+                         || posTowarIdFromTowar == targetTowarId;
+                }
+                if (!match)
+                {
+                    match = string.Equals(posSymbol, ean, StringComparison.OrdinalIgnoreCase)
+                         || string.Equals(posEan, ean, StringComparison.OrdinalIgnoreCase);
+                }
+
                 if (!match) continue;
 
                 int newQty = posIloscJm >= 0 ? posIloscJm + deltaQuantity : 0;
@@ -1349,6 +1393,18 @@ public sealed class RealSferaSession : ISferaSession
             }
         }
         return false;
+    }
+
+    private static long? TryReadInt64(object target, string propName)
+    {
+        try
+        {
+            object? raw = target.GetType().InvokeMember(propName,
+                BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public,
+                null, target, Array.Empty<object>());
+            return raw is null ? null : Convert.ToInt64(raw);
+        }
+        catch { return null; }
     }
 
     private void ApplyPayment(dynamic document, PaymentDto payment)

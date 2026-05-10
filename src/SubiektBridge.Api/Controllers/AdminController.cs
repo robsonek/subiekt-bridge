@@ -84,6 +84,63 @@ public sealed class AdminController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// GET /api/v1/admin/logs?tail=N&grep=substr - tail z najnowszego pliku Serilog.
+    /// Domyslnie 100 linii. grep filtruje case-insensitive (substring match).
+    /// Logi w {InstallDir}\logs\subiekt-bridge-*.log (Serilog rolling daily).
+    /// </summary>
+    [HttpGet("logs")]
+    public ActionResult<LogsResponseDto> Logs([FromQuery] int tail = 100, [FromQuery] string? grep = null)
+    {
+        if (tail < 1) tail = 1;
+        if (tail > 5000) tail = 5000;
+
+        var logsDir = Path.Combine(ResolveInstallDir(), "logs");
+        if (!Directory.Exists(logsDir))
+        {
+            return NotFound(new ErrorResponseDto("LOGS_NOT_FOUND", $"Brak katalogu logow: {logsDir}"));
+        }
+
+        var newest = new DirectoryInfo(logsDir)
+            .EnumerateFiles("subiekt-bridge*.log")
+            .OrderByDescending(f => f.LastWriteTimeUtc)
+            .FirstOrDefault();
+
+        if (newest is null)
+        {
+            return NotFound(new ErrorResponseDto("LOGS_NOT_FOUND", "Brak plikow log w " + logsDir));
+        }
+
+        // FileShare.ReadWrite - Serilog trzyma file open dla rolling, nie blokujemy go.
+        List<string> lines;
+        try
+        {
+            using var fs = new FileStream(newest.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var sr = new StreamReader(fs);
+            lines = new List<string>();
+            string? l;
+            while ((l = sr.ReadLine()) != null) lines.Add(l);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponseDto(
+                "LOGS_READ_FAILED", ex.GetType().Name + ": " + ex.Message));
+        }
+
+        IEnumerable<string> filtered = lines;
+        if (!string.IsNullOrEmpty(grep))
+        {
+            filtered = filtered.Where(l => l.Contains(grep, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var result = filtered.TakeLast(tail).ToArray();
+        return Ok(new LogsResponseDto(
+            File: newest.Name,
+            TotalLines: lines.Count,
+            Returned: result.Length,
+            Lines: result));
+    }
+
     [HttpPost("update")]
     public ActionResult<UpdateResponseDto> Update([FromBody] UpdateRequestDto? request)
     {
