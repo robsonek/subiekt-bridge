@@ -104,23 +104,9 @@ function Fail($msg) {
 # PowerShell 5.x (Windows PS) domyslnie uzywa TLS 1.0/1.1, GitHub wymaga 1.2+.
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-# Bridge ma self-signed cert (data/cert.pfx auto-generated). PS 5.x nie ma
-# -SkipCertificateCheck w Invoke-RestMethod - ustawiamy callback ktory
-# akceptuje wszystkie certy (bezpieczne bo mowimy z localhost).
-if (-not ("TrustAllCertsPolicy" -as [type])) {
-    Add-Type @"
-using System;
-using System.Net;
-using System.Net.Security;
-using System.Security.Cryptography.X509Certificates;
-public class TrustAllCertsPolicy : ICertificatePolicy {
-    public bool CheckValidationResult(ServicePoint sp, X509Certificate cert, WebRequest req, int problem) {
-        return true;
-    }
-}
-"@
-}
-[System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
+# Bridge ma self-signed cert (data/cert.pfx auto-generated).
+# ServerCertificateValidationCallback dziala na .NET Framework i .NET Core.
+[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
 # ---------------------- Sanity ----------------------
 Write-Section "Sanity check"
