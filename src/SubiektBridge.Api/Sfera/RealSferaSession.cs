@@ -745,14 +745,18 @@ public sealed class RealSferaSession : ISferaSession
             : Session.SuDokumentyManager.DodajKFS();
         try
         {
-            kfs.LiczonyOdCenBrutto = true;
-
             if (!request.SourceIsExternal)
             {
-                SetComProperty(kfs, "DoDokumentuId", (int)sourceSubiektId);
+                // Powiązanie ze źródłowym FS: NaPodstawie(int) - DispId 166. DoDokumentuId
+                // jest read-only w Sferze (TargetParameterCountException przy SetProperty).
+                // NaPodstawie automatycznie kopiuje pozycje z FS do KFS - modyfikujemy je
+                // niżej przez IloscJmPoKorekcie zamiast dodawać własne ujemne pozycje.
+                kfs.NaPodstawie((int)sourceSubiektId);
             }
             else
             {
+                // KFSn = korekta do dokumentu nieistniejącego w bazie (zewnętrzny FS).
+                // Tu nie ma pozycji do skopiowania, ręcznie podajemy referencję.
                 if (!string.IsNullOrEmpty(request.SourceInvoiceNumber))
                 {
                     SetComProperty(kfs, "DoDokumentuNumerPelny", request.SourceInvoiceNumber);
@@ -763,15 +767,31 @@ public sealed class RealSferaSession : ISferaSession
                 }
             }
 
+            kfs.LiczonyOdCenBrutto = true;
+
+            // Mapowanie request.Lines:
+            //  - line.Ean ustawione + match w skopiowanych pozycjach KFS  -> modyfikuj IloscJmPoKorekcie
+            //    (zwrot fizyczny towaru, magazyn rośnie o zwracaną ilość)
+            //  - line.Ean pusty (AMOUNT residual) lub brak match po EAN  -> dodaj nową usługową
+            //    pozycję z ujemną wartością (zwrot pieniężny / kwotowy, bez ruchu magazynowego)
             foreach (var line in request.Lines)
             {
-                AddLineToDocument(
-                    document: kfs,
-                    ean: line.Ean,
-                    name: line.NameFallback,
-                    quantity: line.QuantityChange, // ujemna dla zwrotów
-                    unit: line.Unit,
-                    unitPriceGross: line.UnitPriceGross);
+                bool adjusted = false;
+                if (!request.SourceIsExternal && !string.IsNullOrEmpty(line.Ean))
+                {
+                    adjusted = TryAdjustExistingPosition(kfs, line.Ean, line.QuantityChange);
+                }
+
+                if (!adjusted)
+                {
+                    AddLineToDocument(
+                        document: kfs,
+                        ean: line.Ean,
+                        name: line.NameFallback,
+                        quantity: line.QuantityChange, // ujemna dla zwrotów
+                        unit: line.Unit,
+                        unitPriceGross: line.UnitPriceGross);
+                }
             }
 
             kfs.Uwagi = $"Korekta: {request.Reason} | ref: {request.ExternalReference}";
@@ -1243,6 +1263,58 @@ public sealed class RealSferaSession : ISferaSession
         position.IloscJm = 1;
         position.Jm = "szt.";
         position.CenaBruttoPrzedRabatem = (double)shipping.UnitPriceGross;
+    }
+
+    /// <summary>
+    /// Po NaPodstawie() KFS ma skopiowane pozycje z FS - znajdujemy pozycję po EAN/Symbol towaru
+    /// i ustawiamy IloscJmPoKorekcie. Pozycje nieobjęte korektą zostają z defaultem (IloscJmPoKorekcie = IloscJm).
+    /// Zwraca true gdy pozycja znaleziona; false oznacza że trzeba dodać nową pozycję usługową
+    /// (np. zwrot pieniężny bez fizycznego towaru, lub EAN nieobecny w oryginalnym FS).
+    /// </summary>
+    private bool TryAdjustExistingPosition(dynamic document, string ean, int deltaQuantity)
+    {
+        int pozCount;
+        try { pozCount = (int)document.Pozycje.Liczba; }
+        catch { return false; }
+
+        for (int i = 0; i < pozCount; i++)
+        {
+            dynamic? poz = null;
+            try
+            {
+                poz = document.Pozycje.Element(i);
+                if (poz == null) continue;
+
+                // Pozycje usługowe (DodajUslugeJednorazowa) nie mają Towara - skip silently.
+                dynamic? towar = null;
+                try { towar = poz.Towar; } catch { continue; }
+                if (towar == null) continue;
+
+                string? posSymbol = TryReadString(towar, "Symbol");
+                string? posEan = TryReadString(towar, "EAN");
+
+                bool match = string.Equals(posSymbol, ean, StringComparison.OrdinalIgnoreCase)
+                          || string.Equals(posEan, ean, StringComparison.OrdinalIgnoreCase);
+                if (!match) continue;
+
+                // IloscJm to oryginalna ilość z FS (przed korektą). Korekta zmniejsza
+                // ilość po korekcie o |deltaQuantity| (delta jest ujemna dla zwrotów).
+                int origQty;
+                try { origQty = Convert.ToInt32(poz.IloscJm); }
+                catch { return false; }
+
+                int newQty = origQty + deltaQuantity;
+                if (newQty < 0) newQty = 0; // klient zwrócił więcej niż było - nie schodzimy poniżej 0
+
+                SetComProperty(poz, "IloscJmPoKorekcie", newQty);
+                return true;
+            }
+            finally
+            {
+                if (poz != null) TryClose(poz);
+            }
+        }
+        return false;
     }
 
     private void ApplyPayment(dynamic document, PaymentDto payment)
