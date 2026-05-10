@@ -170,8 +170,10 @@ public sealed class AdminController : ControllerBase
         scriptArgs.Append(" -Force");
         if (!string.IsNullOrWhiteSpace(resolvedTag))
             scriptArgs.Append(" -Tag ").Append(resolvedTag);
-        if (request.SelfContained)
-            scriptArgs.Append(" -SelfContained");
+        // Self-contained jest default (bezpieczniejsze - nie zaklada x86 runtime na hoscie).
+        // Aby pobrac fxdep wariant ustaw fxdep=true w body POST /admin/update.
+        if (request.Fxdep)
+            scriptArgs.Append(" -Fxdep");
 
         // Delay + skrypt w jednym poleceniu PowerShell:
         // Start-Sleep daje Bridge'owi czas na zwrocenie 202 zanim service

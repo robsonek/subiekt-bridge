@@ -38,19 +38,24 @@
     Zachowaj pobrany ZIP w %TEMP% (default: usuwany po update).
 
 .PARAMETER SelfContained
-    Pobierz wariant self-contained (~46 MB, runtime wbudowany w binarki).
-    Default: framework-dependent (~1.5 MB) - wymaga ASP.NET Core 10 Runtime (x86)
-    zainstalowanego na hoscie.
+    [DEPRECATED, default = true] Wariant self-contained (~46 MB, runtime wbudowany).
+    Self-contained jest teraz default - flaga zostawiona dla wstecznej kompatybilnosci.
+    Aby pobrac fxdep uzyj -Fxdep.
+
+.PARAMETER Fxdep
+    Pobierz wariant framework-dependent (~4 MB) zamiast self-contained (default).
+    Wymaga ASP.NET Core 10 Runtime (x86) zainstalowanego na hoscie. Bez niego
+    serwis nie wystartuje ("No frameworks were found"). Uzywaj swiadomie.
 
 .EXAMPLE
-    # Najprostsze - update do najnowszej wersji (fxdep, maly download)
+    # Najprostsze - update do najnowszej wersji (self-contained, ~46 MB)
     .\update-bridge.ps1
 
     # Konkretna wersja
     .\update-bridge.ps1 -Tag v0.7.9
 
-    # Self-contained (gdy nie chcesz instalowac ASP.NET Core 10 Runtime osobno)
-    .\update-bridge.ps1 -SelfContained
+    # Fxdep (gdy masz zainstalowany ASP.NET Core 10 Runtime x86)
+    .\update-bridge.ps1 -Fxdep
 
     # Inny port (jesli zmieniles w appsettings)
     .\update-bridge.ps1 -Port 988
@@ -65,8 +70,13 @@ param(
     [switch] $Force,
     [switch] $KeepZip,
     [switch] $SelfContained,
+    [switch] $Fxdep,
     [switch] $Detached
 )
+
+# Self-contained jest teraz default (bezpieczniejsze - nie zaklada x86 runtime na hoscie).
+# -SelfContained zostaje no-op dla wstecznej kompatybilnosci, -Fxdep wymusza maly wariant.
+$UseSelfContained = -not $Fxdep
 
 # --- Self-detach: jesli jestesmy child processem serwisu Bridge'a, Stop-Service
 # zabije cale drzewo procesow (w tym nas). Rozwiazanie: re-launch jako niezalezny
@@ -80,6 +90,7 @@ if (-not $Detached) {
     if ($Port -ne 988)  { $relaunchArgs += "-Port";          $relaunchArgs += $Port }
     if ($KeepZip)       { $relaunchArgs += "-KeepZip" }
     if ($SelfContained) { $relaunchArgs += "-SelfContained" }
+    if ($Fxdep)         { $relaunchArgs += "-Fxdep" }
 
     $logFile = Join-Path $InstallDir "logs\update-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
     Start-Process powershell.exe -ArgumentList $relaunchArgs -WindowStyle Hidden `
@@ -146,20 +157,20 @@ if (-not $Tag) {
 }
 
 $Version = $Tag.TrimStart('v')
-$variant = if ($SelfContained) { "win-x86" } else { "win-x86-fxdep" }
+$variant = if ($UseSelfContained) { "win-x86" } else { "win-x86-fxdep" }
 Write-Host "Target version: $Tag" -ForegroundColor Yellow
 Write-Host "Variant: $variant" -ForegroundColor Yellow
 
 # Dla fxdep ostrzezenie gdy ASP.NET Core 10 (x86) nie zainstalowany.
 # Self-contained nie wymaga niczego.
-if (-not $SelfContained) {
+if (-not $UseSelfContained) {
     $aspnetX86 = "C:\Program Files (x86)\dotnet\shared\Microsoft.AspNetCore.App"
     $hasAspnet10 = (Test-Path $aspnetX86) -and
         (Get-ChildItem $aspnetX86 -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "10.*" })
     if (-not $hasAspnet10) {
         Write-Host "OSTRZEZENIE: nie wykryto ASP.NET Core 10 Runtime (x86)." -ForegroundColor Yellow
         Write-Host "Pobierz: https://dotnet.microsoft.com/download/dotnet/10.0 (Runtime, x86, ASP.NET Core)" -ForegroundColor Yellow
-        Write-Host "Albo uzyj -SelfContained zeby pobrac wariant bez tej zaleznosci." -ForegroundColor Yellow
+        Write-Host "Albo nie uzywaj -Fxdep (default = self-contained, runtime wbudowany)." -ForegroundColor Yellow
     }
 }
 

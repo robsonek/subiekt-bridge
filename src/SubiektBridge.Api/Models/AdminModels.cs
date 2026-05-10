@@ -6,8 +6,8 @@ namespace SubiektBridge.Api.Models;
 public sealed record UpdateRequestDto(
     /// <summary>Tag wersji (np. "v0.7.13"). Default: latest z GitHub Releases.</summary>
     [property: JsonPropertyName("tag")] string? Tag,
-    /// <summary>True = pobierz self-contained (~46MB). Default fxdep (~1.5MB).</summary>
-    [property: JsonPropertyName("self_contained")] bool SelfContained = false,
+    /// <summary>True = pobierz fxdep (~4MB, wymaga ASP.NET Core 10 x86 runtime). Default: self-contained (~46MB, runtime wbudowany).</summary>
+    [property: JsonPropertyName("fxdep")] bool Fxdep = false,
     /// <summary>True (default) = pobierz swiezszy update-bridge.ps1 z main przed uruchomieniem.</summary>
     [property: JsonPropertyName("refresh_script")] bool RefreshScript = true
 );
