@@ -209,17 +209,28 @@ try {
 Write-Section "Stop service"
 
 if ($service.Status -ne 'Stopped') {
-    Stop-Service -Name $ServiceName -Force
-    # Czekaj az faktycznie sie zatrzyma (process unlock plikow .exe/.dll)
+    # sc.exe stop jest asynchroniczny - nie blokuje jak Stop-Service.
+    # Unikamy deadlocka gdy ten skrypt jest child processem serwisu
+    # (Stop-Service czeka na zakonczenie child procesow).
+    & sc.exe stop $ServiceName 2>$null
     $svc = Get-Service -Name $ServiceName
     $tries = 0
-    while ($svc.Status -ne 'Stopped' -and $tries -lt 20) {
+    while ($svc.Status -ne 'Stopped' -and $tries -lt 30) {
         Start-Sleep -Milliseconds 500
         $svc.Refresh()
         $tries++
     }
     if ($svc.Status -ne 'Stopped') {
-        Fail "Service nie zatrzymal sie w 10s (status: $($svc.Status))"
+        Write-Host "sc.exe stop timeout - probuje taskkill" -ForegroundColor Yellow
+        $proc = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" | Select-Object -ExpandProperty ProcessId
+        if ($proc -and $proc -ne 0) {
+            & taskkill /F /PID $proc 2>$null
+            Start-Sleep -Seconds 2
+        }
+        $svc.Refresh()
+        if ($svc.Status -ne 'Stopped') {
+            Fail "Service nie zatrzymal sie w 15s (status: $($svc.Status))"
+        }
     }
 }
 Write-Host "OK: service zatrzymany" -ForegroundColor Green

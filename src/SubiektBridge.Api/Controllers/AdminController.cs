@@ -122,25 +122,25 @@ public sealed class AdminController : ControllerBase
         }
 
         // Buduj argumenty PowerShell.
-        var psArgs = new StringBuilder();
-        psArgs.Append("-NoProfile -ExecutionPolicy Bypass -File \"").Append(scriptPath).Append('"');
-        psArgs.Append(" -Force"); // wymus update nawet jesli ta sama wersja
+        var scriptArgs = new StringBuilder();
+        scriptArgs.Append(" -Force"); // wymus update nawet jesli ta sama wersja
         if (!string.IsNullOrWhiteSpace(request.Tag))
-            psArgs.Append(" -Tag ").Append(request.Tag);
+            scriptArgs.Append(" -Tag ").Append(request.Tag);
         if (request.SelfContained)
-            psArgs.Append(" -SelfContained");
+            scriptArgs.Append(" -SelfContained");
 
-        // Detached przez cmd /c "timeout 5 & powershell ..."
-        // - timeout 5s daje Bridge'owi czas na zwrocenie 202 zanim service zostanie zatrzymany
-        // - PowerShell process zyje niezaleznie od cmd (cmd konczy sie po Start-Process)
-        // - WindowStyle Hidden + CreateNoWindow = bez UI
+        // Delay + skrypt w jednym poleceniu PowerShell:
+        // Start-Sleep daje Bridge'owi czas na zwrocenie 202 zanim service
+        // zostanie zatrzymany. Calosc w jednym procesie powershell.exe
+        // (cmd.exe + timeout nie dziala jako child serwisu Windows).
         var delaySeconds = 5;
-        var cmdArgs = $"/c \"timeout /t {delaySeconds} /nobreak >nul & powershell.exe {psArgs}\"";
+        var psCommand = $"Start-Sleep -Seconds {delaySeconds}; & '{scriptPath}'{scriptArgs}";
+        var psArgs = $"-NoProfile -ExecutionPolicy Bypass -Command \"{psCommand}\"";
 
         var psi = new ProcessStartInfo
         {
-            FileName = "cmd.exe",
-            Arguments = cmdArgs,
+            FileName = "powershell.exe",
+            Arguments = psArgs,
             WindowStyle = ProcessWindowStyle.Hidden,
             CreateNoWindow = true,
             UseShellExecute = false,
@@ -150,8 +150,8 @@ public sealed class AdminController : ControllerBase
         try
         {
             var proc = Process.Start(psi);
-            _logger.LogWarning("Self-update scheduled - PID {Pid}, delay {Delay}s, args: {Args}",
-                proc?.Id, delaySeconds, psArgs.ToString());
+            _logger.LogWarning("Self-update scheduled - PID {Pid}, delay {Delay}s, command: {Command}",
+                proc?.Id, delaySeconds, psCommand);
         }
         catch (Exception ex)
         {
