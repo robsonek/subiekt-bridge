@@ -1,4 +1,6 @@
-#Requires -RunAsAdministrator
+# Uwaga: NIE uzywaj #Requires -RunAsAdministrator - blokuje self-update
+# z Windows Service (LocalSystem jest adminem, ale sesja PS nie jest "elevated"
+# w kontekscie detached cmd.exe /c powershell.exe).
 
 <#
 .SYNOPSIS
