@@ -774,6 +774,10 @@ public sealed class RealSferaSession : ISferaSession
             //    (zwrot fizyczny towaru, magazyn rośnie o zwracaną ilość)
             //  - line.Ean pusty (AMOUNT residual) lub brak match po EAN  -> dodaj nową usługową
             //    pozycję z ujemną wartością (zwrot pieniężny / kwotowy, bez ruchu magazynowego)
+            //
+            // KFS po NaPodstawie nie pozwala na Pozycje.Dodaj(towar) - rzuca COMException.
+            // Dla nie-matchującego EAN dodajemy usługową (ean=null) z opisem zawierającym EAN
+            // żeby ksiegowy mial info ze chodzilo o konkretny towar nieobecny na FS.
             foreach (var line in request.Lines)
             {
                 bool adjusted = false;
@@ -784,11 +788,15 @@ public sealed class RealSferaSession : ISferaSession
 
                 if (!adjusted)
                 {
+                    string fallbackName = !string.IsNullOrEmpty(line.Ean)
+                        ? $"{line.NameFallback} (EAN {line.Ean})"
+                        : line.NameFallback;
+
                     AddLineToDocument(
                         document: kfs,
-                        ean: line.Ean,
-                        name: line.NameFallback,
-                        quantity: line.QuantityChange, // ujemna dla zwrotów
+                        ean: null, // wymusza DodajUslugeJednorazowa - KFS pozwala dorzucac uslugi
+                        name: fallbackName,
+                        quantity: line.QuantityChange,
                         unit: line.Unit,
                         unitPriceGross: line.UnitPriceGross);
                 }
@@ -1275,7 +1283,14 @@ public sealed class RealSferaSession : ISferaSession
     {
         int pozCount;
         try { pozCount = (int)document.Pozycje.Liczba; }
-        catch { return false; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "TryAdjustExistingPosition: nie moge odczytac Pozycje.Liczba");
+            return false;
+        }
+
+        _logger.LogInformation("TryAdjustExistingPosition: szukam ean={Ean}, delta={Delta}, pozCount={Count}",
+            ean, deltaQuantity, pozCount);
 
         // Sfera Pozycje.Element jest 1-indexed (COM Automation standard).
         // Element(0) rzuca ArgumentException "Value does not fall within the expected range".
@@ -1284,36 +1299,53 @@ public sealed class RealSferaSession : ISferaSession
             dynamic? poz = null;
             try
             {
-                poz = document.Pozycje.Element(i);
+                try { poz = document.Pozycje.Element(i); }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "TryAdjustExistingPosition: Element({I}) rzucil", i);
+                    continue;
+                }
                 if (poz == null) continue;
 
                 // Pozycje usługowe (DodajUslugeJednorazowa) nie mają Towara - skip silently.
                 dynamic? towar = null;
-                try { towar = poz.Towar; } catch { continue; }
-                if (towar == null) continue;
+                try { towar = poz.Towar; } catch { /* ignore */ }
 
-                string? posSymbol = TryReadString(towar, "Symbol");
-                string? posEan = TryReadString(towar, "EAN");
+                string? posSymbol = towar != null ? TryReadString(towar, "Symbol") : null;
+                string? posEan = towar != null ? TryReadString(towar, "EAN") : null;
+                int posIloscJm = -1;
+                try { posIloscJm = Convert.ToInt32(poz.IloscJm); } catch { /* ignore */ }
+
+                _logger.LogInformation(
+                    "  poz[{I}]: Symbol={Symbol}, EAN={Ean}, IloscJm={Qty}",
+                    i, posSymbol ?? "<null>", posEan ?? "<null>", posIloscJm);
 
                 bool match = string.Equals(posSymbol, ean, StringComparison.OrdinalIgnoreCase)
                           || string.Equals(posEan, ean, StringComparison.OrdinalIgnoreCase);
                 if (!match) continue;
 
-                // IloscJm to oryginalna ilość z FS (przed korektą). Korekta zmniejsza
-                // ilość po korekcie o |deltaQuantity| (delta jest ujemna dla zwrotów).
-                int origQty;
-                try { origQty = Convert.ToInt32(poz.IloscJm); }
-                catch { return false; }
+                int newQty = posIloscJm >= 0 ? posIloscJm + deltaQuantity : 0;
+                if (newQty < 0) newQty = 0;
 
-                int newQty = origQty + deltaQuantity;
-                if (newQty < 0) newQty = 0; // klient zwrócił więcej niż było - nie schodzimy poniżej 0
-
-                SetComProperty(poz, "IloscJmPoKorekcie", newQty);
-                return true;
+                try
+                {
+                    SetComProperty(poz, "IloscJmPoKorekcie", newQty);
+                    _logger.LogInformation("  poz[{I}]: IloscJmPoKorekcie ustawione na {NewQty}", i, newQty);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "TryAdjustExistingPosition: SetProperty IloscJmPoKorekcie={NewQty} padlo", newQty);
+                    return false;
+                }
             }
             finally
             {
-                if (poz != null) TryClose(poz);
+                // Pozycja KFS NIE jest dokumentem - nie ma Zamknij(), tylko zwalniamy COM RCW.
+                if (poz != null)
+                {
+                    try { Marshal.ReleaseComObject((object)poz); } catch { /* RCW already released */ }
+                }
             }
         }
         return false;
