@@ -79,7 +79,33 @@ builder.Services.AddControllers();
 
 var app = builder.Build();
 
-app.UseSerilogRequestLogging();
+// Dorzucamy RemoteIp + UserAgent do każdego "Request finished" wpisu - bez tego
+// nie wiadomo kto poluje endpointy (np. /api/v1/health w pętli). Domyślny template
+// Serilog.AspNetCore loguje tylko metodę/path/status/elapsed.
+app.UseSerilogRequestLogging(options =>
+{
+    options.MessageTemplate =
+        "HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed:0.0000} ms (from {RemoteIp}, UA: {UserAgent})";
+
+    options.EnrichDiagnosticContext = (diagnosticContext, httpContext) =>
+    {
+        // RemoteIpAddress może być null krótkotrwale (np. przy connection teardown).
+        var remoteIp = httpContext.Connection.RemoteIpAddress?.ToString() ?? "-";
+
+        // X-Forwarded-For honor — gdyby Bridge stał za reverse-proxy.
+        // Domyślnie Bridge słucha bezpośrednio na :988, ale klient mógł postawić nginx/Caddy.
+        if (httpContext.Request.Headers.TryGetValue("X-Forwarded-For", out var xff)
+            && !Microsoft.Extensions.Primitives.StringValues.IsNullOrEmpty(xff))
+        {
+            remoteIp = xff.ToString();
+        }
+
+        diagnosticContext.Set("RemoteIp", remoteIp);
+
+        var ua = httpContext.Request.Headers.UserAgent.ToString();
+        diagnosticContext.Set("UserAgent", string.IsNullOrEmpty(ua) ? "-" : ua);
+    };
+});
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
