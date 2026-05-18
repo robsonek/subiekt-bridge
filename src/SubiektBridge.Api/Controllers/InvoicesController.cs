@@ -204,10 +204,24 @@ public sealed class InvoicesController : ControllerBase
                 Message: "Nagłówek 'Idempotency-Key' jest wymagany."));
         }
 
+        // Idempotency replay z weryfikacja istnienia dokumentu (jak CreateInvoice).
+        // Bez tego ponowne klikniecie 'Wystaw KFS' w UI po recznym usunieciu KFS-a z
+        // Subiekta zwraca starego ducha (HTTP 200 + cached subiekt_id) zamiast wystawic
+        // nowy dokument. Bug fix v0.7.48 (regresja: v0.7.23 dodal weryfikacje tylko dla
+        // CreateInvoice, pominal CreateCorrection).
         var cached = await _idempotency.TryGetAsync<InvoiceResponseDto>(idempotencyKey, ct);
         if (cached is not null)
         {
-            return Ok(cached);
+            var stillExists = await _sfera.FindInvoiceByIdAsync(cached.SubiektId, ct);
+            if (stillExists is not null)
+            {
+                _logger.LogInformation("Idempotent replay for key {Key} -> correction {Number}",
+                    idempotencyKey, cached.Number);
+                return Ok(cached);
+            }
+            _logger.LogWarning("Idempotent cache invalidated: KFS subiekt_id={Id} ({Number}) nie istnieje juz w Subiekcie - traktujemy jako nowy request",
+                cached.SubiektId, cached.Number);
+            await _idempotency.DeleteAsync(idempotencyKey, ct);
         }
 
         if (!TryParseSubiektIdFromBridgeId(id, out long sourceSubiektId))
