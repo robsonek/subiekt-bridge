@@ -813,6 +813,20 @@ public sealed class RealSferaSession : ISferaSession
 
             kfs.Uwagi = $"Korekta: {request.Reason} | ref: {request.ExternalReference}";
 
+            // KFS payment: po NaPodstawie() Sfera defaultowo wpisuje
+            // PlatnoscGotowkaKwota = total korekty (z SuDokument_PlatnoscGotowkaKwota.htm:
+            // "Domyslnie wartosc maksymalna jest wstawiona w pole platnosc gotowka").
+            // Dla zwrotow Allegro to mylace - klient otrzymal pieniadze przelewem,
+            // a Subiekt pokazuje "Zaplacono gotowka". Zerujemy gotowke i ustawiamy
+            // wlasciwy atrybut (PlatnoscPrzelewKwota / PlatnoscKartaKwota / ...).
+            //
+            // Pomijamy gdy Payment == null - zachowanie kompatybilne z legacy klientami
+            // ktorzy nie wysylaja payment field.
+            if (request.Payment is not null)
+            {
+                ApplyCorrectionPayment(kfs, request.Payment);
+            }
+
             kfs.Zapisz();
 
             long subiektId = ToInt64(kfs.Identyfikator);
@@ -1567,6 +1581,34 @@ public sealed class RealSferaSession : ISferaSession
             SetCom(document, payment.Attribute + "Id", payment.MethodSubiektId.Value);
         }
         SetCom(document, payment.Attribute + "Kwota", (double)payment.Amount);
+    }
+
+    /// <summary>
+    /// Wariant ApplyPayment dla KFS. Po NaPodstawie() Sfera defaultowo wpisuje
+    /// PlatnoscGotowkaKwota = abs(wartosc KFS). Jesli klient zaplacil przelewem/karta,
+    /// trzeba najpierw wyzerowac gotowke (zeby nie sumowac dwoch form), a potem ustawic
+    /// docelowa forme.
+    ///
+    /// Kwota: amount jest pozytywna (np. 48.48) i reprezentuje wartosc zwrotu do klienta.
+    /// Subiekt traktuje to jako "do zwrotu danym sposobem".
+    /// </summary>
+    private void ApplyCorrectionPayment(dynamic document, PaymentDto payment)
+    {
+        // 1. Wyzeruj domyslna gotowke (chyba ze targetem jest gotowka).
+        if (!string.Equals(payment.Attribute, "PlatnoscGotowka", StringComparison.Ordinal))
+        {
+            try
+            {
+                SetCom(document, "PlatnoscGotowkaKwota", 0.0);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "ApplyCorrectionPayment: nie udalo sie wyzerowac PlatnoscGotowkaKwota");
+            }
+        }
+
+        // 2. Ustaw forme docelowa - identycznie jak FS (Id + Kwota).
+        ApplyPayment(document, payment);
     }
 
     /// <summary>

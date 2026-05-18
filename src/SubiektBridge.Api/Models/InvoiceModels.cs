@@ -29,7 +29,12 @@ public sealed record InvoiceCorrectionRequestDto(
     [property: JsonPropertyName("source_invoice_number")] string? SourceInvoiceNumber,
     [property: JsonPropertyName("source_invoice_date")] string? SourceInvoiceDate,
     [property: JsonPropertyName("lines")] IReadOnlyList<CorrectionLineDto> Lines,
-    [property: JsonPropertyName("external_reference")] string ExternalReference
+    [property: JsonPropertyName("external_reference")] string ExternalReference,
+    // Opcjonalna forma platnosci dla KFS. Bez tego Sfera ustawia domyslnie
+    // PlatnoscGotowkaKwota = total korekty, co dla zwrotow Allegro (przelew/Allegro Pay)
+    // jest myslace. Bridge zeruje PlatnoscGotowkaKwota i ustawia wlasciwy *Kwota
+    // (PlatnoscPrzelewKwota / PlatnoscKartaKwota itp.) gdy payment != null.
+    [property: JsonPropertyName("payment")] PaymentDto? Payment = null
 );
 
 public sealed record PaymentDto(
