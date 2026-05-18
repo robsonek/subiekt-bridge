@@ -772,19 +772,33 @@ public sealed class RealSferaSession : ISferaSession
             // Mapowanie request.Lines: dla kazdej linii z EAN szukamy pozycji w skopiowanych
             // pozycjach KFS i ustawiamy IloscJmPoKorekcie. KFS po NaPodstawie() NIE POZWALA
             // dodawac nowych pozycji (Pozycje.Dodaj/DodajUslugeJednorazowa rzucaja COMException).
-            // Linie bez EAN (AMOUNT residual) lub bez matchu = blad walidacji - rzucamy
-            // konkretny exception, lepiej fail-fast niz wystawic KFS bez prawidlowych korekt.
+            //
+            // Linia z `Ean==null` to korekta uslugi jednorazowej (np. zwrot wysylki) - szukamy
+            // pozycji z UslugaJednorazowa==true, opcjonalnie matchujac po nazwie (UslJednNazwa).
+            // Pozycje bez matchu = blad walidacji - lepiej fail-fast niz wystawic KFS bez
+            // prawidlowych korekt.
             var unmatched = new List<string>();
             foreach (var line in request.Lines)
             {
-                if (request.SourceIsExternal || string.IsNullOrEmpty(line.Ean))
+                if (request.SourceIsExternal)
                 {
                     unmatched.Add($"line ean={line.Ean ?? "<null>"} name='{line.NameFallback}' qty={line.QuantityChange}");
                     continue;
                 }
-                if (!TryAdjustExistingPosition(kfs, line.Ean, line.QuantityChange))
+
+                bool matched;
+                if (string.IsNullOrEmpty(line.Ean))
                 {
-                    unmatched.Add($"line ean={line.Ean} name='{line.NameFallback}' qty={line.QuantityChange}");
+                    matched = TryAdjustServicePosition(kfs, line.NameFallback, line.QuantityChange);
+                }
+                else
+                {
+                    matched = TryAdjustExistingPosition(kfs, line.Ean, line.QuantityChange);
+                }
+
+                if (!matched)
+                {
+                    unmatched.Add($"line ean={line.Ean ?? "<null>"} name='{line.NameFallback}' qty={line.QuantityChange}");
                 }
             }
 
@@ -1393,6 +1407,142 @@ public sealed class RealSferaSession : ISferaSession
             }
         }
         return false;
+    }
+
+    /// <summary>
+    /// Korekta pozycji uslugi jednorazowej (np. zwrot wysylki w pelnym zwrocie zamowienia).
+    /// FS dodaje wysylke przez Pozycje.DodajUslugeJednorazowa(), w KFS po NaPodstawie() ta
+    /// pozycja jest skopiowana z UslugaJednorazowa==true. Nie ma Towar.Identyfikator/EAN,
+    /// wiec match po nameHint (case-insensitive). Bez hinta - bierzemy jedyna pozycje
+    /// uslugowa; jesli jest ich >1, zwracamy false (operator musi wystawic KFS recznie).
+    ///
+    /// QuantityChange jest ujemne (np. -1 zwraca 1 szt). Wynikowe IloscJmPoKorekcie =
+    /// max(currentQty + change, 0).
+    /// </summary>
+    private bool TryAdjustServicePosition(dynamic document, string? nameHint, int quantityChange)
+    {
+        int pozCount;
+        try { pozCount = (int)document.Pozycje.Liczba; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "TryAdjustServicePosition: nie moge odczytac Pozycje.Liczba");
+            return false;
+        }
+
+        _logger.LogInformation(
+            "TryAdjustServicePosition: szukam uslugi jednorazowej, nameHint='{NameHint}', delta={Delta}, pozCount={Count}",
+            nameHint ?? "<null>", quantityChange, pozCount);
+
+        // Faza 1: zbierz wszystkie pozycje uslugowe + ich nazwy. RCW pozostawiamy otwarte do
+        // konca metody bo bedziemy potencjalnie ustawiac IloscJmPoKorekcie na trafionej pozycji.
+        var serviceMatches = new List<(int Index, dynamic Position, string? UslJednNazwa, int IloscJm)>();
+        for (int i = 1; i <= pozCount; i++)
+        {
+            dynamic? poz = null;
+            try { poz = document.Pozycje.Element(i); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "TryAdjustServicePosition: Element({I}) rzucil", i);
+                continue;
+            }
+            if (poz == null) continue;
+
+            bool isUsluga = false;
+            try { isUsluga = (bool)poz.UslugaJednorazowa; } catch { /* atrybut moze brakowac */ }
+            if (!isUsluga)
+            {
+                try { Marshal.ReleaseComObject((object)poz); } catch { /* ignore */ }
+                continue;
+            }
+
+            string? uslName = TryReadString(poz, "UslJednNazwa");
+            int iloscJm = -1;
+            try { iloscJm = Convert.ToInt32(poz.IloscJm); } catch { /* ignore */ }
+
+            _logger.LogInformation(
+                "  poz[{I}] (usluga): UslJednNazwa='{Name}', IloscJm={Qty}", i, uslName ?? "<null>", iloscJm);
+
+            serviceMatches.Add((i, poz, uslName, iloscJm));
+        }
+
+        try
+        {
+            if (serviceMatches.Count == 0)
+            {
+                _logger.LogWarning("TryAdjustServicePosition: brak pozycji uslugowych w KFS");
+                return false;
+            }
+
+            // Match priority: dokladne (case-insensitive, trim) > prefix > pojedyncza pozycja.
+            (int Index, dynamic Position, string? UslJednNazwa, int IloscJm)? chosen = null;
+
+            if (!string.IsNullOrWhiteSpace(nameHint))
+            {
+                string hint = nameHint.Trim();
+                chosen = serviceMatches.FirstOrDefault(m =>
+                    !string.IsNullOrEmpty(m.UslJednNazwa) &&
+                    string.Equals(m.UslJednNazwa.Trim(), hint, StringComparison.OrdinalIgnoreCase));
+
+                if (chosen.HasValue && chosen.Value.Position == null)
+                {
+                    chosen = null;
+                }
+
+                if (!chosen.HasValue)
+                {
+                    chosen = serviceMatches.FirstOrDefault(m =>
+                        !string.IsNullOrEmpty(m.UslJednNazwa) &&
+                        m.UslJednNazwa.IndexOf(hint, StringComparison.OrdinalIgnoreCase) >= 0);
+
+                    if (chosen.HasValue && chosen.Value.Position == null)
+                    {
+                        chosen = null;
+                    }
+                }
+            }
+
+            if (!chosen.HasValue && serviceMatches.Count == 1)
+            {
+                chosen = serviceMatches[0];
+            }
+
+            if (!chosen.HasValue)
+            {
+                _logger.LogWarning(
+                    "TryAdjustServicePosition: nameHint='{Hint}' nie pasuje do zadnej z {Count} pozycji uslugowych",
+                    nameHint ?? "<null>", serviceMatches.Count);
+                return false;
+            }
+
+            var target = chosen.Value;
+            int newQty = target.IloscJm >= 0 ? target.IloscJm + quantityChange : 0;
+            if (newQty < 0) newQty = 0;
+
+            try
+            {
+                SetComProperty(target.Position, "IloscJmPoKorekcie", newQty);
+                _logger.LogInformation(
+                    "  poz[{I}] (usluga '{Name}'): IloscJmPoKorekcie ustawione na {NewQty}",
+                    target.Index, target.UslJednNazwa ?? "<null>", newQty);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "TryAdjustServicePosition: SetProperty IloscJmPoKorekcie={NewQty} padlo", newQty);
+                return false;
+            }
+        }
+        finally
+        {
+            foreach (var match in serviceMatches)
+            {
+                if (match.Position != null)
+                {
+                    try { Marshal.ReleaseComObject((object)match.Position); } catch { /* RCW already released */ }
+                }
+            }
+        }
     }
 
     private static long? TryReadInt64(object target, string propName)
