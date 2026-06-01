@@ -71,7 +71,13 @@ public sealed record LineDto(
     [property: JsonPropertyName("quantity")] int Quantity,
     [property: JsonPropertyName("unit")] string Unit,
     [property: JsonPropertyName("unit_price_gross")] decimal UnitPriceGross,
-    [property: JsonPropertyName("vat_rate")] decimal VatRate
+    [property: JsonPropertyName("vat_rate")] decimal VatRate,
+    // Opcjonalna cena NETTO jednostkowa - znaczaca TYLKO dla PZ. Gdy podana, Bridge wpisuje
+    // ja wprost jako CenaNettoPrzedRabatem (bez przeliczania brutto->netto), co eliminuje
+    // groszowe rozjazdy zaokraglen przy cenach zakupu (PZ trzyma ob_CenaNetto, brutto wylicza).
+    // Null = zachowanie domyslne: netto = unit_price_gross / (1 + vat_rate/100).
+    // Dla FS/KFS pole jest ignorowane (te dokumenty licza od brutto).
+    [property: JsonPropertyName("unit_price_net")] decimal? UnitPriceNet = null
 );
 
 /// <summary>

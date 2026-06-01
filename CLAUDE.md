@@ -130,6 +130,14 @@ był pusty. Fix: `Path.Combine(AppContext.BaseDirectory, "logs", ...)`.
 - **PZ:** Odwrotnie - `SuDokument.MagazynOdbiorczyId` MUSI być set na dokumencie
   (mapuje na `dok_MagId`). Bez tego `pz.Zapisz()` rzuca `0x80004005`.
 
+### PZ liczy od cen NETTO (`LiczonyOdCenBrutto=true` rzuca `0x80004005`)
+
+PZ trzyma `ob_CenaNetto` wpisane wprost, `ob_CenaBrutto` wyliczane z `VatProc`.
+`AddLineToDocument(useNetPrice: true)` ustawia `CenaNettoPrzedRabatem`. Domyślnie most
+przelicza `netto = unit_price_gross / (1 + vat/100)`. Od v0.7.49 `LineDto.UnitPriceNet`
+(opcjonalne, `decimal?`) pozwala podać netto **wprost** - wtedy brak przeliczania i brak
+groszowych rozjazdów (cenne dla cen zakupu). Pole znaczące tylko dla PZ; FS/KFS je ignorują.
+
 ### `dok_NumerPelny` to atrybut COM, NIE kolumna SQL
 
 `SQL filter "dok_NumerPelny LIKE 'FS %'"` rzuca syntax error. To computed atrybut
