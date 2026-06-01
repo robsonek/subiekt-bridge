@@ -663,7 +663,7 @@ public sealed class RealSferaSession : ISferaSession
             int? perLineWarehouseId = request.WarehouseSubiektId;
             foreach (var line in request.Lines)
             {
-                AddLineToDocument(pz, line.Ean, line.NameFallback, line.Quantity, line.Unit, line.UnitPriceGross, perLineWarehouseId, useNetPrice: true, vatRate: line.VatRate);
+                AddLineToDocument(pz, line.Ean, line.NameFallback, line.Quantity, line.Unit, line.UnitPriceGross, perLineWarehouseId, useNetPrice: true, vatRate: line.VatRate, unitPriceNet: line.UnitPriceNet);
             }
 
             pz.Uwagi = request.Notes ?? string.Empty;
@@ -719,8 +719,12 @@ public sealed class RealSferaSession : ISferaSession
 
             // PZ to dokument magazynowy - WartoscBrutto opcjonalnie (nie wszystkie wersje
             // Subiekta wystawiają to pole na PZ). Jeśli brak - liczymy z lines payload.
+            // Gdy linia ma unit_price_net (opcja PZ), brutto = netto * (1 + VAT); inaczej
+            // bierzemy unit_price_gross. Bez tego klient wysylajacy net + gross=0 (zgodnie
+            // z dokumentacja) dostalby/zacache'owal totals.gross = 0.
             decimal? grossOpt = TryReadDecimal(pz, "WartoscBrutto");
-            decimal gross = grossOpt ?? request.Lines.Sum(l => l.UnitPriceGross * l.Quantity);
+            decimal gross = grossOpt ?? request.Lines.Sum(l =>
+                (l.UnitPriceNet.HasValue ? l.UnitPriceNet.Value * (1m + l.VatRate / 100m) : l.UnitPriceGross) * l.Quantity);
 
             return new InvoiceResponseDto(
                 Id: $"sub_{subiektId}",
@@ -1227,7 +1231,7 @@ public sealed class RealSferaSession : ISferaSession
         return null;
     }
 
-    private void AddLineToDocument(dynamic document, string? ean, string name, int quantity, string unit, decimal unitPriceGross, int? warehouseId = null, bool useNetPrice = false, decimal vatRate = 23m)
+    private void AddLineToDocument(dynamic document, string? ean, string name, int quantity, string unit, decimal unitPriceGross, int? warehouseId = null, bool useNetPrice = false, decimal vatRate = 23m, decimal? unitPriceNet = null)
     {
         dynamic position;
         bool isTowar = false;
@@ -1276,10 +1280,12 @@ public sealed class RealSferaSession : ISferaSession
         {
             // PZ liczy od cen NETTO (LiczonyOdCenBrutto=true rzuca 0x80004005 na Zapisz()
             // dla PZ - sprawdzone empirycznie + istniejace PZ klienta maja ob_CenaNetto
-            // ustawione, ob_CenaBrutto wyliczone z VatProc). Przeliczamy brutto -> netto
-            // po VAT-cie z LineDto.
-            decimal unitPriceNet = unitPriceGross / (1m + (vatRate / 100m));
-            position.CenaNettoPrzedRabatem = (double)unitPriceNet;
+            // ustawione, ob_CenaBrutto wyliczone z VatProc).
+            // Gdy klient podal unit_price_net wprost - uzywamy go bez przeliczania
+            // (eliminuje groszowe rozjazdy zaokraglen przy cenach zakupu). W przeciwnym
+            // razie przeliczamy brutto -> netto po VAT-cie z LineDto.
+            decimal netPrice = unitPriceNet ?? (unitPriceGross / (1m + (vatRate / 100m)));
+            position.CenaNettoPrzedRabatem = (double)netPrice;
         }
         else
         {

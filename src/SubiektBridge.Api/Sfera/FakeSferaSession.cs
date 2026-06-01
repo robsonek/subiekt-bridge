@@ -89,7 +89,12 @@ public sealed class FakeSferaSession : ISferaSession
         decimal grossSum = 0m;
         foreach (var line in request.Lines)
         {
-            grossSum += line.UnitPriceGross * line.Quantity;
+            // Gdy klient podal cene netto wprost (opcja PZ), liczymy brutto z niej + VAT;
+            // inaczej bierzemy unit_price_gross. Lustro logiki RealSferaSession dla PZ.
+            decimal lineGross = line.UnitPriceNet.HasValue
+                ? line.UnitPriceNet.Value * (1m + line.VatRate / 100m)
+                : line.UnitPriceGross;
+            grossSum += lineGross * line.Quantity;
         }
 
         return Task.FromResult(new InvoiceResponseDto(
