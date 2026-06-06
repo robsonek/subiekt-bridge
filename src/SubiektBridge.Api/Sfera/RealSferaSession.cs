@@ -528,9 +528,14 @@ public sealed class RealSferaSession : ISferaSession
             }
         }
 
-        dynamic fs = Session.SuDokumentyManager.DodajFS();
+        // Magazyn dokumentu = magazyn roboczy sesji (Subiekt.MagazynId), ustawiany per request.
+        // Per-pozycja SuPozycja.MagazynId (niżej) NIE zmienia dok_MagId na tym Subiekcie -
+        // sprawdzone empirycznie 2026-06-06 (dok lądował na Głównym mimo MagazynId=N per pozycja).
+        int? prevWarehouse = SetSessionWarehouse(request.WarehouseSubiektId);
+        dynamic? fs = null;
         try
         {
+            fs = Session.SuDokumentyManager.DodajFS();
             fs.LiczonyOdCenBrutto = true;
 
             long contractorId = ResolveOrCreateContractor(request.Contractor);
@@ -600,6 +605,7 @@ public sealed class RealSferaSession : ISferaSession
         finally
         {
             TryClose(fs);
+            RestoreSessionWarehouse(prevWarehouse);
         }
     }
 
@@ -625,9 +631,13 @@ public sealed class RealSferaSession : ISferaSession
         // wg pomocy Sfery. Dla PZ ustawienie pz.MagazynOdbiorczyId rzuca NotImplemented
         // z ComObject (sprawdzone empirycznie v0.7.29). Subiekt sam wpisze dok_MagId
         // z magazynu pierwszej pozycji.
-        dynamic pz = Session.SuDokumentyManager.DodajPZ();
+        // Magazyn dokumentu = magazyn roboczy sesji (Subiekt.MagazynId), ustawiany per request
+        // (jak FS). Per-pozycja SuPozycja.MagazynId nie wystarcza na tym Subiekcie.
+        int? prevWarehouse = SetSessionWarehouse(request.WarehouseSubiektId);
+        dynamic? pz = null;
         try
         {
+            pz = Session.SuDokumentyManager.DodajPZ();
             // PZ liczy od cen netto (default Sfery). NIE ustawiamy LiczonyOdCenBrutto=true -
             // dla PZ rzuca 0x80004005 (E_FAIL) na Zapisz(). Sprawdzone empirycznie + spojne
             // z istniejacymi PZ klienta (ob_CenaNetto wpisane wprost, ob_CenaBrutto wyliczone).
@@ -739,6 +749,7 @@ public sealed class RealSferaSession : ISferaSession
         finally
         {
             TryClose(pz);
+            RestoreSessionWarehouse(prevWarehouse);
         }
     }
 
@@ -1690,6 +1701,56 @@ public sealed class RealSferaSession : ISferaSession
         }
     }
 
+    /// <summary>
+    /// Ustawia magazyn roboczy sesji (Subiekt.MagazynId) na czas wystawiania dokumentu i zwraca
+    /// poprzednią wartość do przywrócenia. Subiekt bierze dok_MagId z magazynu SESJI, NIE z
+    /// SuPozycja.MagazynId - ustawienie per-pozycja nie zmienia magazynu dokumentu na
+    /// jednomagazynowej sesji (sprawdzone empirycznie 2026-06-06: dok lądował na Głównym mimo
+    /// SuPozycja.MagazynId=N). Twardy set (NIE silently jak TrySet) - lepiej nie wystawić niż
+    /// wystawić na zły magazyn.
+    /// </summary>
+    private int? SetSessionWarehouse(int? warehouseId)
+    {
+        if (!warehouseId.HasValue)
+        {
+            return null;
+        }
+
+        int previous = 0;
+        try { previous = Convert.ToInt32(Session.MagazynId); } catch { previous = 0; }
+
+        try
+        {
+            Session.MagazynId = warehouseId.Value;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"Nie udało się ustawić magazynu sesji na {warehouseId.Value} - operator " +
+                $"'{_options.Operator}' może nie mieć dostępu do tego magazynu w Subiekcie. {ex.Message}", ex);
+        }
+
+        return previous > 0 ? previous : (int?)null;
+    }
+
+    /// <summary>Przywraca magazyn roboczy sesji (best-effort), by nie wyciekał na kolejne dokumenty/KFS.</summary>
+    private void RestoreSessionWarehouse(int? previous)
+    {
+        if (!previous.HasValue || previous.Value <= 0)
+        {
+            return;
+        }
+
+        try
+        {
+            Session.MagazynId = previous.Value;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Nie udało się przywrócić magazynu sesji do {Mag}", previous.Value);
+        }
+    }
+
     private static void SetComProperty(object target, string propName, object value)
     {
         target.GetType().InvokeMember(propName,
@@ -1738,6 +1799,11 @@ public sealed class RealSferaSession : ISferaSession
 
     private void TryClose(dynamic obj)
     {
+        if (obj is null)
+        {
+            return;
+        }
+
         bool zamknijFailed = false;
 
         try
