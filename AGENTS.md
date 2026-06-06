@@ -123,12 +123,26 @@ był pusty. Fix: `Path.Combine(AppContext.BaseDirectory, "logs", ...)`.
 
 ## Pułapki Sfery / Subiekt API
 
-### Asymetria magazynów: FS vs PZ
+### Magazyn dokumentu = magazyn SESJI Sfery, NIE per pozycja (od v0.7.50)
 
-- **FS:** `SuDokument.MagazynNadawczyId` rzuca `NotImplementedException` przez COM.
-  Trzeba `SuPozycja.MagazynId` **per pozycja** po `Pozycje.Dodaj(towar)`.
-- **PZ:** Odwrotnie - `SuDokument.MagazynOdbiorczyId` MUSI być set na dokumencie
-  (mapuje na `dok_MagId`). Bez tego `pz.Zapisz()` rzuca `0x80004005`.
+**Magazyn dokumentu (`dok_MagId`) bierze się z magazynu roboczego SESJI Sfery
+(`Subiekt.MagazynId`), NIE z `SuPozycja.MagazynId` per pozycja.** Ustawienie per-pozycja
+NIE zmienia `dok_MagId` na jednomagazynowej sesji — sprawdzone empirycznie 2026-06-06
+(prod Subiekt 1.88 HF4): FS/PZ z `warehouse_subiekt_id=4` lądowały na magazynie 1 (Główny)
+mimo `SuPozycja.MagazynId=4`.
+
+- **Fix (v0.7.50):** `SetSessionWarehouse(int?)` ustawia `Subiekt.MagazynId` per request
+  przed `DodajFS`/`DodajPZ` (TWARDY set — rzuca czytelny błąd przy braku dostępu operatora
+  do magazynu, NIE połyka jak `TrySet`); `RestoreSessionWarehouse` przywraca w `finally`;
+  tworzenie dokumentu w `try` (gwarancja restore). KFS dziedziczy magazyn z FS przez
+  `NaPodstawie` (bez zmian — `warehouse_subiekt_id` w korekcie nie ma).
+- **Wymóg:** operator, jako który Bridge loguje się do Sfery, musi mieć dostęp do
+  docelowych magazynów w Subiekcie (`pd_UzytkMagazyn`), inaczej hard-set rzuca.
+- **Per-pozycja `SuPozycja.MagazynId`** wciąż jest ustawiane (przez połykający `TrySet`) —
+  nieszkodliwe i redundantne (pozycje i tak dziedziczą `dok_MagId` z sesji).
+- **Historycznie (do v0.7.49, NIEAKTUALNE):** `SuDokument.MagazynNadawczyId` (FS) /
+  `MagazynOdbiorczyId` (PZ) rzucają `NotImplementedException`/`0x80004005`, więc próbowano
+  routingu per-pozycja — ale to NIE wpływa na `dok_MagId` (patrz wyżej).
 
 ### PZ liczy od cen NETTO (`LiczonyOdCenBrutto=true` rzuca `0x80004005`)
 
