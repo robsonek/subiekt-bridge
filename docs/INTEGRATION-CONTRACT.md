@@ -22,6 +22,7 @@
 | Wystaw fakturę sprzedaży (FS) | `POST /api/v1/invoices` | ✅ |
 | Wystaw korektę (KFS) | `POST /api/v1/invoices/{id}/corrections` | ✅ |
 | Wystaw przyjęcie magazynowe (PZ) | `POST /api/v1/receipts` | ✅ |
+| Wystaw przesunięcie międzymagazynowe (MM) | `POST /api/v1/transfers` | ✅ |
 | Sprawdź towar po EAN | `GET /api/v1/products?ean=` | — |
 | Sprawdź kontrahenta po NIP | `GET /api/v1/contractors?nip=` | — |
 | Lista FS/KFS | `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | — |
@@ -180,7 +181,34 @@ wpisane wprost, `ob_CenaBrutto` wyliczane z VAT). Masz dwie opcje:
 
 `unit_price_net` działa **tylko dla PZ**. Dla FS/KFS jest ignorowane (te dokumenty liczą od brutto).
 
-### 3.7 Listingi i pojedynczy dokument
+### 3.7 `POST /api/v1/transfers` — MM (przesunięcie międzymagazynowe)
+
+Przenosi stan towaru między magazynami. **Dokument wewnętrzny magazynowy — NIE idzie do KSeF**
+(magazyn nie jest polem schematu e-faktury). Użycie: korekta stanu, gdy dokument wystawiono na
+zły magazyn, a samego dokumentu nie da się już zmienić (np. KFS wysłany do KSeF) — przesuwasz
+wówczas tylko stan, nie ruszając dokumentu.
+
+```jsonc
+{
+  "source_warehouse_id": 4,            // int — magazyn źródłowy (sl_Magazyn.mag_Id)
+  "dest_warehouse_id": 1,              // int — magazyn docelowy
+  "lines": [
+    { "ean": "5907085551654", "quantity": 2, "unit": "szt." }
+  ],
+  "external_reference": "...",         // wymagane — anti-duplicate w Uwagach dokumentu
+  "notes": "..."                       // string? — trafia do Uwag
+}
+```
+
+- **Pozycje tylko towarowe** — `ean` wymagany (przesuwasz realny stan magazynowy, nie usługę).
+  Brak EAN lub towar nieznany w Subiekcie → `422` (`MISSING_PRODUCT`).
+- **Ceny nie podajesz** — wartość MM (koszt) Subiekt liczy sam z partii (FIFO). Kolumna
+  „Cena netto" pozycji zostaje 0; „Wartość magazynowa" niesie rzeczywisty koszt.
+- Wymaga `Idempotency-Key`. Response: `{ id, subiekt_id, number, issued_at, source_warehouse_id, dest_warehouse_id }`.
+- `source_warehouse_id == dest_warehouse_id` → `422` (`SAME_WAREHOUSE`).
+- Powtórzony `external_reference` (dokument już istnieje) → `409` (`DUPLICATE_TRANSFER`).
+
+### 3.8 Listingi i pojedynczy dokument
 
 `GET /api/v1/invoices` query: `from` (YYYY-MM-DD), `to`, `type` (`FS`/`KFS`/brak=oba),
 `notes_contains`, `nip`, `limit` (domyślnie 200, max 1000). Zwraca tablicę pozycji z

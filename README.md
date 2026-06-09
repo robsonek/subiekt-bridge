@@ -17,12 +17,14 @@ Twoja aplikacja  ── HTTPS + X-Bridge-Token ──►  SubiektBridge.Api
                                               Subiekt GT + Sfera + MSSQL
 ```
 
-REST API (5 endpointów + escape hatch):
+REST API (główne endpointy + escape hatch):
 
 | Endpoint | Funkcja |
 |---|---|
 | `POST /api/v1/invoices` | Wystaw FV sprzedaży (z `Idempotency-Key`) |
 | `POST /api/v1/invoices/{id}/corrections` | Wystaw FV korygującą (KFS) |
+| `POST /api/v1/receipts` | Wystaw PZ — przyjęcie magazynowe (dropshipping) |
+| `POST /api/v1/transfers` | Wystaw MM — przesunięcie międzymagazynowe (dokument wewnętrzny, nie KSeF) |
 | `GET /api/v1/products?ean=...` | Sprawdź czy towar istnieje w Subiekcie |
 | `GET /api/v1/contractors?nip=...` | Sprawdź czy kontrahent istnieje |
 | `GET /api/v1/health` | Diagnostyka (publiczny, bez tokena) |
