@@ -141,6 +141,36 @@ public sealed record ReceiptIssueRequestDto(
     [property: JsonPropertyName("original_number")] string? OriginalNumber = null
 );
 
+// ----------------------------- Transfer (MM) -----------------------------
+
+/// <summary>
+/// MM - Przesunięcie Międzymagazynowe. Przenosi stan towaru między magazynami
+/// (MagazynNadawczyId -> MagazynOdbiorczyId). Dokument WEWNĘTRZNY magazynowy - NIE idzie
+/// do KSeF (magazyn nie jest polem schematu e-faktury). Pozycje tylko towarowe (po EAN).
+/// </summary>
+public sealed record TransferRequestDto(
+    [property: JsonPropertyName("source_warehouse_id")] int SourceWarehouseId,
+    [property: JsonPropertyName("dest_warehouse_id")] int DestWarehouseId,
+    [property: JsonPropertyName("lines")] IReadOnlyList<TransferLineDto> Lines,
+    [property: JsonPropertyName("external_reference")] string ExternalReference,
+    [property: JsonPropertyName("notes")] string? Notes = null
+);
+
+public sealed record TransferLineDto(
+    [property: JsonPropertyName("ean")] string Ean,
+    [property: JsonPropertyName("quantity")] int Quantity,
+    [property: JsonPropertyName("unit")] string Unit = "szt."
+);
+
+public sealed record TransferResponseDto(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("subiekt_id")] long SubiektId,
+    [property: JsonPropertyName("number")] string Number,
+    [property: JsonPropertyName("issued_at")] DateTimeOffset IssuedAt,
+    [property: JsonPropertyName("source_warehouse_id")] int SourceWarehouseId,
+    [property: JsonPropertyName("dest_warehouse_id")] int DestWarehouseId
+);
+
 // ----------------------------- Query (GET /invoices) -----------------------------
 
 /// <summary>
