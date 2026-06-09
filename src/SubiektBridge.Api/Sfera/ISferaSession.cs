@@ -27,6 +27,12 @@ public interface ISferaSession : IAsyncDisposable
     /// </summary>
     Task<InvoiceResponseDto> CreateReceiptAsync(ReceiptIssueRequestDto request, CancellationToken ct);
 
+    /// <summary>
+    /// Wystaw MM - Przesunięcie Międzymagazynowe. Przenosi stan towaru między magazynami
+    /// (source -> dest). Dokument wewnętrzny magazynowy, NIE idzie do KSeF.
+    /// </summary>
+    Task<TransferResponseDto> CreateTransferAsync(TransferRequestDto request, CancellationToken ct);
+
     /// <summary>Znajdź towar po EAN. Zwraca null gdy nie istnieje.</summary>
     Task<ProductDto?> FindProductByEanAsync(string ean, CancellationToken ct);
 

@@ -622,6 +622,11 @@ public sealed class RealSferaSession : ISferaSession
         return RunOnStaAsync(() => CreateReceiptCore(request), ct);
     }
 
+    public Task<TransferResponseDto> CreateTransferAsync(TransferRequestDto request, CancellationToken ct)
+    {
+        return RunOnStaAsync(() => CreateTransferCore(request), ct);
+    }
+
     private InvoiceResponseDto CreateReceiptCore(ReceiptIssueRequestDto request)
     {
         // PZ - Przyjęcie Zewnętrzne. Dokument magazynowy (zwiększa stan).
@@ -750,6 +755,88 @@ public sealed class RealSferaSession : ISferaSession
         {
             TryClose(pz);
             RestoreSessionWarehouse(prevWarehouse);
+        }
+    }
+
+    private TransferResponseDto CreateTransferCore(TransferRequestDto request)
+    {
+        // MM - przesunięcie międzymagazynowe. Dokument WEWNĘTRZNY (nie idzie do KSeF).
+        // Magazyny ustawiamy NA DOKUMENCIE: MagazynNadawczyId (źródło) + MagazynOdbiorczyId
+        // (cel) - to dedykowane atrybuty MM (dla FS/PZ rzucają NotImplemented; pomoc Sfery
+        // SuDokument_MagazynNadawczyId/OdbiorczyId). Pozycje tylko towarowe (po EAN), bez ceny -
+        // wartość MM Subiekt liczy z kosztu towaru.
+
+        // Anti-duplicate po external_reference w Uwagach (jak FS) - ochrona przed podwójnym MM
+        // przy retry/timeout. Fail-open (FindExistingInvoiceByReference loguje i zwraca null
+        // przy błędzie) - idempotency-key cache w kontrolerze to główna warstwa ochrony.
+        var existingId = FindExistingInvoiceByReference(request.ExternalReference, "MM");
+        if (existingId.HasValue)
+        {
+            dynamic existingDok = Session.SuDokumentyManager.WczytajDokument(existingId.Value);
+            try
+            {
+                throw new DuplicateInvoiceException(
+                    existingId.Value, (string)existingDok.NumerPelny ?? "", request.ExternalReference);
+            }
+            finally
+            {
+                try { existingDok.Zamknij(); } catch { /* cleanup */ }
+            }
+        }
+
+        dynamic? mm = null;
+        try
+        {
+            mm = Session.SuDokumentyManager.DodajMM();
+            mm.MagazynNadawczyId = request.SourceWarehouseId;
+            mm.MagazynOdbiorczyId = request.DestWarehouseId;
+
+            foreach (var line in request.Lines)
+            {
+                if (string.IsNullOrWhiteSpace(line.Ean))
+                {
+                    throw new InvalidOperationException(
+                        "MM: każda pozycja musi mieć EAN (przesuwamy realny towar magazynowy, nie usługę).");
+                }
+                if (!(bool)Session.Towary.Istnieje(line.Ean))
+                {
+                    throw new MissingProductException(line.Ean);
+                }
+
+                dynamic towar = Session.Towary.Wczytaj(line.Ean);
+                try
+                {
+                    dynamic pos = mm.Pozycje.Dodaj(towar);
+                    pos.IloscJm = line.Quantity;
+                    pos.Jm = string.IsNullOrEmpty(line.Unit) ? "szt." : line.Unit;
+                }
+                finally
+                {
+                    TryClose(towar);
+                }
+            }
+
+            mm.Uwagi = string.IsNullOrEmpty(request.Notes)
+                ? request.ExternalReference
+                : $"{request.Notes} | ref: {request.ExternalReference}";
+
+            mm.Zapisz();
+
+            long subiektId = ToInt64(mm.Identyfikator);
+            string number = (string)mm.NumerPelny;
+            _lastInvoiceAt = DateTimeOffset.UtcNow;
+
+            return new TransferResponseDto(
+                Id: $"sub_{subiektId}",
+                SubiektId: subiektId,
+                Number: number,
+                IssuedAt: _lastInvoiceAt.Value,
+                SourceWarehouseId: request.SourceWarehouseId,
+                DestWarehouseId: request.DestWarehouseId);
+        }
+        finally
+        {
+            TryClose(mm);
         }
     }
 
