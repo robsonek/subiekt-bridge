@@ -76,12 +76,13 @@ Invoke-RestMethod -Uri "https://localhost:988/api/v1/admin/update" -Method POST 
 | `GET /api/v1/receipts?...` | Listing PZ |
 | `GET /api/v1/receipts/{id}` / `/pdf` | Single PZ + retro PDF |
 | `POST /api/v1/receipts` | Wystaw PZ (dropshipping) |
+| `POST /api/v1/transfers` | Wystaw MM — przesunięcie międzymagazynowe (DodajMM, dokument wewnętrzny, NIE KSeF) |
 | `POST /api/v1/admin/query` | Read-only SQL (whitelist SELECT/WITH) |
 | `POST /api/v1/admin/update` | Self-update Bridge'a (detached PowerShell) |
 | `POST /api/v1/sfera/raw` | Escape hatch (whitelist metod w configu) |
 
 Wszystkie wymagają nagłówka `X-Bridge-Token: <secret>`. Operacje mutujące
-(POST `/invoices`, `/corrections`, `/receipts`) wymagają też `Idempotency-Key`.
+(POST `/invoices`, `/corrections`, `/receipts`, `/transfers`) wymagają też `Idempotency-Key`.
 
 ## Krytyczne wzorce (każdy z nich kosztował debug session)
 
