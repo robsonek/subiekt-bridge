@@ -755,6 +755,22 @@ public sealed class RealSferaSession : ISferaSession
 
     private InvoiceResponseDto CreateCorrectionCore(long sourceSubiektId, InvoiceCorrectionRequestDto request)
     {
+        // Magazyn KFS = magazyn źródłowej FS (dok_MagId). Subiekt bierze dok_MagId z magazynu
+        // SESJI (Subiekt.MagazynId) w chwili Zapisz() - tak samo jak FS/PZ (v0.7.50). NaPodstawie()
+        // kopiuje pozycje, ale NIE dziedziczy magazynu dokumentu. Bez jawnego ustawienia magazynu
+        // sesji KFS ląduje na domyślnym magazynie roboczym operatora zamiast cofać towar z magazynu,
+        // z którego FS go wydała (bug: korekty wpadały na nowy magazyn zamiast na magazyn FS).
+        //
+        // Twardy set (NIE cichy fallback na magazyn sesji - to BYŁ bug): gdy nie da się odczytać
+        // dok_MagId źródłowej FS, fail-loud (retry job) zamiast wystawić KFS na zły magazyn.
+        // KFSn (SourceIsExternal) nie ma dokumentu źródłowego w bazie - zostaje magazyn sesji.
+        int? prevWarehouse = null;
+        if (!request.SourceIsExternal)
+        {
+            int sourceWarehouse = ReadDocumentWarehouseIdOrThrow(sourceSubiektId);
+            prevWarehouse = SetSessionWarehouse(sourceWarehouse);
+        }
+
         dynamic kfs = request.SourceIsExternal
             ? Session.SuDokumentyManager.DodajKFSn()
             : Session.SuDokumentyManager.DodajKFS();
@@ -867,6 +883,67 @@ public sealed class RealSferaSession : ISferaSession
         finally
         {
             TryClose(kfs);
+            RestoreSessionWarehouse(prevWarehouse);
+        }
+    }
+
+    /// <summary>
+    /// Odczytuje magazyn (dok_MagId) dokumentu źródłowego przez bezpośredni SqlConnection -
+    /// Sfera ComObject (Subiekt.Baza.PolaczenieAdoNet) nie binduje CreateCommand (patrz QueryAsync).
+    /// Hard fail gdy nieczytelne: KFS MUSI cofać towar z magazynu źródłowej FS; cichy fallback na
+    /// magazyn sesji jest dokładnie tym bugiem, który ta metoda eliminuje. sourceSubiektId == dok_Id
+    /// (to samo id przekazywane do WczytajDokument/NaPodstawie).
+    /// </summary>
+    private int ReadDocumentWarehouseIdOrThrow(long documentId)
+    {
+        try
+        {
+            var connStr = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder
+            {
+                DataSource = _options.Server,
+                InitialCatalog = _options.Database,
+                UserID = _options.DbUser,
+                Password = _options.DbPassword,
+                TrustServerCertificate = true,
+                ConnectTimeout = 10,
+            }.ToString();
+
+            using var conn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT dok_MagId FROM dok__Dokument WHERE dok_Id = @id";
+            cmd.Parameters.AddWithValue("@id", documentId);
+            cmd.CommandTimeout = 10;
+            var result = cmd.ExecuteScalar();
+
+            if (result == null || result == DBNull.Value)
+            {
+                throw new InvalidOperationException(
+                    $"Nie znaleziono dok_MagId dla dokumentu źródłowego dok_Id={documentId} - " +
+                    "KFS nie może ustalić magazynu źródłowej FS.");
+            }
+
+            int warehouseId = Convert.ToInt32(result);
+            if (warehouseId <= 0)
+            {
+                // mag_Id w sl_Magazyn startuje od 1 - wartość ≤0 to anomalia danych, nie ciche
+                // SetSessionWarehouse(0). Fail-loud zamiast wystawiać KFS na nieokreślony magazyn.
+                throw new InvalidOperationException(
+                    $"dok_MagId={warehouseId} dla dokumentu źródłowego dok_Id={documentId} jest nieprawidłowy " +
+                    "(oczekiwane mag_Id ≥ 1) - KFS nie może ustalić magazynu źródłowej FS.");
+            }
+
+            return warehouseId;
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"Odczyt magazynu (dok_MagId) dokumentu źródłowego dok_Id={documentId} nie powiódł się: {ex.Message}",
+                ex);
         }
     }
 
