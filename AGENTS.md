@@ -28,11 +28,20 @@ Windows Service via `Microsoft.Extensions.Hosting.WindowsServices` (zero NSSM).
 **Bezpieczeństwo:** HTTPS auto-generated self-signed cert (`data/cert.pfx`),
 statyczny `X-Bridge-Token` w nagłówku, opcjonalny IP whitelist w Windows Firewall.
 
-## Build / Release
+> **AGENTS.md jest kopią tego pliku.** Po każdej edycji CLAUDE.md zsynchronizuj:
+> `cp CLAUDE.md AGENTS.md`.
+
+## Build / Test / Run
 
 ```bash
 # Lokalnie (macOS/Linux z .NET 10 SDK)
 dotnet build SubiektBridge.sln
+dotnet test SubiektBridge.sln    # xUnit (na razie placeholder, realne testy: faza 2.7+)
+
+# Dev run na macOS/Linux — FakeSferaSession zamiast COM
+# (appsettings.Development.json: Bridge:UseFakeSfera=true, token "dev-token",
+#  HTTP :8080 + HTTPS :988)
+dotnet run --project src/SubiektBridge.Api
 
 # Self-contained (~46 MB, runtime wbudowany)
 ./scripts/publish-win.sh
@@ -41,6 +50,27 @@ dotnet build SubiektBridge.sln
 git tag -a vX.Y.Z -m "..."
 git push origin vX.Y.Z
 ```
+
+`RealSferaSession` (COM) odpali się tylko na Windowsie obok Subiekta — na innym OS
+Program.cs rzuca z podpowiedzią ustawienia `UseFakeSfera`.
+
+## Dokumentacja Sfery offline
+
+`InsERT/pomoc/gta/htm/` zawiera ~2900 rozpakowanych stron HTML oficjalnej dokumentacji
+Sfery (CHM InsERTu; gitignored — licencja nie pozwala na redystrybucję, ale lokalnie jest).
+**Zanim zgadniesz sygnaturę/zachowanie API Sfery — grepnij tam**, np.:
+
+```bash
+ls InsERT/pomoc/gta/htm/ | grep -i "DodajFS\|SuDokument_Platnosc"
+grep -rl "MagazynId" InsERT/pomoc/gta/htm/ | head
+```
+
+## Kontrakt API dla klientów
+
+`docs/INTEGRATION-CONTRACT.md` — kompletny przewodnik dla konsumenta API (nowego systemu
+sprzedażowego): formaty request/response, obsługa błędów, namespacing `external_reference`.
+Publiczne `{id}` w ścieżkach to **bridge id** w formacie `sub_<SUBIEKT_ID>` (np. `sub_142877`).
+Zmieniasz endpointy → zaktualizuj kontrakt.
 
 GitHub Actions matrix: **win-x86 only**. x64 nie obsługujemy - in-proc COM
 wymaga że bit-level Bridge'a pasuje do Subiekta (linia GT to wyłącznie 32-bit;
@@ -123,6 +153,27 @@ Windows Service ma `WorkingDirectory=C:\Windows\System32` (default). Relative
 był pusty. Fix: `Path.Combine(AppContext.BaseDirectory, "logs", ...)`.
 
 ## Pułapki Sfery / Subiekt API
+
+### `FormaDokumentu = 1` (KSeF) dla FS firmowych — CELOWE, nie ruszać
+
+`FormaDokumentuEnum`: 0 = faktura tradycyjna, **1 = faktura KSeF**, 2 = tryb awaryjny,
+3 = offline24. Bridge ustawia `fs.FormaDokumentu = 1` dla kontrahenta-firmy **świadomie**:
+w Polsce faktury B2B muszą iść do KSeF; Bridge tylko oznacza formę, samą wysyłkę do KSeF
+robi operator w Subiekcie po sprawdzeniu poprawności faktur. NIE zmieniać na 0.
+
+### Data sprzedaży FS = `DataZakonczeniaDostawy`, NIE `DataSprzedazy`
+
+`SuDokument.DataSprzedazy` dotyczy TYLKO dokumentów ZW (Typ=14) i PA (Typ=21) — wg pomocy
+Sfery. Dla FS datę sprzedaży ustawia się przez `DataZakonczeniaDostawy`. Daty Bridge ustawia
+tylko gdy klient podał datę inną niż dzisiejsza (`SetDocumentDateIfBackdated`) — domyślny
+przypadek zostawia nadanie daty Subiektowi. Dokumenty magazynowe (PZ/MM) wymagają pary
+`DataMagazynowa` + `DataWystawienia`.
+
+### `WartoscVat`, NIE `WartoscPodatku`
+
+Atrybut `WartoscPodatku` nie istnieje w Sferze (0 trafień w całym CHM) — `TryReadDecimal`
+połykał błąd i `totals.vat` było zawsze null (naprawione w audycie 2026-06-10,
+`docs/AUDIT-2026-06-10.md` — tam też lista otwartych findingów).
 
 ### Magazyn dokumentu = magazyn SESJI Sfery, NIE per pozycja (od v0.7.50)
 
@@ -223,9 +274,12 @@ Zero NSSM (NSSM 2.24 z 2014).
 1. **`Idempotency-Key` header** - SQLite cache (TTL 30 dni). Replay zwraca
    cached response, ALE weryfikujemy że cached `subiekt_id` wciąż istnieje
    (gdy user anulował FV w Subiekcie - cache invalidate + new request).
-2. **Anti-duplicate w Subiekcie** - przed `DodajFS` szuka `dok_Uwagi LIKE
-   '%external_reference%'` + verify przez `WczytajDokument`. Match → 409
-   `DUPLICATE_INVOICE` z `existing_subiekt_id` w details.
+2. **Anti-duplicate w Subiekcie** - przed `DodajFS`/`DodajKFS`/`DodajPZ`/`DodajMM`
+   szuka `dok_Uwagi LIKE '%external_reference%'` + verify przez `WczytajDokument`.
+   Match → 409 `DUPLICATE_INVOICE`/`DUPLICATE_RECEIPT`/`DUPLICATE_TRANSFER` z
+   `existing_subiekt_id` w details. Bridge SAM dokleja `| ref: <external_reference>`
+   do Uwag dokumentu (`BuildUwagiWithReference`) — warstwa nie zależy od tego,
+   czy klient wkleił ref do notes.
 3. **Klient (Laravel)** - `UNIQUE(order_id, type)` w DB + `ShouldBeUnique` na jobie.
 
 ## Self-update flow

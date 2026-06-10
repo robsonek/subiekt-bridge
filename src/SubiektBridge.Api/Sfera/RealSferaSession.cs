@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
@@ -296,7 +297,7 @@ public sealed class RealSferaSession : ISferaSession
         if (IsValidIsoDate(r.To))   clauses.Add($"dok_DataWyst <= '{r.To}'");
 
         if (!string.IsNullOrWhiteSpace(r.NotesContains))
-            clauses.Add($"dok_Uwagi LIKE '%{EscapeSqlLiteral(r.NotesContains)}%'");
+            clauses.Add($"dok_Uwagi LIKE '%{EscapeLikePattern(r.NotesContains)}%'");
 
         if (!string.IsNullOrWhiteSpace(r.Nip))
             clauses.Add($"dok_NabKodSlownik = '{EscapeSqlLiteral(r.Nip)}'");
@@ -304,10 +305,29 @@ public sealed class RealSferaSession : ISferaSession
         return clauses.Count == 0 ? "dok_Id > 0" : string.Join(" AND ", clauses);
     }
 
+    // TryParseExact, NIE regex (spójnie z InvoicesController.IsIsoDateOrEmpty): kształt
+    // YYYY-MM-DD przepuszczałby daty niemożliwe kalendarzowo (2026-02-31), które w SQL
+    // ('dok_DataWyst >= ...') kończą się błędem konwersji -> 502 zamiast pominięcia filtra.
     private static bool IsValidIsoDate(string? s) =>
-        !string.IsNullOrWhiteSpace(s) && System.Text.RegularExpressions.Regex.IsMatch(s, @"^\d{4}-\d{2}-\d{2}$");
+        !string.IsNullOrWhiteSpace(s)
+        && DateTime.TryParseExact(s, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+            DateTimeStyles.None, out _);
 
     private static string EscapeSqlLiteral(string s) => s.Replace("'", "''");
+
+    /// <summary>
+    /// Escape dla literału użytego we wzorcu LIKE. Poza apostrofem neutralizuje wildcardy
+    /// MSSQL: <c>%</c> (dowolny ciąg), <c>_</c> (dowolny znak), <c>[</c> (klasa znaków) -
+    /// przez opakowanie w klasę znaków <c>[x]</c>. Bez tego referencja typu
+    /// "system_order_123" dopasowałaby też "systemXorderX123" → fałszywy 409 DUPLICATE
+    /// (audyt 2026-06-10 pkt 6). Kolejność: najpierw '[', potem '%' i '_' (wstawiane
+    /// nawiasy nie są ponownie przetwarzane).
+    /// </summary>
+    private static string EscapeLikePattern(string s) => s
+        .Replace("[", "[[]")
+        .Replace("%", "[%]")
+        .Replace("_", "[_]")
+        .Replace("'", "''");
 
     private InvoiceQueryItemDto MapDokumentToQueryItem(dynamic dok)
     {
@@ -543,7 +563,11 @@ public sealed class RealSferaSession : ISferaSession
 
             if (!request.Contractor.IsPerson)
             {
-                fs.FormaDokumentu = 1; // FV firmowa
+                // 1 = gtaFormaDokumentuFakturaKSeF (FormaDokumentuEnum). CELOWE: w Polsce
+                // faktury B2B muszą być wystawiane jako KSeF. Bridge tylko oznacza formę -
+                // samą wysyłkę do KSeF wykonuje operator w Subiekcie po sprawdzeniu
+                // poprawności faktur. NIE zmieniać na 0 (tradycyjna).
+                fs.FormaDokumentu = 1;
             }
 
             // Magazyn na FS ustawiamy PER POZYCJA (SuPozycja.MagazynId), NIE na dokumencie.
@@ -574,7 +598,13 @@ public sealed class RealSferaSession : ISferaSession
             bool isCredit = string.Equals(request.Payment.Attribute, "PlatnoscKredyt", StringComparison.Ordinal)
                 || string.Equals(request.Payment.Attribute, "PlatnoscRaty", StringComparison.Ordinal);
             fs.Rozliczony = isCredit ? false : request.Payment.IsSettled;
-            fs.Uwagi = request.Notes ?? string.Empty;
+            fs.Uwagi = BuildUwagiWithReference(request.Notes, request.ExternalReference);
+
+            // issue_date / sale_date z requestu - wcześniej cicho ignorowane (audyt pkt 4).
+            // Data sprzedaży FS to DataZakonczeniaDostawy (DataSprzedazy dotyczy tylko ZW/PA
+            // wg pomocy Sfery). Set tylko gdy data inna niż dzisiejsza.
+            SetDocumentDateIfBackdated(fs, "DataWystawienia", request.IssueDate);
+            SetDocumentDateIfBackdated(fs, "DataZakonczeniaDostawy", request.SaleDate);
 
             fs.Zapisz();
 
@@ -636,6 +666,26 @@ public sealed class RealSferaSession : ISferaSession
         // wg pomocy Sfery. Dla PZ ustawienie pz.MagazynOdbiorczyId rzuca NotImplemented
         // z ComObject (sprawdzone empirycznie v0.7.29). Subiekt sam wpisze dok_MagId
         // z magazynu pierwszej pozycji.
+        // Anti-duplicate po external_reference w Uwagach (jak FS/MM) - retry z innym
+        // Idempotency-Key nie może dublować PZ (zawyżony stan magazynowy + podwójny
+        // koszt zakupu). Dodane w audycie 2026-06-10 - wcześniej PZ nie miał tej warstwy.
+        var existingReceiptId = FindExistingInvoiceByReference(request.ExternalReference, "PZ");
+        if (existingReceiptId.HasValue)
+        {
+            dynamic existingPz = Session.SuDokumentyManager.WczytajDokument(existingReceiptId.Value);
+            try
+            {
+                throw new DuplicateInvoiceException(
+                    existingReceiptId.Value,
+                    (string)existingPz.NumerPelny ?? "",
+                    request.ExternalReference);
+            }
+            finally
+            {
+                try { existingPz.Zamknij(); } catch { /* cleanup */ }
+            }
+        }
+
         // Magazyn dokumentu = magazyn roboczy sesji (Subiekt.MagazynId), ustawiany per request
         // (jak FS). Per-pozycja SuPozycja.MagazynId nie wystarcza na tym Subiekcie.
         int? prevWarehouse = SetSessionWarehouse(request.WarehouseSubiektId);
@@ -670,9 +720,23 @@ public sealed class RealSferaSession : ISferaSession
 
             // Powiązanie z FS jeśli istnieje (workflow: PZ przed FS = sourceSubiektId null;
             // PZ po FS = sourceSubiektId ustawione, Subiekt linkuje dokumenty).
+            // UWAGA: przy KFS DoDokumentuId okazało się read-only (TargetParameterCountException)
+            // - możliwe że dla PZ też. Wcześniej TrySet połykał błąd i nie wiadomo było, czy
+            // link w ogóle powstaje (audyt 2026-06-10 pkt 7). Teraz logujemy głośno - PZ i tak
+            // się wystawi (link jest nice-to-have), ale produkcja pokaże prawdę.
             if (request.SourceInvoiceSubiektId.HasValue)
             {
-                TrySet(pz, "DoDokumentuId", (int) request.SourceInvoiceSubiektId.Value);
+                try
+                {
+                    SetCom(pz, "DoDokumentuId", (int)request.SourceInvoiceSubiektId.Value);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "PZ: nie udało się ustawić DoDokumentuId={Id} (link PZ->FS NIE powstanie; " +
+                        "atrybut prawdopodobnie read-only jak przy KFS)",
+                        request.SourceInvoiceSubiektId.Value);
+                }
             }
 
             int? perLineWarehouseId = request.WarehouseSubiektId;
@@ -681,7 +745,15 @@ public sealed class RealSferaSession : ISferaSession
                 AddLineToDocument(pz, line.Ean, line.NameFallback, line.Quantity, line.Unit, line.UnitPriceGross, perLineWarehouseId, useNetPrice: true, vatRate: line.VatRate, unitPriceNet: line.UnitPriceNet);
             }
 
-            pz.Uwagi = request.Notes ?? string.Empty;
+            pz.Uwagi = BuildUwagiWithReference(request.Notes, request.ExternalReference);
+
+            // issue_date PZ - wcześniej cicho ignorowane (audyt pkt 4). PZ to dokument
+            // magazynowy: ustawiamy parę DataMagazynowa + DataWystawienia (pomoc Sfery
+            // wymaga modyfikacji obu dla dokumentów magazynowych, przykład przy MM).
+            // Set tylko gdy data inna niż dzisiejsza, twardo - zła data = zły okres
+            // VAT/stanów, lepiej głośno odmówić.
+            SetDocumentDateIfBackdated(pz, "DataMagazynowa", request.IssueDate);
+            SetDocumentDateIfBackdated(pz, "DataWystawienia", request.IssueDate);
 
             // Diagnostyka: log stanu PZ tuz przed Zapisz(). 0x80004005 z Sfery to ogolny
             // E_FAIL bez szczegolow (excepInfo gubione przez RuntimeBinder), wiec logujemy
@@ -816,9 +888,7 @@ public sealed class RealSferaSession : ISferaSession
                 }
             }
 
-            mm.Uwagi = string.IsNullOrEmpty(request.Notes)
-                ? request.ExternalReference
-                : $"{request.Notes} | ref: {request.ExternalReference}";
+            mm.Uwagi = BuildUwagiWithReference(request.Notes, request.ExternalReference);
 
             mm.Zapisz();
 
@@ -851,6 +921,26 @@ public sealed class RealSferaSession : ISferaSession
         // Twardy set (NIE cichy fallback na magazyn sesji - to BYŁ bug): gdy nie da się odczytać
         // dok_MagId źródłowej FS, fail-loud (retry job) zamiast wystawić KFS na zły magazyn.
         // KFSn (SourceIsExternal) nie ma dokumentu źródłowego w bazie - zostaje magazyn sesji.
+        // Anti-duplicate po external_reference w Uwagach (jak FS/PZ/MM) - Uwagi KFS
+        // zawsze zawierają "ref: <external_reference>" (niżej), więc pre-check chroni
+        // przed podwójną korektą przy retry z innym Idempotency-Key (audyt 2026-06-10).
+        var existingCorrectionId = FindExistingInvoiceByReference(request.ExternalReference, "KFS");
+        if (existingCorrectionId.HasValue)
+        {
+            dynamic existingKfs = Session.SuDokumentyManager.WczytajDokument(existingCorrectionId.Value);
+            try
+            {
+                throw new DuplicateInvoiceException(
+                    existingCorrectionId.Value,
+                    (string)existingKfs.NumerPelny ?? "",
+                    request.ExternalReference);
+            }
+            finally
+            {
+                try { existingKfs.Zamknij(); } catch { /* cleanup */ }
+            }
+        }
+
         int? prevWarehouse = null;
         if (!request.SourceIsExternal)
         {
@@ -881,7 +971,14 @@ public sealed class RealSferaSession : ISferaSession
                 }
                 if (!string.IsNullOrEmpty(request.SourceInvoiceDate))
                 {
-                    SetComProperty(kfs, "DoDokumentuDataWystawienia", DateTime.Parse(request.SourceInvoiceDate));
+                    // TryParseExact spójnie z resztą dat (kontroler waliduje format, to defensywa).
+                    if (!DateTime.TryParseExact(request.SourceInvoiceDate, "yyyy-MM-dd",
+                            CultureInfo.InvariantCulture, DateTimeStyles.None, out var sourceDate))
+                    {
+                        throw new InvalidOperationException(
+                            $"Nieprawidłowy format source_invoice_date '{request.SourceInvoiceDate}' (oczekiwane YYYY-MM-DD).");
+                    }
+                    SetComProperty(kfs, "DoDokumentuDataWystawienia", sourceDate);
                 }
             }
 
@@ -930,6 +1027,10 @@ public sealed class RealSferaSession : ISferaSession
             }
 
             kfs.Uwagi = $"Korekta: {request.Reason} | ref: {request.ExternalReference}";
+
+            // issue_date korekty - wcześniej cicho ignorowane (audyt pkt 4). Set tylko gdy
+            // data inna niż dzisiejsza; po NaPodstawie(), żeby nic jej nie nadpisało.
+            SetDocumentDateIfBackdated(kfs, "DataWystawienia", request.IssueDate);
 
             // KFS payment: po NaPodstawie() Sfera defaultowo wpisuje
             // PlatnoscGotowkaKwota = total korekty (z SuDokument_PlatnoscGotowkaKwota.htm:
@@ -1054,7 +1155,9 @@ public sealed class RealSferaSession : ISferaSession
         }
 
         decimal? net = TryReadDecimal(document, "WartoscNetto");
-        decimal? vat = TryReadDecimal(document, "WartoscPodatku");
+        // "WartoscVat", NIE "WartoscPodatku" - ten drugi atrybut nie istnieje w Sferze
+        // (0 trafień w całym CHM), przez co totals.vat było zawsze null (audyt 2026-06-10).
+        decimal? vat = TryReadDecimal(document, "WartoscVat");
 
         // Net/Vat są pomocnicze (Subiekt sam wylicza, my je tylko persystujemy w Laravel
         // dla audytu). Brak nie zatrzymuje flow - zostawiamy null.
@@ -1330,6 +1433,58 @@ public sealed class RealSferaSession : ISferaSession
     }
 
     /// <summary>
+    /// Buduje Uwagi dokumentu tak, by NA PEWNO zawierały external_reference - na tym
+    /// opiera się anty-duplikat (<see cref="FindExistingInvoiceByReference"/> szuka
+    /// dok_Uwagi LIKE '%ref%'). Nie polegamy na tym, że klient sam wklei referencję
+    /// do notes (kontrakt §5 obiecuje tę warstwę bezwarunkowo); doklejamy ją, jeśli
+    /// jeszcze jej tam nie ma.
+    /// </summary>
+    private static string BuildUwagiWithReference(string? notes, string externalReference)
+    {
+        string baseNotes = notes ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(externalReference)
+            || baseNotes.Contains(externalReference, StringComparison.Ordinal))
+        {
+            return baseNotes;
+        }
+
+        return baseNotes.Length == 0
+            ? $"ref: {externalReference}"
+            : $"{baseNotes} | ref: {externalReference}";
+    }
+
+    /// <summary>
+    /// Ustawia datę na dokumencie, ale TYLKO gdy klient podał datę inną niż dzisiejsza.
+    /// Dla domyślnego przypadku (issue_date = dziś) nie dotykamy atrybutu - Subiekt sam
+    /// wpisuje bieżącą datę, więc zachowanie produkcyjne się nie zmienia. Data wsteczna
+    /// (backdating, np. fakturowanie na przełomie miesiąca) była wcześniej CICHO ignorowana
+    /// i dokument dostawał datę bieżącą = zły okres VAT (audyt 2026-06-10 pkt 4). Teraz
+    /// ustawiamy twardo (SetCom) - ewentualna odmowa Sfery jest widocznym błędem zamiast
+    /// FV ze złą datą.
+    /// </summary>
+    private static void SetDocumentDateIfBackdated(dynamic document, string attribute, string? isoDate)
+    {
+        if (string.IsNullOrWhiteSpace(isoDate))
+        {
+            return;
+        }
+
+        if (!DateTime.TryParseExact(isoDate, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+                DateTimeStyles.None, out var date))
+        {
+            throw new InvalidOperationException(
+                $"Nieprawidłowy format daty '{isoDate}' dla atrybutu {attribute} (oczekiwane YYYY-MM-DD).");
+        }
+
+        if (date.Date == DateTime.Today)
+        {
+            return;
+        }
+
+        SetCom((object)document, attribute, date.Date);
+    }
+
+    /// <summary>
     /// Szuka istniejacego dokumentu w Subiekcie po external_reference w polu Uwagi.
     /// Zwraca subiekt_id najnowszego pasujacego dokumentu typu zgodnego z typePrefix
     /// (np. "FS"), lub null gdy brak. SQL LIKE skanuje dok_Uwagi - dla typowej bazy
@@ -1343,7 +1498,7 @@ public sealed class RealSferaSession : ISferaSession
             return null;
         }
 
-        var escaped = externalReference.Replace("'", "''");
+        var escaped = EscapeLikePattern(externalReference);
         var filter = $"dok_Uwagi LIKE '%{escaped}%'";
 
         try
@@ -1880,8 +2035,27 @@ public sealed class RealSferaSession : ISferaSession
             return null;
         }
 
-        int previous = 0;
-        try { previous = Convert.ToInt32(Session.MagazynId); } catch { previous = 0; }
+        // Odczyt poprzedniego magazynu MUSI się udać zanim cokolwiek przestawimy - bez
+        // znanej wartości nie dałoby się go przywrócić i przestawiony magazyn wyciekałby
+        // na kolejne dokumenty wystawiane bez warehouse_subiekt_id (audyt 2026-06-10 pkt 8;
+        // wcześniej catch ustawiał previous=0 i restore był po cichu pomijany).
+        int previous;
+        try
+        {
+            previous = Convert.ToInt32(Session.MagazynId);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                "Nie udało się odczytać bieżącego magazynu sesji (Subiekt.MagazynId) - " +
+                "przerwano PRZED przestawieniem magazynu, bo bez znanej poprzedniej wartości " +
+                $"nie dałoby się go przywrócić po wystawieniu dokumentu. {ex.Message}", ex);
+        }
+
+        if (previous == warehouseId.Value)
+        {
+            return null; // magazyn już właściwy - nic do przestawiania ani przywracania
+        }
 
         try
         {
@@ -1894,13 +2068,13 @@ public sealed class RealSferaSession : ISferaSession
                 $"'{_options.Operator}' może nie mieć dostępu do tego magazynu w Subiekcie. {ex.Message}", ex);
         }
 
-        return previous > 0 ? previous : (int?)null;
+        return previous;
     }
 
     /// <summary>Przywraca magazyn roboczy sesji (best-effort), by nie wyciekał na kolejne dokumenty/KFS.</summary>
     private void RestoreSessionWarehouse(int? previous)
     {
-        if (!previous.HasValue || previous.Value <= 0)
+        if (!previous.HasValue)
         {
             return;
         }

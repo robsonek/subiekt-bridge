@@ -21,7 +21,11 @@ builder.Host.UseWindowsService(options =>
 // Auto-generate self-signed cert jeśli config wskazuje plik PFX który nie istnieje.
 // Eliminuje kłopot "Unable to configure HTTPS endpoint - dev certificate missing"
 // na świeżym Windowsie/Server 2016+ bez zainstalowanego dotnet dev-certs.
-EnsureSelfSignedCertificate(builder.Configuration);
+// ContentRootPath, NIE Directory.GetCurrentDirectory(): Kestrel rozwiązuje relative
+// cert path względem content root, a Windows Service ma CWD=C:\Windows\System32
+// (ten sam bug co historycznie logi Serilog) - generator pisałby cert tam, gdzie
+// Kestrel go nie szuka.
+EnsureSelfSignedCertificate(builder.Configuration, builder.Environment.ContentRootPath);
 
 // Logi do absolute path obok exe - Windows Service ma WorkingDirectory=C:\Windows\System32,
 // wiec relative "logs/" trafialo poza C:\SubiektBridge\ i folder logs/ byl pusty.
@@ -121,7 +125,7 @@ app.Run();
 // Helpers
 // ============================================================================
 
-static void EnsureSelfSignedCertificate(IConfiguration config)
+static void EnsureSelfSignedCertificate(IConfiguration config, string contentRootPath)
 {
     // Czytamy ścieżkę z standardowego klucza ASP.NET Core: Kestrel:Endpoints:Https:Certificate:Path
     var certPath = config["Kestrel:Endpoints:Https:Certificate:Path"];
@@ -132,7 +136,7 @@ static void EnsureSelfSignedCertificate(IConfiguration config)
 
     var fullPath = Path.IsPathRooted(certPath)
         ? certPath
-        : Path.Combine(Directory.GetCurrentDirectory(), certPath);
+        : Path.Combine(contentRootPath, certPath);
 
     if (File.Exists(fullPath))
     {

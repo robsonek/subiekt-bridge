@@ -157,6 +157,13 @@ public sealed class ReceiptsController : ControllerBase
                 Message: "PZ nie może być wystawione bez pozycji."));
         }
 
+        if (!InvoicesController.IsIsoDateOrEmpty(request.IssueDate))
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "INVALID_DATE",
+                Message: "issue_date musi być w formacie YYYY-MM-DD."));
+        }
+
         try
         {
             var response = await _sfera.CreateReceiptAsync(request, ct);
@@ -169,6 +176,21 @@ public sealed class ReceiptsController : ControllerBase
                 Code: "MISSING_PRODUCT",
                 Message: ex.Message,
                 Details: new { missing_eans = new[] { ex.MissingEan } }));
+        }
+        catch (DuplicateInvoiceException ex)
+        {
+            _logger.LogWarning("Duplicate PZ blocked: ref={Ref}, existing={Number} (subiekt_id={Id})",
+                ex.ExternalReference, ex.ExistingNumber, ex.ExistingSubiektId);
+            return Conflict(new ErrorResponseDto(
+                Code: "DUPLICATE_RECEIPT",
+                Message: ex.Message,
+                Details: new
+                {
+                    existing_subiekt_id = ex.ExistingSubiektId,
+                    existing_number = ex.ExistingNumber,
+                    existing_bridge_id = $"sub_{ex.ExistingSubiektId}",
+                    external_reference = ex.ExternalReference,
+                }));
         }
         catch (NotImplementedException ex)
         {

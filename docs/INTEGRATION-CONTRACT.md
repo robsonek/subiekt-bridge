@@ -58,8 +58,8 @@ Autorytatywne źródło: `src/SubiektBridge.Api/Models/InvoiceModels.cs`.
 ```jsonc
 {
   "type": "FS",
-  "issue_date": "2026-06-01",
-  "sale_date": "2026-06-01",
+  "issue_date": "2026-06-01",   // YYYY-MM-DD; data = dziś → Subiekt sam nadaje; data wsteczna → most ustawia twardo
+  "sale_date": "2026-06-01",    // jw. (w Subiekcie: data zakończenia dostawy)
   "payment": {
     "attribute": "PlatnoscPrzelew",   // forma płatności (§3.5)
     "method_subiekt_id": null,         // int? — id słownika; null gdy forma go nie ma
@@ -224,9 +224,10 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 - **2xx** → sukces.
 - **4xx** → błąd danych po Twojej stronie → **NIE retry'uj**, popraw request / zgłoś operatorowi.
 - **5xx / 502 / 503** → most lub Subiekt offline → **retry z backoffem**.
-- **409 `DUPLICATE_INVOICE`** → dokument z tym `external_reference` już istnieje → **auto-recovery**:
-  pobierz `details.existing_subiekt_id` / `existing_bridge_id` i podbij swój rekord na „wystawione"
-  (zamiast tworzyć nowy). To **nie** jest błąd do retry.
+- **409 `DUPLICATE_INVOICE` / `DUPLICATE_RECEIPT` / `DUPLICATE_TRANSFER`** → dokument z tym
+  `external_reference` już istnieje → **auto-recovery**: pobierz `details.existing_subiekt_id` /
+  `existing_bridge_id` i podbij swój rekord na „wystawione" (zamiast tworzyć nowy).
+  To **nie** jest błąd do retry.
 
 | HTTP | `code` | Co robisz |
 |---|---|---|
@@ -235,8 +236,11 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 422 | `TOTAL_MISMATCH` | `totals.gross` ≠ Σ(linie+wysyłka) — popraw kwoty (§7.1) |
 | 422 | `MISSING_PRODUCT` | EAN nie istnieje w Subiekcie (`details.missing_eans`) — załóż towar / popraw EAN |
 | 422 | `EMPTY_LINES` | pusta lista pozycji |
+| 422 | `UNSUPPORTED_CURRENCY` | most wystawia wyłącznie PLN — `currency` musi być `"PLN"` |
+| 422 | `UNSUPPORTED_VAT_RATE` | `vat_rate` ≠ 23 na wysyłce/pozycji usługowej (EAN=null) — usługi tylko 23%; pozycje towarowe biorą VAT z kartoteki |
+| 422 | `INVALID_DATE` | `issue_date`/`sale_date`/`source_invoice_date` nie w formacie `YYYY-MM-DD` (lub data niemożliwa kalendarzowo) |
 | 404 | `INVOICE_NOT_FOUND` / `RECEIPT_NOT_FOUND` | zły `{id}` |
-| **409** | **`DUPLICATE_INVOICE`** | **auto-recovery** (patrz wyżej) |
+| **409** | **`DUPLICATE_INVOICE` / `DUPLICATE_RECEIPT` / `DUPLICATE_TRANSFER`** | **auto-recovery** (patrz wyżej) |
 | 501 | `NOT_IMPLEMENTED` | operacja nieobsługiwana — zgłoś, nie retry |
 | 502 | `SUBIEKT_QUERY_FAILED` / `BRIDGE_DEGRADED` | Subiekt nie odpowiada — **retry** |
 | 503 | (health) | sesja Sfery martwa — **retry / circuit-breaker** |
@@ -265,6 +269,8 @@ Most ma dwie warstwy zabezpieczeń; obie zależą od tego, **co Ty wyślesz**:
 
 2. **Anty-duplikat w Subiekcie po `external_reference`** — przed utworzeniem most szuka
    dokumentu z tym samym `external_reference` (w polu uwag). Trafienie → `409`.
+   Most **sam dokleja** `| ref: <external_reference>` do uwag dokumentu (FS/KFS/PZ/MM),
+   jeśli nie umieściłeś referencji w `notes` — nie musisz (ale możesz) robić tego sam.
 
 > ⚠️ **Jedyna realna pułapka przy współdzielonym Subiekcie.**
 > Subiekt jest **wspólny** z `marketplace-manage`. Anty-duplikat działa po dopasowaniu
