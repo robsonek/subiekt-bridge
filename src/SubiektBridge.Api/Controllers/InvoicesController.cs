@@ -139,7 +139,7 @@ public sealed class InvoicesController : ControllerBase
         }
 
         // Walidacja totalsum vs Σ(line.qty * line.price_gross + shipping).
-        var error = ValidateTotals(request);
+        var error = ValidateTotals(request) ?? ValidateBusinessRules(request);
         if (error is not null)
         {
             return UnprocessableEntity(error);
@@ -231,6 +231,13 @@ public sealed class InvoicesController : ControllerBase
                 Message: $"Bridge ID '{id}' ma nieznany format. Oczekiwane: 'sub_<id>' (real Sfera) lub 'fake_inv_<id>' (dev mock)."));
         }
 
+        if (!IsIsoDateOrEmpty(request.IssueDate) || !IsIsoDateOrEmpty(request.SourceInvoiceDate))
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "INVALID_DATE",
+                Message: "issue_date i source_invoice_date muszą być w formacie YYYY-MM-DD."));
+        }
+
         try
         {
             var response = await _sfera.CreateCorrectionAsync(sourceSubiektId, request, ct);
@@ -275,6 +282,65 @@ public sealed class InvoicesController : ControllerBase
                 Details: new { stack = ex.StackTrace?.Split('\n').Take(10).ToArray() }));
         }
     }
+
+    /// <summary>
+    /// Jawnie odrzuca wartości, które Bridge wcześniej PO CICHU ignorował (audyt 2026-06-10
+    /// pkt 4) - klient dostawał dokument inny niż zamówił, bez żadnego sygnału:
+    /// - currency ≠ PLN → FV i tak wychodziła w PLN (Bridge nie obsługuje WalutaSymbol/Kurs),
+    /// - vat_rate ≠ 23 na pozycji usługowej (EAN=null) lub wysyłce → usługa jednorazowa
+    ///   dostaje stawkę domyślną Subiekta; Sfera pozwala zmienić stawkę tylko przez
+    ///   SuPozycja.VatId (id z sl_StawkaVAT, różne per baza), czego Bridge nie mapuje,
+    /// - zły format dat → daty były ignorowane (teraz idą do Sfery, patrz RealSferaSession).
+    /// </summary>
+    private static ErrorResponseDto? ValidateBusinessRules(InvoiceRequestDto request)
+    {
+        if (!string.IsNullOrEmpty(request.Currency)
+            && !string.Equals(request.Currency, "PLN", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ErrorResponseDto(
+                Code: "UNSUPPORTED_CURRENCY",
+                Message: $"Bridge wystawia dokumenty wyłącznie w PLN - otrzymano '{request.Currency}'.");
+        }
+
+        if (!IsIsoDateOrEmpty(request.IssueDate) || !IsIsoDateOrEmpty(request.SaleDate))
+        {
+            return new ErrorResponseDto(
+                Code: "INVALID_DATE",
+                Message: "issue_date i sale_date muszą być w formacie YYYY-MM-DD.");
+        }
+
+        const decimal supportedServiceVat = 23m;
+        if (request.Shipping.Include && request.Shipping.VatRate != supportedServiceVat)
+        {
+            return new ErrorResponseDto(
+                Code: "UNSUPPORTED_VAT_RATE",
+                Message: $"Wysyłka: vat_rate={request.Shipping.VatRate} nieobsługiwane - usługa " +
+                         "jednorazowa w Subiekcie dostaje stawkę domyślną 23%. Bridge nie mapuje " +
+                         "vat_rate na sl_StawkaVAT.VatId.");
+        }
+
+        var badServiceLine = request.Lines.FirstOrDefault(
+            l => string.IsNullOrEmpty(l.Ean) && l.VatRate != supportedServiceVat);
+        if (badServiceLine is not null)
+        {
+            return new ErrorResponseDto(
+                Code: "UNSUPPORTED_VAT_RATE",
+                Message: $"Pozycja usługowa '{badServiceLine.NameFallback}': vat_rate=" +
+                         $"{badServiceLine.VatRate} nieobsługiwane (jak wysyłka - tylko 23%). " +
+                         "Pozycje towarowe (z EAN) biorą VAT z kartoteki towaru.");
+        }
+
+        return null;
+    }
+
+    // TryParseExact, NIE regex: kształt YYYY-MM-DD przepuszczałby daty niemożliwe
+    // kalendarzowo (2026-02-31) -> 500 z TryParseExact w RealSferaSession zamiast 422,
+    // a 5xx wg kontraktu klient retry'uje (w nieskończoność, bo data się nie naprawi).
+    internal static bool IsIsoDateOrEmpty(string? date) =>
+        string.IsNullOrWhiteSpace(date)
+        || DateTime.TryParseExact(date, "yyyy-MM-dd",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None, out _);
 
     private static ErrorResponseDto? ValidateTotals(InvoiceRequestDto request)
     {

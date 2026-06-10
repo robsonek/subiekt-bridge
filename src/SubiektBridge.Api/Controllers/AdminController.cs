@@ -25,6 +25,13 @@ public sealed class AdminController : ControllerBase
         @"^v?\d+\.\d+\.\d+(?:[-.][0-9A-Za-z]+)*$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    // Granice słów (\b), NIE "SŁOWO " ze spacją: "DELETE\tFROM" / "DELETE\nFROM" / "EXEC("
+    // omijały starą blacklistę opartą o Contains("DELETE ") (audyt 2026-06-10 pkt 9).
+    // \b nie łapie identyfikatorów typu kolumna "created_at" (podkreślnik to znak słowa).
+    private static readonly Regex ForbiddenSqlKeywordRegex = new(
+        @"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|EXEC|EXECUTE|MERGE|GRANT|REVOKE)\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
     private readonly BridgeOptions _options;
     private readonly ISferaSession _sfera;
     private readonly ILogger<AdminController> _logger;
@@ -56,16 +63,15 @@ public sealed class AdminController : ControllerBase
                 "Tylko SELECT/WITH dozwolone. Bridge nie wykonuje INSERT/UPDATE/DELETE/DROP."));
         }
 
-        // Reject DML/DDL slow w srodku query (np. WITH ... INSERT ... SELECT)
-        var upper = request.Sql.ToUpperInvariant();
-        foreach (var forbidden in new[] { "INSERT ", "UPDATE ", "DELETE ", "DROP ", "TRUNCATE ", "ALTER ", "CREATE ", "EXEC ", "EXECUTE ", "MERGE ", "GRANT ", "REVOKE " })
+        // Reject DML/DDL slow w srodku query (np. WITH ... INSERT ... SELECT, multi-statement
+        // po sredniku). Word-boundary regex zamiast Contains("SLOWO ") - tab/newline po slowie
+        // kluczowym omijaly stara blackliste.
+        var forbiddenMatch = ForbiddenSqlKeywordRegex.Match(request.Sql);
+        if (forbiddenMatch.Success)
         {
-            if (upper.Contains(forbidden))
-            {
-                return BadRequest(new ErrorResponseDto(
-                    "READONLY_ONLY",
-                    $"Wykryto slowo kluczowe '{forbidden.Trim()}' - tylko SELECT/WITH dozwolone."));
-            }
+            return BadRequest(new ErrorResponseDto(
+                "READONLY_ONLY",
+                $"Wykryto slowo kluczowe '{forbiddenMatch.Value.ToUpperInvariant()}' - tylko SELECT/WITH dozwolone."));
         }
 
         var maxRows = Math.Clamp(request.MaxRows ?? 100, 1, 1000);
