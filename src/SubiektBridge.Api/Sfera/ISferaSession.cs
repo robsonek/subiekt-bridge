@@ -23,7 +23,6 @@ public interface ISferaSession : IAsyncDisposable
 
     /// <summary>
     /// Wystaw PZ - Przyjęcie Zewnętrzne. Dodaje towar na magazyn z ceną zakupu (dropshipping).
-    /// Powiązanie z FS (jeśli istnieje) przez DoDokumentuId w request.SourceInvoiceSubiektId.
     /// </summary>
     Task<InvoiceResponseDto> CreateReceiptAsync(ReceiptIssueRequestDto request, CancellationToken ct);
 

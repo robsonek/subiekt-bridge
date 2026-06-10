@@ -161,7 +161,7 @@ Most szuka towaru po `ean` w kartotece Subiekta. **Brak towaru → `422 MISSING_
   "warehouse_subiekt_id": 1,
   "supplier": { /* ContractorDto — dostawca */ },
   "lines": [ /* LineDto — cena = cena ZAKUPU; patrz uwaga o netto niżej */ ],
-  "source_invoice_subiekt_id": null,   // DEPRECATED — zawsze null (FS wymaga stanu → PZ idzie pierwsze); pomiń
+  // source_invoice_subiekt_id: USUNIĘTE — było martwe (FS wymaga stanu → PZ idzie pierwsze); jeśli je wyślesz, most je zignoruje
   "external_reference": "nowysystem:order:ABC123:supplier:42",
   "notes": "...",
   "original_number": "..."             // string? — numer dok. dostawcy (Subiekt: max 30 zn.)
