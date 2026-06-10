@@ -132,7 +132,9 @@ public sealed record ReceiptIssueRequestDto(
     [property: JsonPropertyName("warehouse_subiekt_id")] int? WarehouseSubiektId,
     [property: JsonPropertyName("supplier")] ContractorDto Supplier,
     [property: JsonPropertyName("lines")] IReadOnlyList<LineDto> Lines,
-    [property: JsonPropertyName("source_invoice_subiekt_id")] long? SourceInvoiceSubiektId,
+    // source_invoice_subiekt_id usunięte (audyt 2026-06-10 pkt 7) - dead code: FS wymaga
+    // stanu, więc PZ zawsze idzie pierwsze i pole było zawsze null. Klient może je jeszcze
+    // wysyłać - System.Text.Json ignoruje nieznane pola.
     [property: JsonPropertyName("external_reference")] string ExternalReference,
     [property: JsonPropertyName("notes")] string Notes,
     // Numer oryginalny - mapuje na SuDokument.NumerOryginalny (max 30 znakow w Sferze,

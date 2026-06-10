@@ -718,26 +718,9 @@ public sealed class RealSferaSession : ISferaSession
                 TrySet(pz, "NumerOryginalny", numerOryg);
             }
 
-            // Powiązanie z FS jeśli istnieje (workflow: PZ przed FS = sourceSubiektId null;
-            // PZ po FS = sourceSubiektId ustawione, Subiekt linkuje dokumenty).
-            // UWAGA: przy KFS DoDokumentuId okazało się read-only (TargetParameterCountException)
-            // - możliwe że dla PZ też. Wcześniej TrySet połykał błąd i nie wiadomo było, czy
-            // link w ogóle powstaje (audyt 2026-06-10 pkt 7). Teraz logujemy głośno - PZ i tak
-            // się wystawi (link jest nice-to-have), ale produkcja pokaże prawdę.
-            if (request.SourceInvoiceSubiektId.HasValue)
-            {
-                try
-                {
-                    SetCom(pz, "DoDokumentuId", (int)request.SourceInvoiceSubiektId.Value);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex,
-                        "PZ: nie udało się ustawić DoDokumentuId={Id} (link PZ->FS NIE powstanie; " +
-                        "atrybut prawdopodobnie read-only jak przy KFS)",
-                        request.SourceInvoiceSubiektId.Value);
-                }
-            }
+            // Link PZ->FS (DoDokumentuId) usunięty jako dead code (audyt 2026-06-10 pkt 7):
+            // FS wymaga stanu magazynowego, więc PZ ZAWSZE idzie przed FS i source_invoice_
+            // subiekt_id było zawsze null. Pole w JSON jest nadal tolerowane (ignorowane).
 
             int? perLineWarehouseId = request.WarehouseSubiektId;
             foreach (var line in request.Lines)
