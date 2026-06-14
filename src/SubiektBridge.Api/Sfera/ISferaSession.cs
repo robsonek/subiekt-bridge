@@ -61,6 +61,38 @@ public interface ISferaSession : IAsyncDisposable
 
     /// <summary>Escape hatch - generic call do dowolnej metody Sfery (whitelist w configu).</summary>
     Task<object?> InvokeRawAsync(string method, IReadOnlyList<object?> args, CancellationToken ct);
+
+    /// <summary>
+    /// Rozlicz rozrachunek dokumentu {documentSubiektId} z istniejącą operacją bankową
+    /// (zaimportowanym z wyciągu przelewem). MVP: tylko FS (należność, wpłata BP).
+    /// Rzuca <see cref="SettlementException"/> (mapowane na 4xx/5xx) lub
+    /// <see cref="DuplicateSettlementException"/> (409) gdy operacja już rozliczona z tym rozrachunkiem.
+    /// </summary>
+    Task<SettlementResponseDto> CreateSettlementAsync(
+        long documentSubiektId,
+        SettlementCreateRequestDto request,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Stan rozliczenia dokumentu: pozostała kwota + lista rozliczeń. Zwraca null gdy dokument
+    /// nie istnieje (-> 404). Rzuca <see cref="SettlementException"/>(NoRozrachunek) gdy dokument
+    /// bez rozrachunku (-> 422).
+    /// </summary>
+    Task<SettlementStateResponseDto?> GetSettlementsAsync(long documentSubiektId, CancellationToken ct);
+
+    /// <summary>
+    /// Cofnij rozliczenie {rozliczenieId} rozrachunku dokumentu {documentSubiektId}
+    /// (FinRozliczenie.Usun - rozkojarza rozrachunek/spłatę, NIE kasuje dokumentów).
+    /// Rzuca <see cref="SettlementException"/>(SettlementNotFound/DocumentNotFound).
+    /// </summary>
+    Task DeleteSettlementAsync(long documentSubiektId, long rozliczenieId, CancellationToken ct);
+
+    /// <summary>
+    /// Lista operacji bankowych (BP/BW) z wyciągu - źródło bank_operation_subiekt_id do rozliczeń.
+    /// </summary>
+    Task<IReadOnlyList<BankOperationDto>> QueryBankOperationsAsync(
+        BankOperationQueryRequestDto request,
+        CancellationToken ct);
 }
 
 public sealed record SferaHealthDto(

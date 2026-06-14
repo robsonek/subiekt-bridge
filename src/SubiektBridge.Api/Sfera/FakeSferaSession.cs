@@ -230,6 +230,176 @@ public sealed class FakeSferaSession : ISferaSession
         });
     }
 
+    // ----------------------------- Settlements (rozliczenia) -----------------------------
+    //
+    // Minimalny in-memory store, żeby anti-duplicate, częściowe rozliczenia, idempotency-replay
+    // i GET były spójne w obrębie procesu (dev/test). Stan GLOBALNY (jak _invoiceCounter) -
+    // testy muszą wołać ResetSettlementsForTests() i używać unikalnych documentSubiektId.
+    //
+    // Sentinele documentSubiektId (deterministyczne mapowanie błędów dla testów controllera):
+    //   < 0              -> dokument nie istnieje (POST/DELETE: DocumentNotFound; GET: null)
+    //   >= 3_000_000     -> dokument bez rozrachunku (PZ magazynowy) -> NoRozrachunek
+    //   2_000_000..2_999_999 -> typ nieobsługiwany (np. korekta KFS/KFZ) -> UnsupportedDocumentType
+    //   == 1_900_001     -> rozrachunek już rozliczony (Remaining=0) -> AlreadySettled (w zakresie FS, <2M)
+    // Sentinele bank_operation_subiekt_id:
+    //   < 0  -> BankOperationNotFound
+    //   == 0 -> BankOperationExhausted
+    // SWIADOME ograniczenia: nie symuluje walut (zawsze PLN), metody kasowej, guardu kontrahenta BP.
+
+    private static long _settlementCounter = 0;
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, FakeRozrachunek> _settlements = new();
+
+    private sealed class FakeRozrachunek
+    {
+        public decimal Original;
+        public decimal Remaining;
+        public List<FakeRozliczenie> Lines = new();
+    }
+
+    private sealed class FakeRozliczenie
+    {
+        public long RozliczenieId;
+        public long BankOpId;
+        public decimal Amount;
+        public DateTimeOffset At;
+    }
+
+    /// <summary>Reset globalnego stanu rozliczeń - wołać w ctor/fixture testu.</summary>
+    internal static void ResetSettlementsForTests()
+    {
+        _settlements.Clear();
+        Interlocked.Exchange(ref _settlementCounter, 0);
+    }
+
+    /// <summary>
+    /// Wstrzykuje linię rozliczenia BEZ przejścia przez Create - symuluje crash między
+    /// Zapisz a SaveAsync (utrwalone w Subiekcie, klucz idempotency niezapisany).
+    /// </summary>
+    internal static void InjectSettlementLineForTests(long documentSubiektId, long bankOpId, decimal amount)
+    {
+        var r = _settlements.GetOrAdd(documentSubiektId, _ => new FakeRozrachunek { Original = 100m, Remaining = 100m });
+        lock (r)
+        {
+            var id = Interlocked.Increment(ref _settlementCounter);
+            r.Lines.Add(new FakeRozliczenie { RozliczenieId = id, BankOpId = bankOpId, Amount = amount, At = DateTimeOffset.UtcNow });
+            r.Remaining -= amount;
+        }
+    }
+
+    public Task<SettlementResponseDto> CreateSettlementAsync(long documentSubiektId, SettlementCreateRequestDto request, CancellationToken ct)
+    {
+        if (request.Amount <= 0m) throw new SettlementException(SettlementError.InvalidAmount, "amount musi byc > 0");
+        decimal amount = Math.Round(request.Amount, 2, MidpointRounding.AwayFromZero);
+
+        if (documentSubiektId < 0) throw new SettlementException(SettlementError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje");
+        if (documentSubiektId >= 3_000_000) throw new SettlementException(SettlementError.NoRozrachunek, "Dokument bez rozrachunku (PZ magazynowy)");
+        if (documentSubiektId is >= 2_000_000 and < 3_000_000) throw new SettlementException(SettlementError.UnsupportedDocumentType, "Typ nieobslugiwany (np. korekta)");
+        if (request.BankOperationSubiektId < 0) throw new SettlementException(SettlementError.BankOperationNotFound, $"Operacja bankowa {request.BankOperationSubiektId} nie istnieje");
+        if (request.BankOperationSubiektId == 0) throw new SettlementException(SettlementError.BankOperationExhausted, "Operacja bankowa skonsumowana");
+
+        var r = _settlements.GetOrAdd(documentSubiektId, id => new FakeRozrachunek
+        {
+            Original = 100m,
+            Remaining = id == 1_900_001 ? 0m : 100m,
+        });
+
+        lock (r)
+        {
+            if (r.Remaining <= 0.005m) throw new SettlementException(SettlementError.AlreadySettled, "Rozrachunek juz rozliczony");
+
+            var dup = r.Lines.FirstOrDefault(l => l.BankOpId == request.BankOperationSubiektId);
+            if (dup is not null)
+            {
+                throw new DuplicateSettlementException(dup.RozliczenieId, documentSubiektId, request.BankOperationSubiektId);
+            }
+
+            if (amount - r.Remaining > 0.005m)
+            {
+                throw new SettlementException(SettlementError.AmountExceedsRemaining, $"amount {amount:F2} > pozostalo {r.Remaining:F2}");
+            }
+
+            var id = Interlocked.Increment(ref _settlementCounter);
+            r.Remaining -= amount;
+            var at = DateTimeOffset.UtcNow;
+            r.Lines.Add(new FakeRozliczenie { RozliczenieId = id, BankOpId = request.BankOperationSubiektId, Amount = amount, At = at });
+            _lastInvoiceAt = at;
+
+            return Task.FromResult(new SettlementResponseDto(
+                RozliczenieId: id,
+                DocumentId: $"sub_{documentSubiektId}",
+                DocumentSubiektId: documentSubiektId,
+                RozrachunekSubiektId: documentSubiektId + 500_000,
+                BankOperationSubiektId: request.BankOperationSubiektId,
+                Amount: amount,
+                RemainingAfter: r.Remaining,
+                IsFullySettled: Math.Abs(r.Remaining) < 0.005m,
+                SettledAt: at));
+        }
+    }
+
+    public Task<SettlementStateResponseDto?> GetSettlementsAsync(long documentSubiektId, CancellationToken ct)
+    {
+        if (documentSubiektId < 0) return Task.FromResult<SettlementStateResponseDto?>(null);
+        if (documentSubiektId >= 3_000_000) throw new SettlementException(SettlementError.NoRozrachunek, "Dokument bez rozrachunku");
+
+        if (!_settlements.TryGetValue(documentSubiektId, out var r))
+        {
+            // Dokument istnieje, brak rozliczen -> pusty stan (spojnie z FindInvoiceById, ktory zawsze zwraca rekord).
+            return Task.FromResult<SettlementStateResponseDto?>(new SettlementStateResponseDto(
+                $"sub_{documentSubiektId}", documentSubiektId, documentSubiektId + 500_000, 100m, 100m, false, null, Array.Empty<SettlementLineDto>()));
+        }
+
+        lock (r)
+        {
+            var lines = r.Lines
+                .Select(l => new SettlementLineDto(l.RozliczenieId, l.Amount, l.At, l.BankOpId, documentSubiektId + 500_000, 1))
+                .ToList();
+            DateTimeOffset? last = r.Lines.Count > 0 ? r.Lines.Max(l => l.At) : null;
+            return Task.FromResult<SettlementStateResponseDto?>(new SettlementStateResponseDto(
+                $"sub_{documentSubiektId}", documentSubiektId, documentSubiektId + 500_000, r.Original, r.Remaining,
+                Math.Abs(r.Remaining) < 0.005m, last, lines));
+        }
+    }
+
+    public Task DeleteSettlementAsync(long documentSubiektId, long rozliczenieId, CancellationToken ct)
+    {
+        if (documentSubiektId < 0) throw new SettlementException(SettlementError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje");
+        if (documentSubiektId >= 3_000_000) throw new SettlementException(SettlementError.NoRozrachunek, "Dokument bez rozrachunku");
+
+        if (!_settlements.TryGetValue(documentSubiektId, out var r))
+        {
+            throw new SettlementException(SettlementError.SettlementNotFound, $"Rozliczenie {rozliczenieId} nie istnieje");
+        }
+
+        lock (r)
+        {
+            var line = r.Lines.FirstOrDefault(l => l.RozliczenieId == rozliczenieId);
+            if (line is null) throw new SettlementException(SettlementError.SettlementNotFound, $"Rozliczenie {rozliczenieId} nie istnieje");
+            r.Lines.Remove(line);
+            r.Remaining += line.Amount;
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<BankOperationDto>> QueryBankOperationsAsync(BankOperationQueryRequestDto request, CancellationToken ct)
+    {
+        IReadOnlyList<BankOperationDto> ops = new[]
+        {
+            new BankOperationDto(70001, "in", "2026-06-10", 123.45m, 123.45m, 1, "Zaplata FS 1/2026", "BP 1/2026"),
+            new BankOperationDto(70002, "in", "2026-06-11", 67.89m, 0m, 2, "Zaplata FS 2/2026", "BP 2/2026"),
+        };
+
+        if (string.Equals(request.Direction, "out", StringComparison.OrdinalIgnoreCase))
+        {
+            ops = Array.Empty<BankOperationDto>();
+        }
+        if (request.UnsettledOnly)
+        {
+            ops = ops.Where(o => (o.Remaining ?? 0m) > 0.005m).ToList();
+        }
+        return Task.FromResult(ops);
+    }
+
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     private static int HashString(string value)
