@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging.Abstractions;
+using SubiektBridge.Api.Configuration;
 using SubiektBridge.Api.Controllers;
+using SubiektBridge.Api.Idempotency;
 using SubiektBridge.Api.Models;
 using SubiektBridge.Api.Sfera;
 using Xunit;
@@ -14,12 +16,21 @@ namespace SubiektBridge.Tests;
 /// </summary>
 public class BankReconciliationTests
 {
+    public BankReconciliationTests() => FakeSferaSession.ResetBankBookingForTests();
+
     private static (int status, object? value) Unwrap(IActionResult? result) => result switch
     {
         ObjectResult o => (o.StatusCode ?? 200, o.Value),
         StatusCodeResult s => (s.StatusCode, null),
         _ => (-1, null),
     };
+
+    private static IdempotencyStore NewStore() => new(
+        new BridgeOptions { IdempotencyStorePath = Path.Combine(Path.GetTempPath(), $"idem_bt_{Guid.NewGuid():N}.db"), IdempotencyTtlDays = 30 },
+        NullLogger<IdempotencyStore>.Instance);
+
+    private static BankTransactionsController NewController(FakeSferaSession fake)
+        => new(fake, NewStore(), NullLogger<BankTransactionsController>.Instance);
 
     [Fact]
     public async Task BankTransactions_UnbookedOnly_ExcludesBooked()
@@ -69,10 +80,67 @@ public class BankReconciliationTests
     [Fact]
     public async Task Controller_BankTransactions_Returns200()
     {
-        var controller = new BankTransactionsController(new FakeSferaSession(), NullLogger<BankTransactionsController>.Instance);
+        var controller = NewController(new FakeSferaSession());
         var r = await controller.Query(direction: "in", unbookedOnly: true, from: null, to: null, limit: 0, CancellationToken.None);
         var (status, value) = Unwrap(r.Result);
         Assert.Equal(200, status);
         Assert.NotEmpty(Assert.IsAssignableFrom<IReadOnlyList<BankTransactionDto>>(value));
+    }
+
+    // ---------- POST /bank-transactions/{hb_id}/book ----------
+
+    [Fact]
+    public async Task Book_FirstCall_Creates_SecondCall_AlreadyBooked()
+    {
+        var fake = new FakeSferaSession();
+        var first = await fake.BookBankTransactionAsync(13128, null, keepUnlinked: false, CancellationToken.None);
+        var second = await fake.BookBankTransactionAsync(13128, null, keepUnlinked: false, CancellationToken.None);
+
+        Assert.True(first.Linked);
+        Assert.False(first.AlreadyBooked);
+        Assert.NotNull(first.BankOperationSubiektId);
+
+        Assert.True(second.AlreadyBooked);
+        Assert.Equal(first.BankOperationSubiektId, second.BankOperationSubiektId); // ten sam BP, brak duplikatu
+    }
+
+    [Fact]
+    public async Task Book_TransactionNotFound_Throws()
+    {
+        var fake = new FakeSferaSession();
+        var ex = await Assert.ThrowsAsync<BankBookingException>(() => fake.BookBankTransactionAsync(-1, null, keepUnlinked: false, CancellationToken.None));
+        Assert.Equal(BookError.TransactionNotFound, ex.Reason);
+    }
+
+    [Fact]
+    public async Task Controller_Book_MissingIdempotencyKey_Returns400()
+    {
+        var controller = NewController(new FakeSferaSession());
+        var r = await controller.Book(13128, new BookRequestDto(), idempotencyKey: null, CancellationToken.None);
+        var (status, value) = Unwrap(r.Result);
+        Assert.Equal(400, status);
+        Assert.Equal("MISSING_IDEMPOTENCY_KEY", ((ErrorResponseDto)value!).Code);
+    }
+
+    [Fact]
+    public async Task Controller_Book_Success_Returns201()
+    {
+        var controller = NewController(new FakeSferaSession());
+        var r = await controller.Book(13128, new BookRequestDto(), idempotencyKey: "k-book-1", CancellationToken.None);
+        var (status, value) = Unwrap(r.Result);
+        Assert.Equal(201, status);
+        var dto = Assert.IsType<BookResultDto>(value);
+        Assert.True(dto.Linked);
+        Assert.NotNull(dto.BankOperationSubiektId);
+    }
+
+    [Fact]
+    public async Task Controller_Book_NotFound_Returns404()
+    {
+        var controller = NewController(new FakeSferaSession());
+        var r = await controller.Book(-5, new BookRequestDto(), idempotencyKey: "k-book-404", CancellationToken.None);
+        var (status, value) = Unwrap(r.Result);
+        Assert.Equal(404, status);
+        Assert.Equal("BANK_TRANSACTION_NOT_FOUND", ((ErrorResponseDto)value!).Code);
     }
 }

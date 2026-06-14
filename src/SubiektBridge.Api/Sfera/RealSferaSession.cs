@@ -747,6 +747,162 @@ public sealed class RealSferaSession : ISferaSession
         }, ct);
     }
 
+    // -------------------------- Ksiegowanie przelewu (hb_Transakcja -> operacja bankowa BP/BW) --------------------------
+
+    private sealed record HbTxForBooking(decimal Kwota, DateTime? Data, string Oznaczenie, string? Tytul, long? ExistingOpId, long? RachunekId);
+
+    // Lock per hb_id - serializuje ksiegowanie tej samej transakcji w obrebie procesu (most jest jednoinstancyjny).
+    // Bez tego dwa rownolegle requesty z ROZNYMI Idempotency-Key moglyby oba przejsc guard ExistingOpId i utworzyc 2 BP.
+    private static readonly ConcurrentDictionary<long, SemaphoreSlim> _bookLocks = new();
+
+    public async Task<BookResultDto> BookBankTransactionAsync(long hbId, long? contractorSubiektId, bool keepUnlinked, CancellationToken ct)
+    {
+        var gate = _bookLocks.GetOrAdd(hbId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        try
+        {
+            // 1. Odczyt transakcji (SQL, poza STA). hb_Transakcja nie jest w Sferze - tylko read.
+            var tx = await Task.Run(() => ReadHbTransactionForBooking(hbId), ct);
+            if (tx is null) throw new BankBookingException(BookError.TransactionNotFound, $"hb_Transakcja {hbId} nie istnieje");
+
+            // 2. Idempotent (stan): juz zaksiegowana -> zwroc istniejaca (NIE tworz drugiego BP).
+            if (tx.ExistingOpId.HasValue)
+            {
+                _logger.LogInformation("Book: hb_id={HbId} juz zaksiegowana -> operacja {Op}", hbId, tx.ExistingOpId);
+                return new BookResultDto(tx.ExistingOpId, hbId, Linked: true, AlreadyBooked: true, "Transakcja juz zaksiegowana");
+            }
+
+            if (!tx.RachunekId.HasValue)
+                throw new BankBookingException(BookError.NoAccount, $"hb_Transakcja {hbId} nie ma powiazanego konta wyciagu (hb_NaglowekIStopka.hb_IdRachunku) - nie mozna zaksiegowac");
+
+            // 3. Utworz operacje bankowa przez Sfere (STA). Sfera nie ma natywnej metody bookingu HB (brak HB-managera
+            //    w CHM), wiec DodajOperacjeBankowa - i empirycznie sprawdzamy czy Subiekt sam ustawil link (krok 4).
+            _logger.LogInformation("Book: tworze BP hb_id={HbId} kwota={Kwota} oznaczenie={Oz} rb_Id={Rb} kontrahent={Kh}",
+                hbId, tx.Kwota, tx.Oznaczenie, tx.RachunekId, contractorSubiektId);
+            long nzfId = await RunOnStaAsync(() => CreateBankOperationCore(tx, contractorSubiektId), ct);
+
+            // 4. Re-check linku (SQL): czy hb_idOperacjiBankowej == nowy nzf_Id. Rozstrzyga Branch A (true) / B (false).
+            long? linkedOp = await Task.Run(() => ReadHbLink(hbId), ct);
+            bool linked = linkedOp.HasValue && linkedOp.Value == nzfId;
+            if (linked)
+            {
+                _logger.LogInformation("Book OK: hb_id={HbId} -> BP {Op} (powiazany)", hbId, nzfId);
+                return new BookResultDto(nzfId, hbId, Linked: true, AlreadyBooked: false, null);
+            }
+
+            // Branch B: Sfera NIE ustawila linku. Domyslnie COFAMY BP (zero orphanow). keep_unlinked zostawia do inspekcji.
+            if (keepUnlinked)
+            {
+                _logger.LogWarning("Book Branch B: hb_id={HbId} BP {Op} NIEpowiazany - zostawiony (keep_unlinked)", hbId, nzfId);
+                return new BookResultDto(nzfId, hbId, Linked: false, AlreadyBooked: false,
+                    "Branch B: Sfera nie ustawila hb_idOperacjiBankowej. BP zostawiony (keep_unlinked) - cofnij recznie w GUI Subiekta.");
+            }
+
+            bool rolledBack = false;
+            try
+            {
+                await RunOnStaAsync<bool>(() => { DeleteBankOperationCore(nzfId); return true; }, ct);
+                rolledBack = true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Book Branch B: rollback BP {Op} (hb_id={HbId}) NIE powiodl sie - ORPHAN", nzfId, hbId);
+            }
+            _logger.LogWarning("Book Branch B: hb_id={HbId} BP {Op} NIEpowiazany - {Stan}", hbId, nzfId, rolledBack ? "cofniety" : "ORPHAN");
+            return new BookResultDto(
+                BankOperationSubiektId: rolledBack ? null : nzfId,
+                HbId: hbId, Linked: false, AlreadyBooked: false,
+                Message: rolledBack
+                    ? "Branch B: Sfera nie ksieguje home-bankingu (link NULL) - BP cofniety. Ksiegowanie zostaje w module Bankowosc Subiekta."
+                    : $"Branch B + rollback BP {nzfId} NIE powiodl sie - ORPHAN, usun recznie w GUI Subiekta.");
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private void DeleteBankOperationCore(long nzfId)
+    {
+        dynamic? op = null;
+        try
+        {
+            op = Session.FinManager.WczytajDokument(nzfId);
+            op.Usun();
+        }
+        finally
+        {
+            if (op is not null) TryClose(op);
+        }
+    }
+
+    private long CreateBankOperationCore(HbTxForBooking tx, long? contractorId)
+    {
+        // C (uznanie/wplata) -> BP (gtaDokFinTypBP=19); D (obciazenie/wyplata) -> BW (20). Kwota = magnitude, double.
+        int typ = tx.Oznaczenie.Equals("C", StringComparison.OrdinalIgnoreCase) ? 19 : 20;
+        dynamic? bp = null;
+        try
+        {
+            bp = Session.FinManager.DodajOperacjeBankowa(typ, tx.RachunekId!.Value);
+            if (tx.Data.HasValue) SetCom((object)bp, "Data", tx.Data.Value);
+            SetCom((object)bp, "WartoscPoczatkowa", (double)Math.Abs(tx.Kwota));
+            if (contractorId.HasValue)
+            {
+                bp.ObiektPowiazanyWstaw(1, contractorId.Value); // 1 = gtaDokFinObiektKontrahent
+            }
+            else
+            {
+                TrySet((object)bp, "OperacjaBezDanychKh", true);
+            }
+            if (!string.IsNullOrEmpty(tx.Tytul)) TrySet((object)bp, "Tytulem", tx.Tytul);
+            bp.Zapisz();
+            return ToInt64(bp.Identyfikator);
+        }
+        catch (COMException cex)
+        {
+            var inner = Marshal.GetExceptionForHR(cex.ErrorCode);
+            _logger.LogError(cex, "DodajOperacjeBankowa/Zapisz padl 0x{Hr:X8} (rb_Id={Rb})", cex.ErrorCode, tx.RachunekId);
+            throw new BankBookingException(BookError.Internal, $"DodajOperacjeBankowa/Zapisz padl: 0x{cex.ErrorCode:X8} {inner?.Message ?? cex.Message}", cex);
+        }
+        finally
+        {
+            if (bp is not null) TryClose(bp);
+        }
+    }
+
+    private HbTxForBooking? ReadHbTransactionForBooking(long hbId)
+    {
+        using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT t.hb_Kwota, t.hb_DataKsiegowania, t.hb_Oznaczenie, t.hb_Tytul, t.hb_idOperacjiBankowej, n.hb_IdRachunku "
+                        + "FROM hb_Transakcja t LEFT JOIN hb_NaglowekIStopka n ON n.hb_IdNaglowek = t.hb_IdNaglowekTr "
+                        + "WHERE t.hb_IdTransakcji = @hb";
+        cmd.CommandTimeout = 30;
+        cmd.Parameters.AddWithValue("@hb", hbId);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return null;
+        return new HbTxForBooking(
+            Kwota: Convert.ToDecimal(r["hb_Kwota"]),
+            Data: r["hb_DataKsiegowania"] is DateTime d ? d : null,
+            Oznaczenie: r["hb_Oznaczenie"]?.ToString() ?? "C",
+            Tytul: r["hb_Tytul"] as string,
+            ExistingOpId: r["hb_idOperacjiBankowej"] != DBNull.Value ? Convert.ToInt64(r["hb_idOperacjiBankowej"]) : null,
+            RachunekId: r["hb_IdRachunku"] != DBNull.Value ? Convert.ToInt64(r["hb_IdRachunku"]) : null);
+    }
+
+    private long? ReadHbLink(long hbId)
+    {
+        using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT hb_idOperacjiBankowej FROM hb_Transakcja WHERE hb_IdTransakcji = @hb";
+        cmd.CommandTimeout = 30;
+        cmd.Parameters.AddWithValue("@hb", hbId);
+        var v = cmd.ExecuteScalar();
+        return v is null || v == DBNull.Value ? null : Convert.ToInt64(v);
+    }
+
 
     private InvoiceResponseDto CreateReceiptCore(ReceiptIssueRequestDto request)
     {
