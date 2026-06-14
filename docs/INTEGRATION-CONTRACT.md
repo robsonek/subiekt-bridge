@@ -282,13 +282,20 @@ invoice_number, booked, bank_operation_subiekt_id` (= `hb_idOperacjiBankowej`; `
 
 Typowy przepływ po Twojej stronie: pobierz `bank-transactions?unbooked_only=true&direction=in`, dopasuj po
 `amount` + `contractor_name`/rachunku do swoich otwartych FS, zdecyduj (auto/ręcznie), zaksięguj
-(`POST /bank-transactions/{hb_id}/book` — **planowane**, patrz niżej), a potem rozlicz `POST /invoices/{id}/settlements`
-przekazując `bank_operation_subiekt_id` zwrócony przez book. Dwuznaczność (np. dwie faktury tej samej kwoty)
-rozstrzygasz po swojej stronie.
+(`POST /bank-transactions/{hb_id}/book`), a potem rozlicz `POST /invoices/{id}/settlements` przekazując
+`bank_operation_subiekt_id` zwrócony przez book. Dwuznaczność (np. dwie faktury tej samej kwoty) rozstrzygasz po swojej stronie.
 
-> **`POST /api/v1/bank-transactions/{hb_id}/book` — w przygotowaniu.** Zaksięguje przelew na operację bankową
-> (BP) i zwróci `bank_operation_subiekt_id`. Wymaga potwierdzenia metody Sfery (probe COM); do tego czasu
-> księgowanie przelewu z wyciągu robi operator w module Bankowość Subiekta, a most rozlicza już zaksięgowaną operację.
+**`POST /api/v1/bank-transactions/{hb_id}/book`** (wymaga `Idempotency-Key`). Body opcjonalne:
+`{ "contractor_subiekt_id": <id|null>, "keep_unlinked": false }`. Tworzy operację bankową BP (C/wpłata) lub BW
+(D/wypłata) na koncie wyciągu. Response:
+```jsonc
+{ "bank_operation_subiekt_id": 72946, "hb_id": 13128, "linked": true, "already_booked": false, "message": null }
+```
+- **Sprawdzaj `linked`, NIE sam status HTTP.** `linked=true` → operacja powiązana z wyciągiem, `bank_operation_subiekt_id`
+  gotowy do `/settlements` (201). `already_booked=true` → była już zaksięgowana (200, idempotentne).
+- `linked=false` → Sfera nie powiązała operacji z linią wyciągu; most **cofa** utworzony BP (200, `bank_operation_subiekt_id=null`,
+  `message` wyjaśnia). Wtedy księgowanie zostaje w module Bankowość Subiekta. (`keep_unlinked=true` zostawia BP do inspekcji — tylko do diagnostyki.)
+- Idempotentne: powtórka z tym samym kluczem → ten sam wynik; ponowne `book` już zaksięgowanej → `already_booked`.
 
 ---
 

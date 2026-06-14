@@ -109,6 +109,7 @@ Invoke-RestMethod -Uri "https://localhost:988/api/v1/admin/update" -Method POST 
 | `POST /api/v1/transfers` | Wystaw MM — przesunięcie międzymagazynowe (DodajMM, dokument wewnętrzny, NIE KSeF) |
 | `GET /api/v1/bank-operations?from&to&direction&unsettled_only&limit` | Listing operacji bankowych BP/BW z wyciągu (źródło `bank_operation_subiekt_id`) |
 | `GET /api/v1/bank-transactions?direction&unbooked_only&from&to&limit` | Surowy passthrough `hb_Transakcja` (read-only) — pula „do zaksięgowania" |
+| `POST /api/v1/bank-transactions/{hb_id}/book` | Zaksięguj przelew na operację BP/BW (Idempotency-Key); zwraca `bank_operation_subiekt_id` + `linked` (Branch A/B) |
 | `POST /api/v1/invoices/{id}/settlements` | Rozlicz rozrachunek FS/FZ z operacją bankową (Idempotency-Key required) — korekty nieobsługiwane |
 | `GET /api/v1/invoices/{id}/settlements` | Stan rozliczenia dokumentu (pozostało + lista rozliczeń) |
 | `DELETE /api/v1/invoices/{id}/settlements/{rozliczenie_id}` | Cofnij rozliczenie (FinRozliczenie.Usun, rozkojarza) |
@@ -313,11 +314,15 @@ której faktury" + decyzja auto/ręcznie → Laravel (jak dopasowanie `GET /invo
   w Sferze): surowe pola (hb_id, data, kwota, direction, hb_Kontrahent, hb_RachKontrahent, hb_Tytul, hb_NrFaktury,
   booked, bank_operation_subiekt_id=hb_idOperacjiBankowej, rachunek_id/rachunek_numer=konto wyciągu przez
   `hb_NaglowekIStopka` LEFT JOIN po `hb_IdNaglowekTr`). Most NIE rozpoznaje kontrahenta po rachunku, NIE matchuje.
-- **`POST /bank-transactions/{hb_id}/book`** (PLANOWANE, gated probe COM) — zaksięguj transakcję na operację BP +
-  ustaw `hb_idOperacjiBankowej`, zwróć `bank_operation_subiekt_id` (gotowy do `/settlements`). To JEDYNY research:
-  Sfera nie ma udokumentowanego API HB (brak HB-managera w CHM; `Importer`=EPP; `FinManager.DodajOperacjeBankowa`
-  tworzy SAMODZIELNY BP bez powiązania). Fallback: BP + powiązanie, zweryfikowane empirycznie że transakcja znika
-  z „do zaksięgowania". NIE pisać surowym SQL do `hb_Transakcja`/`nz__Finanse`.
+- **`POST /bank-transactions/{hb_id}/book`** — `FinManager.DodajOperacjeBankowa(19|20, rb_Id)` (na STA) + Data +
+  WartoscPoczatkowa(double) + `ObiektPowiazanyWstaw(1, kh)`/`OperacjaBezDanychKh` + Zapisz, potem SQL re-check
+  `hb_idOperacjiBankowej`. Sfera NIE ma metody bookingu HB (brak HB-managera w CHM; `Importer`=EPP), więc czy BP
+  zostanie powiązany rozstrzyga się **empirycznie** — pole `linked` w odpowiedzi:
+  - `linked=true` (Branch A) → 201, gotowe do `/settlements`.
+  - `linked=false` (Branch B) → most **COFA BP** (`DeleteBankOperationCore`/`Usun`, zero orphanów), 200 + `message`;
+    flaga `keep_unlinked=true` zostawia BP do inspekcji (tylko probe). NIE pisać raw SQL do `hb_Transakcja`/`nz__Finanse`.
+  - **Lock per `hb_id`** (`SemaphoreSlim`, proces jednoinstancyjny) + guard `ExistingOpId` → brak podwójnego BP.
+    Status: 201 tylko czysty nowy+linked; 200 dla already_booked i linked=false — klient MUSI sprawdzać `linked`, nie status.
 - Rozliczenie już jest (`POST /invoices/{id}/settlements`) — most nie decyduje co z czym, dostaje rozkaz
   „zaksięguj X" / „rozlicz Y z Z". Otwarte rozrachunki Laravel zna z własnego modelu + `GET /invoices/{id}/settlements`.
 

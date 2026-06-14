@@ -416,6 +416,23 @@ public sealed class FakeSferaSession : ISferaSession
         return Task.FromResult<IReadOnlyList<BankTransactionDto>>(q.Take(request.Limit > 0 ? request.Limit : 200).ToList());
     }
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, long> _bookedHb = new();
+    internal static void ResetBankBookingForTests() => _bookedHb.Clear();
+
+    public Task<BookResultDto> BookBankTransactionAsync(long hbId, long? contractorSubiektId, bool keepUnlinked, CancellationToken ct)
+    {
+        if (hbId < 0) throw new BankBookingException(BookError.TransactionNotFound, $"hb_Transakcja {hbId} nie istnieje");
+
+        // Fake symuluje Branch A (Subiekt linkuje). Drugie wywolanie tego samego hb_id -> already_booked.
+        if (_bookedHb.TryGetValue(hbId, out var existing))
+        {
+            return Task.FromResult(new BookResultDto(existing, hbId, Linked: true, AlreadyBooked: true, "Transakcja juz zaksiegowana"));
+        }
+        long opId = 90_000 + hbId;
+        _bookedHb[hbId] = opId;
+        return Task.FromResult(new BookResultDto(opId, hbId, Linked: true, AlreadyBooked: false, null));
+    }
+
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     private static int HashString(string value)
