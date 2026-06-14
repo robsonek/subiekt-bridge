@@ -119,6 +119,9 @@ wymagany, replay-with-verify po `GetBookedOperationIdAsync` (istnieje).
     `vwHB...`/filtr GUI) — operator nie zobaczy zaksięgowanej przez most linii i nie wywoła na niej „Zaksięguj".
     Plus: u tego klienta księgowanie jest zautomatyzowane (operator nie księguje ręcznie). Ryzyko rezydualne
     (operator wymusza re-book inną ścieżką) — bardzo niskie, akceptowane do czasu testu §7.
+  - **DECYZJA WŁAŚCICIELA (2026-06-14):** świadomie **NIE** dodajemy `ins_blokada` — most jest jedyną drogą
+    księgowania, operator nie księguje ręcznie tych samych linii równolegle. Guard `IS NULL` + `SemaphoreSlim`
+    wystarcza. (Gdyby proces się zmienił — patrz przepis na replikację `ins_blokada` powyżej.)
 - **Rachunek walutowy (R7):** trigger `tr_NzFinanse_OpBank` (`nz__Finanse.sql`) **ROLLBACKuje** INSERT operacji
   19/20 gdy `rb_IdWaluty != 'PLN' AND waluta_dok != waluta_rach` (RAISERROR sev 16). To fail-closed (operacja
   nie powstaje, brak orphana), ale krok 3 padnie. **Przed księgowaniem odczytaj `rb_IdWaluty`; jeśli != 'PLN'
