@@ -677,6 +677,11 @@ public sealed class RealSferaSession : ISferaSession
         return RunOnStaAsync<IReadOnlyList<BankOperationDto>>(() => QueryBankOperationsCore(request), ct);
     }
 
+    public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenReceivablesAsync(OpenReceivablesQueryRequestDto request, CancellationToken ct)
+    {
+        return RunOnStaAsync<IReadOnlyList<OpenReceivableDto>>(() => QueryOpenReceivablesCore(request), ct);
+    }
+
     // Bank transactions (hb_Transakcja) - read-only SQL (hb_Transakcja nie jest wystawione przez Sfere).
     // Lecimy przez SqlConnection (jak QueryAsync), poza STA workerem (czysty SQL, zero COM).
 
@@ -1761,6 +1766,121 @@ public sealed class RealSferaSession : ISferaSession
         }
 
         return results;
+    }
+
+    // Hard cap iteracji - zabezpieczenie przed 502/timeout (flagowane dla /bank-operations przy duzym zbiorze).
+    // nzf_Typ=39 obejmuje WSZYSTKIE naleznosci sprzedazy (rowniez rozliczone, z WartoscBiezaca=0), wiec
+    // sortujemy nzf_Data DESC (najnowsze = najbardziej prawdopodobni kandydaci do biezacego przelewu) i
+    // skanujemy najwyzej tyle wierszy. Wiekszosc wierszy odpada po JEDNYM odczycie (WartoscBiezaca poza oknem),
+    // wiec skan jest tani; cap to backstop, nie norma. Przekroczenie -> log WARNING (NIE cichy cap).
+    private const int OpenReceivablesScanCap = 5000;
+
+    /// <summary>
+    /// Otwarte naleznosci (rozrachunki sprzedazy nzf_Typ=39 z otwartym saldem) w oknie kwoty. CZYSTO COM:
+    /// FinManager.OtworzKolekcje (filtr po kolumnie DB nzf_Typ - jak bank-operations, przyklad CHM) +
+    /// atrybuty FinDokument (zweryfikowane w prod): WartoscBiezaca=pozostalo (RO, PLN), Waluta, ObiektPowiazanyId,
+    /// DokumentZrodlowyId=nzf_IdDokumentAuto (id dok. handlowego), NumerPelny=numer dok. zrodlowego.
+    /// Filtr kwoty/waluty CLIENT-SIDE (kolumna pozostalej kwoty nie jest udokumentowana; semantyka WartoscBiezaca
+    /// jest pewna). Most NIE matchuje - zwraca okno; dopasowanie robi klient.
+    /// </summary>
+    private IReadOnlyList<OpenReceivableDto> QueryOpenReceivablesCore(OpenReceivablesQueryRequestDto request)
+    {
+        decimal min = request.MinAmount ?? 0m;
+        decimal max = request.MaxAmount ?? decimal.MaxValue;
+        int limit = Math.Clamp(request.Limit > 0 ? request.Limit : 50, 1, 200);
+
+        var results = new List<OpenReceivableDto>();
+        int scanned = 0;
+        bool scanCapped = false;
+        dynamic? kolekcja = null;
+        try
+        {
+            // 39 = naleznosc sprzedazy. NIE filtrujemy kwoty/waluty w stringu OtworzKolekcje (kolumna pozostalej
+            // kwoty nie jest udokumentowana) - robimy to client-side na WartoscBiezaca (RO, pewna semantyka).
+            kolekcja = Session.FinManager.OtworzKolekcje("nzf_Typ = 39", "nzf_Data DESC");
+            foreach (dynamic roz in (System.Collections.IEnumerable)kolekcja)
+            {
+                try
+                {
+                    if (scanned >= OpenReceivablesScanCap) { scanCapped = true; break; }
+                    scanned++;
+
+                    // Pozostalo do zaplaty (WartoscBiezaca, PLN). Czytamy NAJPIERW - wiekszosc wierszy odpada tu
+                    // (1 odczyt), wiec skan pozostaje tani mimo szerokiego nzf_Typ=39.
+                    decimal remaining = TryReadDecimal((object)roz, "WartoscBiezaca") ?? 0m;
+                    if (remaining <= 0.005m) continue;            // rozliczony -> nie jest "otwarty"
+                    if (remaining < min || remaining > max) continue;
+
+                    // Tylko PLN. WartoscBiezaca jest ZAWSZE w PLN (CHM); rozrachunek walutowy mialby liczbe PLN
+                    // pod etykieta obcej waluty (mylace) i tak czy siak nie jest rozliczalny przez most (/settlements
+                    // odrzuca nie-PLN). Controller juz odrzucil currency != PLN (422); tu defensywnie pomijamy
+                    // ewentualny wiersz walutowy, by remaining ZAWSZE odpowiadal etykiecie currency="PLN".
+                    string cur = (TryReadString((object)roz, "Waluta") ?? "PLN").Trim().ToUpperInvariant();
+                    if (cur.Length == 0) cur = "PLN";
+                    if (!string.Equals(cur, "PLN", StringComparison.Ordinal)) continue;
+
+                    long? contractorId = TryReadInt64((object)roz, "ObiektPowiazanyId");
+                    if (request.ContractorId.HasValue && contractorId != request.ContractorId.Value) continue;
+
+                    // DokumentZrodlowyId = nzf_IdDokumentAuto (id dok. handlowego) - klucz do POST /settlements.
+                    // Bez dokumentu nie ma czego rozliczac -> pomijamy (np. rozrachunek reczny bez dok. zrodlowego).
+                    long? docId = TryReadInt64((object)roz, "DokumentZrodlowyId");
+                    if (!docId.HasValue || docId.Value <= 0) continue;
+
+                    // NumerPelny rozrachunku = numer dokumentu zrodlowego ("FS 573/05/2026"); doc_type = prefiks
+                    // (COM Typ != nzf_Typ od GT 1.17, wiec etykiety NIE bierzemy z Typ).
+                    string number = TryReadString((object)roz, "NumerPelny") ?? "";
+                    string docType = number.Length > 0 ? number.Split(' ', 2)[0] : "";
+
+                    results.Add(new OpenReceivableDto(
+                        DocumentId: $"sub_{docId.Value}",
+                        DocumentSubiektId: docId.Value,
+                        DocType: docType,
+                        Currency: cur,
+                        Remaining: remaining,
+                        ContractorId: contractorId,
+                        ContractorName: ResolveContractorName(contractorId),
+                        Number: number));
+
+                    if (results.Count >= limit) break;
+                }
+                finally { try { Marshal.ReleaseComObject(roz); } catch { /* cleanup */ } }
+            }
+        }
+        finally
+        {
+            if (kolekcja is not null) { try { Marshal.ReleaseComObject(kolekcja); } catch { /* cleanup */ } }
+        }
+
+        if (scanCapped)
+        {
+            _logger.LogWarning(
+                "QueryOpenReceivables: scan cap {Cap} osiagniety (znaleziono {Found} PLN w oknie [{Min};{Max}]) - skan idzie nzf_Data DESC, wiec STARE otwarte naleznosci poza najnowszymi (cap) moga byc pominiete; zaw okno/podaj contractor_id",
+                OpenReceivablesScanCap, results.Count, min, max == decimal.MaxValue ? "inf" : max.ToString(CultureInfo.InvariantCulture));
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Nazwa kontrahenta po ObiektPowiazanyId (Kontrahenci.Wczytaj(id).Nazwa). Best-effort jak
+    /// MapDokumentToQueryItem: blad/nie-kontrahent -> null (NIE wywala listingu). Wolane na STA workerze,
+    /// tylko dla wierszy w oknie (<= limit), wiec N+1 jest ograniczone.
+    /// </summary>
+    private string? ResolveContractorName(long? contractorId)
+    {
+        if (!contractorId.HasValue) return null;
+        try
+        {
+            dynamic kontr = Session.Kontrahenci.Wczytaj(contractorId.Value);
+            try { return TryGetString(kontr, "Nazwa"); }
+            finally { try { kontr.Zamknij(); } catch { /* best-effort */ } }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "QueryOpenReceivables: Kontrahenci.Wczytaj({Id}) failed", contractorId.Value);
+            return null;
+        }
     }
 
     private static bool IsIsoDate(string? date) =>

@@ -196,6 +196,35 @@ public sealed class FakeSferaSession : ISferaSession
             Notes: "fake"));
     }
 
+    public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenReceivablesAsync(OpenReceivablesQueryRequestDto request, CancellationToken ct)
+    {
+        // Deterministyczne otwarte naleznosci (rozrachunki sprzedazy z otwartym saldem). Most NIE matchuje -
+        // zwraca okno kwotowe; filtrowanie min/max/contractor/limit lustrem RealSferaSession. TYLKO PLN:
+        // 51900 (EUR) jest tu po to, by potwierdzic ze most go WYKLUCZA (Real: WartoscBiezaca zawsze w PLN,
+        // wiersz walutowy bylby mylacy + nierozliczalny -> controller odrzuca currency!=PLN, Core pomija nie-PLN).
+        // 52001 (ten sam kontrahent 13292 co 53447) sprawdza filtr contractor_id.
+        OpenReceivableDto[] all =
+        {
+            new("sub_53447", 53447, "FS", "PLN", 3372.50m, 13292, "Szyszka Krzysztof", "FS 573/05/2026"),
+            new("sub_53310", 53310, "FS", "PLN", 371.12m, 14001, "Google Commerce Limited", "FS 540/05/2026"),
+            new("sub_52001", 52001, "FS", "PLN", 120.00m, 13292, "Szyszka Krzysztof", "FS 410/04/2026"),
+            new("sub_51900", 51900, "FS", "EUR", 99.00m, 15000, "Mock Foreign GmbH", "FS 300/03/2026"),
+        };
+
+        decimal min = request.MinAmount ?? 0m;
+        decimal max = request.MaxAmount ?? decimal.MaxValue;
+        int limit = Math.Clamp(request.Limit > 0 ? request.Limit : 50, 1, 200);
+
+        // Tylko PLN (parytet z Real: rozrachunki walutowe pomijane; controller i tak odrzuca currency!=PLN).
+        IEnumerable<OpenReceivableDto> q = all
+            .Where(r => r.Remaining > 0.005m)
+            .Where(r => r.Remaining >= min && r.Remaining <= max)
+            .Where(r => string.Equals(r.Currency, "PLN", StringComparison.OrdinalIgnoreCase));
+        if (request.ContractorId.HasValue) q = q.Where(r => r.ContractorId == request.ContractorId.Value);
+
+        return Task.FromResult<IReadOnlyList<OpenReceivableDto>>(q.Take(limit).ToList());
+    }
+
     public Task<byte[]?> GetInvoicePdfAsync(long subiektId, CancellationToken ct)
     {
         // Minimal valid empty PDF stream

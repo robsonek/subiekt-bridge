@@ -101,6 +101,7 @@ Invoke-RestMethod -Uri "https://localhost:988/api/v1/admin/update" -Method POST 
 | `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | Listing FS/KFS (filtry whitelist) |
 | `GET /api/v1/invoices/{id}` | Single FV metadata |
 | `GET /api/v1/invoices/{id}/pdf` | Retro PDF generation |
+| `GET /api/v1/invoices/open-receivables?min_amount&max_amount&currency&contractor_id&limit` | Otwarte należności (rozrachunki sprzedaży nzf_Typ=39, `WartoscBiezaca>0`) w oknie kwoty — kandydaci do dopasowania z przelewem. Read-only, **czysto COM** (FinManager.OtworzKolekcje + atrybuty FinDokument), NIE raw SQL |
 | `POST /api/v1/invoices` | Wystaw FS (Idempotency-Key required) |
 | `POST /api/v1/invoices/{id}/corrections` | Wystaw KFS |
 | `GET /api/v1/receipts?...` | Listing PZ |
@@ -335,6 +336,19 @@ której faktury" + decyzja auto/ręcznie → Laravel (jak dopasowanie `GET /invo
     do `hb_Transakcja` poza `LinkHbToOperation`; NIGDY do `nz__Finanse`/`nz_FinanseSplata` (te tylko przez Sferę).
 - Rozliczenie już jest (`POST /invoices/{id}/settlements`) — most nie decyduje co z czym, dostaje rozkaz
   „zaksięguj X" / „rozlicz Y z Z". Otwarte rozrachunki Laravel zna z własnego modelu + `GET /invoices/{id}/settlements`.
+- **`GET /invoices/open-receivables`** — strona NALEŻNOŚCI tej samej filozofii: most zwraca okno otwartych
+  rozrachunków sprzedaży (kandydaci do dopasowania z wpłatą), Laravel matchuje. **Czysto COM, NIE raw SQL**
+  (właściciel wprost; raw SQL na `nz__Finanse` kruche — `nzf_NumerPelny` to atrybut COM jak `dok_NumerPelny`).
+  Mapowania COM `FinDokument` (CHM, od GT 1.13): `DokumentZrodlowyId`=`nzf_IdDokumentAuto` (id dok. handlowego →
+  `document_subiekt_id`); `WartoscBiezaca`=pozostało (RO, PLN); `NumerPelny` rozrachunku=numer dok. źródłowego
+  (`doc_type`=prefiks; COM `Typ` ≠ `nzf_Typ` od GT 1.17); `ObiektPowiazanyId`+`Kontrahenci.Wczytaj(id).Nazwa`;
+  `Waluta`=symbol sl_Waluta. Filtr `OtworzKolekcje("nzf_Typ = 39")` + okno kwoty CLIENT-SIDE + scan cap (log przy
+  przekroczeniu, sort `nzf_Data DESC`). FZ/wypłaty poza zakresem. **Tylko PLN** (controller odrzuca `currency≠PLN`
+  → 422; `WartoscBiezaca` jest ZAWSZE w PLN, więc wiersz walutowy byłby liczbą PLN pod etykietą obcej waluty —
+  mislabel; i tak nierozliczalny). Świadome ograniczenia (udokumentowane w kontrakcie §3.11): scan `nzf_Data DESC`
+  + cap 5000 może POMINĄĆ stare otwarte należności (zalecane `contractor_id`); `nzf_Typ=39` obejmuje też korekty
+  (`doc_type` np. KFS) nierozliczalne przez `/settlements` — klient filtruje po `doc_type` (NIE filtrujemy w moście:
+  prefiks bywa „FH", świadomie głupi most jak przy `/invoices`).
 
 ## Idempotency (3 warstwy)
 

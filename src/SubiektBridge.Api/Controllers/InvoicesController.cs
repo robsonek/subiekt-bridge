@@ -64,6 +64,54 @@ public sealed class InvoicesController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Otwarte naleznosci (rozrachunki sprzedazy z otwartym saldem) w oknie kwoty - kandydaci do
+    /// dopasowania z przychodzacym przelewem. Read-only (X-Bridge-Token, bez Idempotency-Key, jak
+    /// /invoices, /bank-operations). Most NIE matchuje - zwraca okno (klient liczy [kwota, kwota/0.97]
+    /// na prowizje procesora i dopasowuje po swojej stronie). Odczyt przez COM Sfery (nzf_Typ=39 +
+    /// atrybuty FinDokument), NIE raw SQL. Trasa literalna 'open-receivables' ma pierwszenstwo nad {id}.
+    /// </summary>
+    [HttpGet("open-receivables")]
+    public async Task<ActionResult<IReadOnlyList<OpenReceivableDto>>> OpenReceivables(
+        [FromQuery(Name = "min_amount")] decimal? minAmount,
+        [FromQuery(Name = "max_amount")] decimal? maxAmount,
+        [FromQuery] string? currency,
+        [FromQuery(Name = "contractor_id")] long? contractorId,
+        [FromQuery] int limit,
+        CancellationToken ct)
+    {
+        // Tylko PLN (jak /settlements). WartoscBiezaca jest ZAWSZE w PLN (CHM), wiec wiersz walutowy
+        // mialby liczbe PLN pod etykieta obcej waluty (mylace), a i tak nie da sie go rozliczyc przez most.
+        // Odrzucamy currency != PLN zamiast zwracac niespojne dane (spojnie z UNSUPPORTED_CURRENCY w FS).
+        if (!string.IsNullOrWhiteSpace(currency)
+            && !string.Equals(currency.Trim(), "PLN", StringComparison.OrdinalIgnoreCase))
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "UNSUPPORTED_CURRENCY",
+                Message: $"open-receivables zwraca wyłącznie należności PLN (most rozlicza tylko PLN) - otrzymano '{currency}'."));
+        }
+
+        var request = new OpenReceivablesQueryRequestDto(
+            MinAmount: minAmount,
+            MaxAmount: maxAmount,
+            Currency: "PLN",
+            ContractorId: contractorId,
+            Limit: limit > 0 ? limit : 50);
+
+        try
+        {
+            var items = await _sfera.QueryOpenReceivablesAsync(request, ct);
+            return Ok(items);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "QueryOpenReceivables failed");
+            return StatusCode(StatusCodes.Status502BadGateway, new ErrorResponseDto(
+                Code: "SUBIEKT_QUERY_FAILED",
+                Message: ex.Message));
+        }
+    }
+
     /// <summary>Metadata pojedynczej FV po Bridge ID (sub_&lt;subiektId&gt;).</summary>
     [HttpGet("{id}")]
     public async Task<ActionResult<InvoiceQueryItemDto>> Get(string id, CancellationToken ct)
