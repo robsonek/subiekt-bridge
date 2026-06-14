@@ -400,6 +400,40 @@ public sealed class FakeSferaSession : ISferaSession
         return Task.FromResult(ops);
     }
 
+    public Task<IReadOnlyList<BankTransactionDto>> QueryBankTransactionsAsync(BankTransactionQueryRequestDto request, CancellationToken ct)
+    {
+        IReadOnlyList<BankTransactionDto> all = new[]
+        {
+            new BankTransactionDto(13109, "2026-06-12", 371.12m, "in", "Google Commerce Limited", "PL61109010140000071219812874", 623, "PRZELEW - payout", false),
+            new BankTransactionDto(13127, "2026-06-11", 3372.50m, "in", "Jan Szyszka", "PL27114020040000300201355387", null, "PRZELEW - zaplata", false),
+            new BankTransactionDto(12001, "2026-06-01", 500.00m, "out", "Dostawca XYZ", "PL11111111111111111111111111", 800, "PRZELEW wychodzacy", true),
+        };
+
+        IEnumerable<BankTransactionDto> q = all;
+        if (request.UnbookedOnly) q = q.Where(t => !t.Booked);
+        if (string.Equals(request.Direction, "in", StringComparison.OrdinalIgnoreCase)) q = q.Where(t => t.Direction == "in");
+        else if (string.Equals(request.Direction, "out", StringComparison.OrdinalIgnoreCase)) q = q.Where(t => t.Direction == "out");
+        return Task.FromResult<IReadOnlyList<BankTransactionDto>>(q.Take(request.Limit > 0 ? request.Limit : 200).ToList());
+    }
+
+    public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenReceivablesAsync(OpenReceivableQueryRequestDto request, CancellationToken ct)
+    {
+        IReadOnlyList<OpenReceivableDto> all = new[]
+        {
+            new OpenReceivableDto(90687, "receivable", "FS 687/05/2026", 1_000_687, 623, 371.12m, 371.12m, "2026-06-05"),
+            new OpenReceivableDto(90573, "receivable", "FS 573/05/2026", 1_000_573, 510, 3372.50m, 3372.50m, "2026-05-20"),
+            new OpenReceivableDto(90574, "receivable", "FS 574/05/2026", 1_000_574, 510, 3372.50m, 3372.50m, "2026-05-20"),
+            new OpenReceivableDto(70800, "liability", "FZ 12/06/2026", 1_000_812, 800, 500.00m, 500.00m, "2026-06-01"),
+        };
+
+        IEnumerable<OpenReceivableDto> q = all;
+        if (string.Equals(request.Direction, "in", StringComparison.OrdinalIgnoreCase)) q = q.Where(o => o.Kind == "receivable");
+        else if (string.Equals(request.Direction, "out", StringComparison.OrdinalIgnoreCase)) q = q.Where(o => o.Kind == "liability");
+        if (request.ContractorId.HasValue) q = q.Where(o => o.ContractorId == request.ContractorId.Value);
+        if (request.Amount.HasValue) q = q.Where(o => Math.Abs(o.Remaining - request.Amount.Value) < 0.005m);
+        return Task.FromResult<IReadOnlyList<OpenReceivableDto>>(q.Take(request.Limit > 0 ? request.Limit : 500).ToList());
+    }
+
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     private static int HashString(string value)

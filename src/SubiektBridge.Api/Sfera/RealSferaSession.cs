@@ -677,6 +677,117 @@ public sealed class RealSferaSession : ISferaSession
         return RunOnStaAsync<IReadOnlyList<BankOperationDto>>(() => QueryBankOperationsCore(request), ct);
     }
 
+    // Bank transactions (hb_Transakcja) - read-only SQL (hb_Transakcja nie jest wystawione przez Sfere).
+    // Lecimy przez SqlConnection (jak QueryAsync), poza STA workerem (czysty SQL, zero COM).
+
+    private string SqlConnStr() => new Microsoft.Data.SqlClient.SqlConnectionStringBuilder
+    {
+        DataSource = _options.Server,
+        InitialCatalog = _options.Database,
+        UserID = _options.DbUser,
+        Password = _options.DbPassword,
+        TrustServerCertificate = true,
+        ConnectTimeout = 10,
+    }.ToString();
+
+    public Task<IReadOnlyList<BankTransactionDto>> QueryBankTransactionsAsync(BankTransactionQueryRequestDto request, CancellationToken ct)
+    {
+        return Task.Run<IReadOnlyList<BankTransactionDto>>(() =>
+        {
+            string? dirChar = string.Equals(request.Direction, "in", StringComparison.OrdinalIgnoreCase) ? "C"
+                            : string.Equals(request.Direction, "out", StringComparison.OrdinalIgnoreCase) ? "D" : null;
+            int limit = Math.Clamp(request.Limit > 0 ? request.Limit : 200, 1, 1000);
+
+            var where = new List<string>();
+            if (request.UnbookedOnly) where.Add("hb_idOperacjiBankowej IS NULL");
+            if (dirChar != null) where.Add("hb_Oznaczenie = @dir");
+            if (IsIsoDate(request.From)) where.Add("hb_DataKsiegowania >= @from");
+            if (IsIsoDate(request.To)) where.Add("hb_DataKsiegowania < DATEADD(day, 1, @to)");
+
+            // contractor_id: rozpoznanie kontrahenta po rachunku nadawcy (DANA pomocnicza dla Laravela,
+            // nie decyzja). Korelowany subquery TOP 1 - nie multiplikuje wierszy transakcji.
+            string sql = "SELECT TOP (@limit) hb_IdTransakcji, hb_DataKsiegowania, hb_Kwota, hb_Oznaczenie, "
+                       + "hb_Kontrahent, hb_RachKontrahent, hb_Tytul, hb_idOperacjiBankowej, "
+                       + "(SELECT TOP 1 rk.rb_IdObiektu FROM rb__RachBankowy rk WHERE rk.rb_NumerZnormalizowany = hb_Transakcja.hb_RachKontrahent) AS contractor_id "
+                       + "FROM hb_Transakcja "
+                       + (where.Count > 0 ? "WHERE " + string.Join(" AND ", where) + " " : "")
+                       + "ORDER BY hb_DataKsiegowania DESC";
+
+            using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.CommandTimeout = 30;
+            cmd.Parameters.AddWithValue("@limit", limit);
+            if (dirChar != null) cmd.Parameters.AddWithValue("@dir", dirChar);
+            if (IsIsoDate(request.From)) cmd.Parameters.AddWithValue("@from", DateTime.ParseExact(request.From!, "yyyy-MM-dd", CultureInfo.InvariantCulture));
+            if (IsIsoDate(request.To)) cmd.Parameters.AddWithValue("@to", DateTime.ParseExact(request.To!, "yyyy-MM-dd", CultureInfo.InvariantCulture));
+
+            var list = new List<BankTransactionDto>();
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                string oz = r["hb_Oznaczenie"]?.ToString() ?? "";
+                list.Add(new BankTransactionDto(
+                    HbId: Convert.ToInt64(r["hb_IdTransakcji"]),
+                    Date: r["hb_DataKsiegowania"] is DateTime d ? d.ToString("yyyy-MM-dd") : null,
+                    Amount: Convert.ToDecimal(r["hb_Kwota"]),
+                    Direction: oz.Equals("C", StringComparison.OrdinalIgnoreCase) ? "in" : "out",
+                    ContractorName: r["hb_Kontrahent"] as string,
+                    ContractorAccount: r["hb_RachKontrahent"] as string,
+                    ContractorId: r["contractor_id"] != DBNull.Value ? Convert.ToInt64(r["contractor_id"]) : null,
+                    Title: r["hb_Tytul"] as string,
+                    Booked: r["hb_idOperacjiBankowej"] != DBNull.Value));
+            }
+            return list;
+        }, ct);
+    }
+
+    public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenReceivablesAsync(OpenReceivableQueryRequestDto request, CancellationToken ct)
+    {
+        return Task.Run<IReadOnlyList<OpenReceivableDto>>(() =>
+        {
+            // in -> naleznosci (nzf_Typ=39); out -> zobowiazania (40); null -> oba.
+            int limit = Math.Clamp(request.Limit > 0 ? request.Limit : 500, 1, 2000);
+            var where = new List<string> { "nzf_Wartosc > 0.005" };
+            if (string.Equals(request.Direction, "in", StringComparison.OrdinalIgnoreCase)) where.Add("nzf_Typ = 39");
+            else if (string.Equals(request.Direction, "out", StringComparison.OrdinalIgnoreCase)) where.Add("nzf_Typ = 40");
+            else where.Add("nzf_Typ IN (39, 40)");
+            if (request.ContractorId.HasValue) where.Add("nzf_IdObiektu = @kh");
+            if (request.Amount.HasValue) where.Add("nzf_Wartosc = @amount");
+
+            string sql = "SELECT TOP (@limit) nzf_Id, nzf_Typ, nzf_NumerPelny, nzf_IdDokumentAuto, nzf_IdObiektu, "
+                       + "nzf_WartoscPierwotna, nzf_Wartosc, nzf_Data FROM nz__Finanse "
+                       + "WHERE " + string.Join(" AND ", where) + " ORDER BY nzf_Data DESC";
+
+            using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.CommandTimeout = 30;
+            cmd.Parameters.AddWithValue("@limit", limit);
+            if (request.ContractorId.HasValue) cmd.Parameters.AddWithValue("@kh", request.ContractorId.Value);
+            if (request.Amount.HasValue) cmd.Parameters.AddWithValue("@amount", request.Amount.Value);
+
+            var list = new List<OpenReceivableDto>();
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                long typ = Convert.ToInt64(r["nzf_Typ"]);
+                list.Add(new OpenReceivableDto(
+                    RozrachunekSubiektId: Convert.ToInt64(r["nzf_Id"]),
+                    Kind: typ == 40 ? "liability" : "receivable",
+                    InvoiceNumber: r["nzf_NumerPelny"] as string,
+                    DocumentSubiektId: r["nzf_IdDokumentAuto"] != DBNull.Value ? Convert.ToInt64(r["nzf_IdDokumentAuto"]) : null,
+                    ContractorId: r["nzf_IdObiektu"] != DBNull.Value ? Convert.ToInt64(r["nzf_IdObiektu"]) : null,
+                    OriginalAmount: r["nzf_WartoscPierwotna"] != DBNull.Value ? Convert.ToDecimal(r["nzf_WartoscPierwotna"]) : 0m,
+                    Remaining: Convert.ToDecimal(r["nzf_Wartosc"]),
+                    Date: r["nzf_Data"] is DateTime d ? d.ToString("yyyy-MM-dd") : null));
+            }
+            return list;
+        }, ct);
+    }
+
     private InvoiceResponseDto CreateReceiptCore(ReceiptIssueRequestDto request)
     {
         // PZ - Przyjęcie Zewnętrzne. Dokument magazynowy (zwiększa stan).
