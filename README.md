@@ -25,6 +25,10 @@ REST API (główne endpointy + escape hatch):
 | `POST /api/v1/invoices/{id}/corrections` | Wystaw FV korygującą (KFS) |
 | `POST /api/v1/receipts` | Wystaw PZ — przyjęcie magazynowe (dropshipping) |
 | `POST /api/v1/transfers` | Wystaw MM — przesunięcie międzymagazynowe (dokument wewnętrzny, nie KSeF) |
+| `GET /api/v1/bank-operations?from&to&direction&unsettled_only` | Lista operacji bankowych (BP/BW) z wyciągu |
+| `POST /api/v1/invoices/{id}/settlements` | Rozlicz fakturę (FS/FZ) z przelewem z wyciągu (z `Idempotency-Key`) |
+| `GET /api/v1/invoices/{id}/settlements` | Stan rozliczenia faktury |
+| `DELETE /api/v1/invoices/{id}/settlements/{rozliczenie_id}` | Cofnij rozliczenie |
 | `GET /api/v1/products?ean=...` | Sprawdź czy towar istnieje w Subiekcie |
 | `GET /api/v1/contractors?nip=...` | Sprawdź czy kontrahent istnieje |
 | `GET /api/v1/health` | Diagnostyka (publiczny, bez tokena) |

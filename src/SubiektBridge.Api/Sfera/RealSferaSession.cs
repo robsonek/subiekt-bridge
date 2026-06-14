@@ -657,6 +657,26 @@ public sealed class RealSferaSession : ISferaSession
         return RunOnStaAsync(() => CreateTransferCore(request), ct);
     }
 
+    public Task<SettlementResponseDto> CreateSettlementAsync(long documentSubiektId, SettlementCreateRequestDto request, CancellationToken ct)
+    {
+        return RunOnStaAsync(() => CreateSettlementCore(documentSubiektId, request), ct);
+    }
+
+    public Task<SettlementStateResponseDto?> GetSettlementsAsync(long documentSubiektId, CancellationToken ct)
+    {
+        return RunOnStaAsync<SettlementStateResponseDto?>(() => GetSettlementsCore(documentSubiektId), ct);
+    }
+
+    public Task DeleteSettlementAsync(long documentSubiektId, long rozliczenieId, CancellationToken ct)
+    {
+        return RunOnStaAsync<bool>(() => { DeleteSettlementCore(documentSubiektId, rozliczenieId); return true; }, ct);
+    }
+
+    public Task<IReadOnlyList<BankOperationDto>> QueryBankOperationsAsync(BankOperationQueryRequestDto request, CancellationToken ct)
+    {
+        return RunOnStaAsync<IReadOnlyList<BankOperationDto>>(() => QueryBankOperationsCore(request), ct);
+    }
+
     private InvoiceResponseDto CreateReceiptCore(ReceiptIssueRequestDto request)
     {
         // PZ - Przyjęcie Zewnętrzne. Dokument magazynowy (zwiększa stan).
@@ -891,6 +911,460 @@ public sealed class RealSferaSession : ISferaSession
         {
             TryClose(mm);
         }
+    }
+
+    // -------------------------- Settlements (rozliczenia rozrachunkow) --------------------------
+
+    private SettlementResponseDto CreateSettlementCore(long documentSubiektId, SettlementCreateRequestDto req)
+    {
+        if (req.Amount <= 0m)
+        {
+            throw new SettlementException(SettlementError.InvalidAmount, "amount musi byc > 0");
+        }
+        // Normalizacja precyzji - WartoscBiezaca ma 2 miejsca; bez tego groszowy rozjazd przy walidacji/Rozlicz.
+        decimal amount = Math.Round(req.Amount, 2, MidpointRounding.AwayFromZero);
+
+        dynamic? dok = null;
+        dynamic? rozrachunek = null;
+        dynamic? bankOp = null;
+        try
+        {
+            // 1. Dokument: istnienie + typ. SuDokument.Typ (= dok_Typ): 1=FZ, 2=FS; korekty (5/6) i inne -> odrzuc.
+            try { dok = Session.SuDokumentyManager.WczytajDokument(documentSubiektId); }
+            catch (Exception ex) { throw new SettlementException(SettlementError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje", ex); }
+            if (dok is null) throw new SettlementException(SettlementError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje");
+            long docType = TryReadInt64((object)dok, "Typ") ?? -1;
+            if (docType != 1 && docType != 2)
+            {
+                throw new SettlementException(SettlementError.UnsupportedDocumentType,
+                    $"Rozliczenia obsluguja tylko FS (Typ=2) i FZ (Typ=1). Dokument {documentSubiektId} ma Typ={docType} (np. korekta) - nieobslugiwany.");
+            }
+
+            // 2. Wczytaj ISTNIEJACA operacje bankowa (zaimportowany przelew) po nzf_Id - potrzebny kontrahent + saldo.
+            bool bankExists;
+            try { bankExists = (bool)Session.FinManager.Istnieje(req.BankOperationSubiektId); }
+            catch { bankExists = false; }
+            if (!bankExists) throw new SettlementException(SettlementError.BankOperationNotFound, $"Operacja bankowa {req.BankOperationSubiektId} nie istnieje w nz__Finanse");
+            try { bankOp = Session.FinManager.WczytajDokument(req.BankOperationSubiektId); }
+            catch (Exception ex) { throw new SettlementException(SettlementError.BankOperationNotFound, $"Nie mozna wczytac operacji bankowej {req.BankOperationSubiektId}", ex); }
+            long? bankKontrahent = TryReadInt64((object)bankOp, "ObiektPowiazanyId");
+            decimal bankRemaining = TryReadDecimal((object)bankOp, "WartoscBiezaca") ?? 0m;
+            if (amount - bankRemaining > 0.005m)
+            {
+                throw new SettlementException(SettlementError.BankOperationExhausted,
+                    $"Operacja bankowa {req.BankOperationSubiektId} ma dostepne saldo {bankRemaining:F2} < amount {amount:F2} (operacja czesciowo/calkowicie skonsumowana).");
+            }
+
+            // 3. Wybor wlasciwego rozrachunku. FS marketplace ma zwykle DWA rozrachunki (typ=39): wyzerowany na
+            //    kupujacym + OTWARTY na platniku (Allegro Pay). NIE polegamy na PodajRozrachunek ani na indeksie
+            //    kolekcji - wybieramy po OTWARTEJ KWOCIE i dopasowaniu kontrahenta do operacji bankowej (zweryfikowane
+            //    na prod 2026-06: FZ zawsze 1 wiersz, FS po 2 wiersze {wyzerowany + otwarty}).
+            var rozrachunki = DiscoverRozrachunki(documentSubiektId);
+            if (rozrachunki.Count == 0)
+            {
+                throw new SettlementException(SettlementError.NoRozrachunek, $"Dokument {documentSubiektId} nie ma rozrachunku (dokument magazynowy bez platnosci?)");
+            }
+            var openRozr = rozrachunki.Where(r => r.Remaining > 0.005m).ToList();
+            if (openRozr.Count == 0)
+            {
+                throw new SettlementException(SettlementError.AlreadySettled,
+                    $"Rozrachunki dokumentu {documentSubiektId} sa juz rozliczone (brak otwartej kwoty) - dokument nie wymaga recznego rozliczenia (gotowka/auto?).");
+            }
+            var matchingRozr = openRozr.Where(r => bankKontrahent.HasValue && r.Contractor == bankKontrahent.Value).ToList();
+            if (matchingRozr.Count == 0)
+            {
+                throw new SettlementException(SettlementError.BankOperationContractorMismatch,
+                    $"Zaden otwarty rozrachunek dokumentu {documentSubiektId} nie jest na kontrahencie operacji bankowej {req.BankOperationSubiektId} (kontrahent={bankKontrahent}) - mozliwa platnosc karta/ratami (rozrachunek na centrum) lub zly przelew.");
+            }
+            var target = matchingRozr.FirstOrDefault(r => r.Remaining + 0.005m >= amount, matchingRozr[0]);
+
+            // 4. GUARD waluty (MVP=PLN).
+            if (!string.IsNullOrEmpty(target.Currency) && !string.Equals(target.Currency, "PLN", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new SettlementException(SettlementError.UnsupportedCurrency,
+                    $"Rozrachunek w walucie {target.Currency} - most rozlicza tylko PLN (RozliczWaluta nieobslugiwane).");
+            }
+            // 5. amount vs otwarta kwota wybranego rozrachunku (czesciowe dozwolone; nadplata odrzucana).
+            if (amount - target.Remaining > 0.005m)
+            {
+                throw new SettlementException(SettlementError.AmountExceedsRemaining,
+                    $"amount {amount:F2} > pozostalo {target.Remaining:F2}", details: new { remaining = target.Remaining, requested = amount });
+            }
+
+            long rozrachunekId = target.Id;
+            decimal remaining = target.Remaining;
+            rozrachunek = Session.FinManager.Wczytaj(rozrachunekId);
+
+            // 6. ANTI-DUPLICATE FAIL-CLOSED: skan istniejacych rozliczen po SplataId==bankOpId.
+            //    KAZDY wyjatek w skanie przerywa flow (NIE przepuszczac do Rozlicz - podwojne rozliczenie = blad ksiegowy).
+            ScanForExistingSettlement(rozrachunek, req.BankOperationSubiektId, rozrachunekId);
+
+            // 7. ROZLICZ OD STRONY ROZRACHUNKU (jedyny poprawny wariant dla metody kasowej VAT).
+            dynamic? rozliczeniaCol = null;
+            try
+            {
+                rozliczeniaCol = rozrachunek.Rozliczenia;
+                // Kwota jako double (NIE decimal) - most marshaluje wszystkie kwoty pieniezne do COM
+                // jako double (patrz ApplyPayment: SetCom(..., (double)payment.Amount)). decimal binduje
+                // sie do VT_DECIMAL, nie do typu monetarnego oczekiwanego przez Sfere.
+                dynamic finRoz = rozliczeniaCol.Rozlicz((object)bankOp, (double)amount);
+                try { if (finRoz is not null) Marshal.ReleaseComObject(finRoz); } catch { /* cleanup */ }
+            }
+            catch (COMException cex)
+            {
+                var inner = Marshal.GetExceptionForHR(cex.ErrorCode);
+                throw new SettlementException(SettlementError.Internal, $"Rozlicz padl: 0x{cex.ErrorCode:X8} {inner?.Message ?? cex.Message}", cex);
+            }
+            finally
+            {
+                if (rozliczeniaCol is not null) { try { Marshal.ReleaseComObject(rozliczeniaCol); } catch { /* cleanup */ } }
+            }
+
+            // 8. Zapisz NA ROZRACHUNKU (obiekt na ktorym wolano Rozlicz).
+            rozrachunek.Zapisz();
+
+            // 9. Przeladuj rozrachunek - atrybuty/RozliczenieId odswiezaja sie dopiero po reload.
+            //     Reload moze rzucic transientnie (COM/sesja) - retry 2x. BEZ Thread.Sleep
+            //     (jestesmy na STA workerze: sleep zablokowalby cala kolejke Sfery).
+            decimal remainingAfter = remaining - amount; // best-effort fallback (PLN - dokladne)
+            long newRozliczenieId = -1;
+            Exception? reloadError = null;
+            for (int attempt = 0; attempt < 2 && newRozliczenieId < 0; attempt++)
+            {
+                try
+                {
+                    if (rozrachunek is not null) { TryClose(rozrachunek); rozrachunek = null; }
+                    rozrachunek = Session.FinManager.Wczytaj(rozrachunekId);
+                    remainingAfter = TryReadDecimal((object)rozrachunek, "WartoscBiezaca") ?? remainingAfter;
+                    newRozliczenieId = FindRozliczenieIdBySplata(rozrachunek, req.BankOperationSubiektId);
+                }
+                catch (Exception ex) { reloadError = ex; }
+            }
+            if (newRozliczenieId < 0)
+            {
+                // Rozliczenie JEST utrwalone (Zapisz przeszlo), ale nie odczytalismy RozliczenieId.
+                // Surfacujemy jako Internal (nie cache'ujemy bledonego id). Klient odzyska przez retry:
+                // anti-duplicate FAIL-CLOSED zwroci 409 z existing_rozliczenie_id, lub przez GET settlements.
+                _logger.LogError(reloadError, "Settlement zapisany dla rozrachunku {Id}, ale RozliczenieId nieodczytany po reload (2 proby)", rozrachunekId);
+                throw new SettlementException(SettlementError.Internal,
+                    $"Rozliczenie rozrachunku {rozrachunekId} zostalo zapisane, ale RozliczenieId nie odczytane po przeladowaniu - retry zwroci 409 z existing_rozliczenie_id.", reloadError);
+            }
+
+            _lastInvoiceAt = DateTimeOffset.UtcNow;
+            return new SettlementResponseDto(
+                RozliczenieId: newRozliczenieId,
+                DocumentId: $"sub_{documentSubiektId}",
+                DocumentSubiektId: documentSubiektId,
+                RozrachunekSubiektId: rozrachunekId,
+                BankOperationSubiektId: req.BankOperationSubiektId,
+                Amount: amount,
+                RemainingAfter: remainingAfter,
+                IsFullySettled: Math.Abs(remainingAfter) < 0.005m,
+                SettledAt: _lastInvoiceAt.Value);
+        }
+        finally
+        {
+            if (bankOp is not null) TryClose(bankOp);
+            if (rozrachunek is not null) TryClose(rozrachunek);
+            if (dok is not null) TryClose(dok);
+        }
+    }
+
+    /// <summary>
+    /// FAIL-CLOSED skan: rzuca <see cref="DuplicateSettlementException"/> gdy operacja bankowa
+    /// jest juz rozliczona z tym rozrachunkiem; KAZDY inny wyjatek -> SettlementException(ScanFailed).
+    /// </summary>
+    private void ScanForExistingSettlement(dynamic rozrachunek, long bankOperationId, long rozrachunekId)
+    {
+        dynamic? col = null;
+        try
+        {
+            col = rozrachunek.Rozliczenia;
+            foreach (dynamic roz in (System.Collections.IEnumerable)col)
+            {
+                try
+                {
+                    long? splataId = TryReadInt64((object)roz, "SplataId");
+                    long existingRozId = TryReadInt64((object)roz, "RozliczenieId") ?? -1;
+                    if (splataId == bankOperationId)
+                    {
+                        throw new DuplicateSettlementException(existingRozId, rozrachunekId, bankOperationId);
+                    }
+                }
+                finally { try { Marshal.ReleaseComObject(roz); } catch { /* cleanup */ } }
+            }
+        }
+        catch (DuplicateSettlementException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ScanForExistingSettlement padl (rozrachunek={RozrachunekId}, bankOp={BankOp}) - fail-closed", rozrachunekId, bankOperationId);
+            throw new SettlementException(SettlementError.ScanFailed,
+                "Skan anti-duplicate rozliczen padl - przerwano (fail-closed, by NIE dopuscic podwojnego rozliczenia).", ex);
+        }
+        finally
+        {
+            if (col is not null) { try { Marshal.ReleaseComObject(col); } catch { /* cleanup */ } }
+        }
+    }
+
+    /// <summary>Zwraca RozliczenieId linii o SplataId==bankOperationId, lub -1.</summary>
+    private long FindRozliczenieIdBySplata(dynamic rozrachunek, long bankOperationId)
+    {
+        dynamic? col = null;
+        long found = -1;
+        try
+        {
+            col = rozrachunek.Rozliczenia;
+            foreach (dynamic roz in (System.Collections.IEnumerable)col)
+            {
+                try
+                {
+                    long? splataId = TryReadInt64((object)roz, "SplataId");
+                    if (splataId == bankOperationId)
+                    {
+                        found = TryReadInt64((object)roz, "RozliczenieId") ?? -1;
+                        break; // jedna operacja = max jedno powiazanie z danym rozrachunkiem
+                    }
+                }
+                finally { try { Marshal.ReleaseComObject(roz); } catch { /* cleanup */ } }
+            }
+        }
+        finally
+        {
+            if (col is not null) { try { Marshal.ReleaseComObject(col); } catch { /* cleanup */ } }
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// Odczytuje rozrachunki dokumentu z nz__Finanse (FinManager.OtworzKolekcje po nzf_IdDokumentAuto).
+    /// FS marketplace ma zwykle 2 rozrachunki typ=39 (wyzerowany kupujacy + otwarty platnik); FZ zawsze 1
+    /// (typ=40). Zwraca (id, pozostalo, kontrahent, waluta) per wiersz - wybor wlasciwego robi wolajacy.
+    /// </summary>
+    private List<(long Id, decimal Remaining, long? Contractor, string? Currency)> DiscoverRozrachunki(long documentSubiektId)
+    {
+        var rows = new List<(long Id, decimal Remaining, long? Contractor, string? Currency)>();
+        dynamic? col = null;
+        try
+        {
+            col = Session.FinManager.OtworzKolekcje($"nzf_IdDokumentAuto={documentSubiektId} AND nzf_Typ IN (39, 40)", "");
+            foreach (dynamic r in (System.Collections.IEnumerable)col)
+            {
+                try
+                {
+                    rows.Add((
+                        ToInt64(r.Identyfikator),
+                        TryReadDecimal((object)r, "WartoscBiezaca") ?? 0m,
+                        TryReadInt64((object)r, "ObiektPowiazanyId"),
+                        TryReadString((object)r, "Waluta")));
+                }
+                finally { try { Marshal.ReleaseComObject(r); } catch { /* cleanup */ } }
+            }
+        }
+        finally
+        {
+            if (col is not null) { try { Marshal.ReleaseComObject(col); } catch { /* cleanup */ } }
+        }
+        return rows;
+    }
+
+    private SettlementStateResponseDto? GetSettlementsCore(long documentSubiektId)
+    {
+        // 1. Istnienie dokumentu (404 gdy brak).
+        dynamic? dok = null;
+        try { dok = Session.SuDokumentyManager.WczytajDokument(documentSubiektId); }
+        catch (Exception ex) { _logger.LogInformation(ex, "GetSettlements: dokument {Id} nie znaleziony", documentSubiektId); return null; }
+        try { if (dok is null) return null; }
+        finally { if (dok is not null) TryClose(dok); }
+
+        // 2. Rozrachunki dokumentu; raportujemy OTWARTY (max pozostalo), inaczej dowolny (rozliczony).
+        var rozrachunki = DiscoverRozrachunki(documentSubiektId);
+        if (rozrachunki.Count == 0)
+        {
+            throw new SettlementException(SettlementError.NoRozrachunek, $"Dokument {documentSubiektId} nie ma rozrachunku");
+        }
+        var open = rozrachunki.Where(r => r.Remaining > 0.005m).OrderByDescending(r => r.Remaining).ToList();
+        long targetId = open.Count > 0 ? open[0].Id : rozrachunki[0].Id;
+
+        dynamic? rozrachunek = null;
+        dynamic? col = null;
+        try
+        {
+            rozrachunek = Session.FinManager.Wczytaj(targetId);
+            long rozrachunekId = ToInt64(rozrachunek.Identyfikator);
+            decimal original = TryReadDecimal((object)rozrachunek, "WartoscPoczatkowa") ?? 0m;
+            decimal remaining = TryReadDecimal((object)rozrachunek, "WartoscBiezaca") ?? 0m;
+            DateTimeOffset? lastSettlement = TryReadDate((object)rozrachunek, "DataOstatniejSplaty");
+
+            var lines = new List<SettlementLineDto>();
+            col = rozrachunek.Rozliczenia;
+            foreach (dynamic roz in (System.Collections.IEnumerable)col)
+            {
+                try
+                {
+                    lines.Add(new SettlementLineDto(
+                        RozliczenieId: TryReadInt64((object)roz, "RozliczenieId") ?? -1,
+                        Amount: TryReadDecimal((object)roz, "Kwota") ?? 0m,
+                        SettledAt: TryReadDate((object)roz, "Data"),
+                        SplataSubiektId: TryReadInt64((object)roz, "SplataId"),
+                        DlugSubiektId: TryReadInt64((object)roz, "DlugId"),
+                        Type: (int?)TryReadInt64((object)roz, "Typ")));
+                }
+                finally { try { Marshal.ReleaseComObject(roz); } catch { /* cleanup */ } }
+            }
+
+            return new SettlementStateResponseDto(
+                DocumentId: $"sub_{documentSubiektId}",
+                DocumentSubiektId: documentSubiektId,
+                RozrachunekSubiektId: rozrachunekId,
+                OriginalAmount: original,
+                RemainingAmount: remaining,
+                IsFullySettled: Math.Abs(remaining) < 0.005m,
+                LastSettlementAt: lastSettlement,
+                Settlements: lines);
+        }
+        finally
+        {
+            if (col is not null) { try { Marshal.ReleaseComObject(col); } catch { /* cleanup */ } }
+            if (rozrachunek is not null) TryClose(rozrachunek);
+        }
+    }
+
+    private void DeleteSettlementCore(long documentSubiektId, long rozliczenieId)
+    {
+        // 1. Istnienie dokumentu.
+        dynamic? dok = null;
+        try { dok = Session.SuDokumentyManager.WczytajDokument(documentSubiektId); }
+        catch (Exception ex) { throw new SettlementException(SettlementError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje", ex); }
+        try { if (dok is null) throw new SettlementException(SettlementError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje"); }
+        finally { if (dok is not null) TryClose(dok); }
+
+        // 2. Rozliczenie moze byc na ktorymkolwiek rozrachunku dokumentu (FS = 2 rozrachunki) - szukamy po wszystkich.
+        var rozrachunki = DiscoverRozrachunki(documentSubiektId);
+        if (rozrachunki.Count == 0)
+        {
+            throw new SettlementException(SettlementError.SettlementNotFound, $"Rozliczenie {rozliczenieId} nie istnieje dla dokumentu {documentSubiektId}");
+        }
+
+        foreach (var row in rozrachunki)
+        {
+            dynamic? rozrachunek = null;
+            dynamic? col = null;
+            dynamic? target = null;
+            try
+            {
+                rozrachunek = Session.FinManager.Wczytaj(row.Id);
+                col = rozrachunek.Rozliczenia;
+                foreach (dynamic roz in (System.Collections.IEnumerable)col)
+                {
+                    long rozId = TryReadInt64((object)roz, "RozliczenieId") ?? -1;
+                    if (rozId == rozliczenieId) { target = roz; break; } // NIE zwalniamy - do Usun
+                    try { Marshal.ReleaseComObject(roz); } catch { /* cleanup */ }
+                }
+
+                if (target is not null)
+                {
+                    try { target.Usun(); }
+                    catch (COMException cex)
+                    {
+                        var inner = Marshal.GetExceptionForHR(cex.ErrorCode);
+                        throw new SettlementException(SettlementError.Internal, $"Usun rozliczenia padl: 0x{cex.ErrorCode:X8} {inner?.Message ?? cex.Message}", cex);
+                    }
+                    finally { try { Marshal.ReleaseComObject(target); } catch { /* cleanup */ } target = null; }
+
+                    rozrachunek.Zapisz();
+                    _lastInvoiceAt = DateTimeOffset.UtcNow;
+                    return; // znaleziono i usunieto
+                }
+            }
+            finally
+            {
+                if (target is not null) { try { Marshal.ReleaseComObject(target); } catch { /* cleanup */ } }
+                if (col is not null) { try { Marshal.ReleaseComObject(col); } catch { /* cleanup */ } }
+                if (rozrachunek is not null) TryClose(rozrachunek);
+            }
+        }
+
+        throw new SettlementException(SettlementError.SettlementNotFound, $"Rozliczenie {rozliczenieId} nie istnieje dla dokumentu {documentSubiektId}");
+    }
+
+    private IReadOnlyList<BankOperationDto> QueryBankOperationsCore(BankOperationQueryRequestDto request)
+    {
+        // Filtr po KOLUMNIE DB nzf_Typ (NIE FinDokument.Typ - od v1.17 enum Sfery != nzf_Typ).
+        // 19 = BP (wplata), 20 = BW (wyplata).
+        var conditions = new List<string>();
+        var dir = request.Direction?.Trim().ToLowerInvariant();
+        if (dir == "in") conditions.Add("nzf_Typ = 19");
+        else if (dir == "out") conditions.Add("nzf_Typ = 20");
+        else conditions.Add("nzf_Typ IN (19, 20)");
+
+        if (!string.IsNullOrWhiteSpace(request.From) && IsIsoDate(request.From))
+            conditions.Add($"nzf_Data >= '{request.From}'");
+        if (!string.IsNullOrWhiteSpace(request.To) && IsIsoDate(request.To))
+            conditions.Add($"nzf_Data <= '{request.To}'");
+
+        string filter = string.Join(" AND ", conditions);
+        int limit = Math.Clamp(request.Limit > 0 ? request.Limit : 200, 1, 1000);
+
+        var results = new List<BankOperationDto>();
+        dynamic? kolekcja = null;
+        try
+        {
+            kolekcja = Session.FinManager.OtworzKolekcje(filter, "nzf_Data DESC");
+            foreach (dynamic op in (System.Collections.IEnumerable)kolekcja)
+            {
+                try
+                {
+                    decimal? remaining = TryReadDecimal((object)op, "WartoscBiezaca");
+                    if (request.UnsettledOnly && (remaining ?? 0m) <= 0.005m)
+                    {
+                        continue;
+                    }
+
+                    long? typ = TryReadInt64((object)op, "Typ");
+                    string direction = typ switch { 19 => "in", 20 => "out", _ => "unknown" };
+                    DateTimeOffset? data = TryReadDate((object)op, "Data");
+
+                    results.Add(new BankOperationDto(
+                        SubiektId: ToInt64(op.Identyfikator),
+                        Direction: direction,
+                        Date: data?.ToString("yyyy-MM-dd"),
+                        Amount: TryReadDecimal((object)op, "WartoscPoczatkowa"),
+                        Remaining: remaining,
+                        ContractorId: TryReadInt64((object)op, "ObiektPowiazanyId"),
+                        Title: TryReadString((object)op, "Tytulem"),
+                        Number: TryReadString((object)op, "NumerPelny")));
+
+                    if (results.Count >= limit)
+                    {
+                        break;
+                    }
+                }
+                finally { try { Marshal.ReleaseComObject(op); } catch { /* cleanup */ } }
+            }
+        }
+        finally
+        {
+            if (kolekcja is not null) { try { Marshal.ReleaseComObject(kolekcja); } catch { /* cleanup */ } }
+        }
+
+        return results;
+    }
+
+    private static bool IsIsoDate(string? date) =>
+        !string.IsNullOrWhiteSpace(date)
+        && DateTime.TryParseExact(date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _);
+
+    private static DateTimeOffset? TryReadDate(object target, string propName)
+    {
+        try
+        {
+            object? raw = target.GetType().InvokeMember(propName,
+                BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public,
+                null, target, Array.Empty<object>());
+            return raw is null ? null : new DateTimeOffset(Convert.ToDateTime(raw));
+        }
+        catch { return null; }
     }
 
     private InvoiceResponseDto CreateCorrectionCore(long sourceSubiektId, InvoiceCorrectionRequestDto request)
