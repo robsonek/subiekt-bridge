@@ -25,6 +25,14 @@ public sealed class BridgeOptions
 
     /// <summary>True (default) - POST /admin/update aktywny. False - wylaczony 404.</summary>
     public bool AllowSelfUpdate { get; init; } = true;
+
+    /// <summary>
+    /// Wlacza ksiegowanie home-bankingu (POST /bank-transactions/{hb_id}/book, wariant B: Sfera tworzy
+    /// operacje + most domyka link raw UPDATE hb_Transakcja). Domyslnie FALSE -> endpoint zwraca 501-stub.
+    /// Kill-switch bez redeployu: gdy raw UPDATE zaczalby szkodzic, ustaw false i restart. Wlaczac dopiero
+    /// po zielonym tescie odwracalnym na prodzie (docs/PLAN-home-banking-booking-variant-b.md sekcja 7).
+    /// </summary>
+    public bool EnableHbBooking { get; init; } = false;
 }
 
 public sealed class SubiektOptions

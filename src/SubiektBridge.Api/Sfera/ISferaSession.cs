@@ -103,12 +103,13 @@ public interface ISferaSession : IAsyncDisposable
         CancellationToken ct);
 
     /// <summary>
-    /// Zaksięguj surowy przelew (hb_Transakcja) na operację bankową BP/BW przez Sferę.
-    /// Zwraca nzf_Id operacji + flagę `linked` (czy Subiekt ustawił hb_idOperacjiBankowej).
+    /// Zaksięguj surowy przelew (hb_Transakcja) na operację bankową BP/BW (wariant B): Sfera tworzy
+    /// operację (DodajOperacjeBankowa), most domyka link raw UPDATE hb_Transakcja (Sfera nie wystawia API
+    /// hb_). Zwraca nzf_Id operacji + `linked` (zawsze true na sukcesie - most sam ustawia link).
     /// Jeśli transakcja już zaksięgowana → zwraca istniejącą (AlreadyBooked). Most NIE matchuje,
     /// dostaje rozkaz "zaksięguj hb_id". Rzuca <see cref="BankBookingException"/>.
     /// </summary>
-    Task<BookResultDto> BookBankTransactionAsync(long hbId, long? contractorSubiektId, bool keepUnlinked, CancellationToken ct);
+    Task<BookResultDto> BookBankTransactionAsync(long hbId, long? contractorSubiektId, CancellationToken ct);
 
     /// <summary>
     /// Zwraca hb_idOperacjiBankowej dla transakcji (live), albo null gdy niezaksięgowana. Do re-walidacji
