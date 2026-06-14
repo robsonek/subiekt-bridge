@@ -311,7 +311,8 @@ Most to cienki adapter: surowe prymitywy nad Sferą, ZERO klasyfikacji/matchingu
 której faktury" + decyzja auto/ręcznie → Laravel (jak dopasowanie `GET /invoices` do zamówień).
 - **`GET /bank-transactions`** — czysty passthrough `hb_Transakcja` (read-only SQL, bo `hb_Transakcja` nie jest
   w Sferze): surowe pola (hb_id, data, kwota, direction, hb_Kontrahent, hb_RachKontrahent, hb_Tytul, hb_NrFaktury,
-  booked, bank_operation_subiekt_id=hb_idOperacjiBankowej). Most NIE rozpoznaje kontrahenta po rachunku, NIE matchuje.
+  booked, bank_operation_subiekt_id=hb_idOperacjiBankowej, rachunek_id/rachunek_numer=konto wyciągu przez
+  `hb_NaglowekIStopka` LEFT JOIN po `hb_IdNaglowekTr`). Most NIE rozpoznaje kontrahenta po rachunku, NIE matchuje.
 - **`POST /bank-transactions/{hb_id}/book`** (PLANOWANE, gated probe COM) — zaksięguj transakcję na operację BP +
   ustaw `hb_idOperacjiBankowej`, zwróć `bank_operation_subiekt_id` (gotowy do `/settlements`). To JEDYNY research:
   Sfera nie ma udokumentowanego API HB (brak HB-managera w CHM; `Importer`=EPP; `FinManager.DodajOperacjeBankowa`
