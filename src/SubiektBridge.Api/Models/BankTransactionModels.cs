@@ -27,5 +27,9 @@ public sealed record BankTransactionDto(
     [property: JsonPropertyName("invoice_number")] string? InvoiceNumber,        // hb_NrFaktury (zwykle puste - klient nie podaje)
     [property: JsonPropertyName("booked")] bool Booked,                          // hb_idOperacjiBankowej != NULL
     // Po zaksięgowaniu = nzf_Id operacji bankowej (gotowy do POST /invoices/{id}/settlements). null = niezaksięgowana.
-    [property: JsonPropertyName("bank_operation_subiekt_id")] long? BankOperationSubiektId
+    [property: JsonPropertyName("bank_operation_subiekt_id")] long? BankOperationSubiektId,
+    // Konto wyciągu, na które wpłynął przelew (przez nagłówek wyciągu hb_NaglowekIStopka). rachunek_id = rb_Id
+    // (opaque, potrzebny do księgowania na właściwym koncie); rachunek_numer = IBAN wyciągu (czytelny). DANE surowe.
+    [property: JsonPropertyName("rachunek_id")] long? RachunekId,
+    [property: JsonPropertyName("rachunek_numer")] string? RachunekNumer
 );

@@ -277,7 +277,8 @@ ręcznie = Twoja strona (znasz `subiekt_id` swoich FS z własnego modelu + `rema
 **`GET /api/v1/bank-transactions`** — surowe przelewy z wyciągu (przed zaksięgowaniem). Query: `direction`
 (`in`=C/wpłata, `out`=D/wypłata), `unbooked_only` (domyślnie true → `hb_idOperacjiBankowej IS NULL`), `from`/`to`,
 `limit`. Zwraca surowe pola: `hb_id, date, amount, direction, contractor_name, contractor_account, title,
-invoice_number, booked, bank_operation_subiekt_id` (= `hb_idOperacjiBankowej`; `null` gdy niezaksięgowana).
+invoice_number, booked, bank_operation_subiekt_id` (= `hb_idOperacjiBankowej`; `null` gdy niezaksięgowana),
+`rachunek_id` (rb_Id konta wyciągu, na które wpłynął przelew) + `rachunek_numer` (IBAN wyciągu).
 
 Typowy przepływ po Twojej stronie: pobierz `bank-transactions?unbooked_only=true&direction=in`, dopasuj po
 `amount` + `contractor_name`/rachunku do swoich otwartych FS, zdecyduj (auto/ręcznie), zaksięguj

@@ -404,9 +404,9 @@ public sealed class FakeSferaSession : ISferaSession
     {
         IReadOnlyList<BankTransactionDto> all = new[]
         {
-            new BankTransactionDto(13109, "2026-06-12", 371.12m, "in", "Google Commerce Limited", "PL61109010140000071219812874", "PRZELEW - payout", null, false, null),
-            new BankTransactionDto(13127, "2026-06-11", 3372.50m, "in", "Jan Szyszka", "PL27114020040000300201355387", "PRZELEW - zaplata", null, false, null),
-            new BankTransactionDto(12001, "2026-06-01", 500.00m, "out", "Dostawca XYZ", "PL11111111111111111111111111", "PRZELEW wychodzacy", null, true, 88001),
+            new BankTransactionDto(13109, "2026-06-12", 371.12m, "in", "Google Commerce Limited", "PL61109010140000071219812874", "PRZELEW - payout", null, false, null, 49, "PL49 1870 0000 0000 0000 0000 0049"),
+            new BankTransactionDto(13127, "2026-06-11", 3372.50m, "in", "Jan Szyszka", "PL27114020040000300201355387", "PRZELEW - zaplata", null, false, null, 1, "PL08 1140 0000 0000 0000 0000 8831"),
+            new BankTransactionDto(12001, "2026-06-01", 500.00m, "out", "Dostawca XYZ", "PL11111111111111111111111111", "PRZELEW wychodzacy", null, true, 88001, 49, "PL49 1870 0000 0000 0000 0000 0049"),
         };
 
         IEnumerable<BankTransactionDto> q = all;
