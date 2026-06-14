@@ -326,6 +326,8 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 422 | `INVALID_DATE` | `issue_date`/`sale_date`/`source_invoice_date` nie w formacie `YYYY-MM-DD` (lub data niemożliwa kalendarzowo) |
 | 404 | `INVOICE_NOT_FOUND` / `RECEIPT_NOT_FOUND` | zły `{id}` |
 | 404 | `SETTLEMENT_NOT_FOUND` | (DELETE) rozliczenie nie istnieje / już cofnięte |
+| 404 | `BANK_TRANSACTION_NOT_FOUND` | (book) hb_id nie istnieje |
+| 422 | `NO_BANK_ACCOUNT` / `INVALID_DIRECTION` | (book) transakcja bez konta wyciągu / hb_Oznaczenie ≠ C/D |
 | 422 | `INVALID_BRIDGE_ID` | `{id}` nie w formacie `sub_<n>` |
 | 422 | `SETTLEMENT_NOT_SUPPORTED` | dokument bez rozrachunku (goły PZ/MM) lub rozrachunek na centrum kart/rat — nie retry |
 | 422 | `UNSUPPORTED_DOCUMENT_TYPE` | settlements obsługują tylko FS/FZ; korekty (KFS/KFZ) i inne typy odrzucane — nie retry |

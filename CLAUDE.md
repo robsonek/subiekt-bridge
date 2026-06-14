@@ -323,6 +323,10 @@ której faktury" + decyzja auto/ręcznie → Laravel (jak dopasowanie `GET /invo
     flaga `keep_unlinked=true` zostawia BP do inspekcji (tylko probe). NIE pisać raw SQL do `hb_Transakcja`/`nz__Finanse`.
   - **Lock per `hb_id`** (`SemaphoreSlim`, proces jednoinstancyjny) + guard `ExistingOpId` → brak podwójnego BP.
     Status: 201 tylko czysty nowy+linked; 200 dla already_booked i linked=false — klient MUSI sprawdzać `linked`, nie status.
+  - **Sekcja krytyczna NIEANULOWALNA:** od `DodajOperacjeBankowa`/`Zapisz` aż po verify+rollback używamy
+    `CancellationToken.None` (timeout/cancel klienta po Zapisz porzuciłby `nzfId` → orphan BP). Verify (`ReadHbLink`)
+    w `try/catch` — gdy padnie po utworzeniu BP, i tak rollback (`TryRollbackBp`). Guard `hb_Oznaczenie ∈ {C,D}` PRZED
+    utworzeniem (puste → nie twórz po cichu BW). Replay weryfikuje `GetBookedOperationIdAsync` (cache nie maskuje usuniętego BP).
 - Rozliczenie już jest (`POST /invoices/{id}/settlements`) — most nie decyduje co z czym, dostaje rozkaz
   „zaksięguj X" / „rozlicz Y z Z". Otwarte rozrachunki Laravel zna z własnego modelu + `GET /invoices/{id}/settlements`.
 

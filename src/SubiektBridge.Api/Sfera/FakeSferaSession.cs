@@ -422,6 +422,9 @@ public sealed class FakeSferaSession : ISferaSession
     public Task<BookResultDto> BookBankTransactionAsync(long hbId, long? contractorSubiektId, bool keepUnlinked, CancellationToken ct)
     {
         if (hbId < 0) throw new BankBookingException(BookError.TransactionNotFound, $"hb_Transakcja {hbId} nie istnieje");
+        if (hbId == 77_777) throw new BankBookingException(BookError.NoAccount, "hb_Transakcja bez konta wyciagu (fake)");
+        // Sentinel Branch B: Sfera nie linkuje -> BP cofniety (rollback), linked=false, op=null.
+        if (hbId == 88_888) return Task.FromResult(new BookResultDto(null, hbId, Linked: false, AlreadyBooked: false, "Branch B (fake): Sfera nie linkuje - BP cofniety"));
 
         // Fake symuluje Branch A (Subiekt linkuje). Drugie wywolanie tego samego hb_id -> already_booked.
         if (_bookedHb.TryGetValue(hbId, out var existing))
@@ -432,6 +435,9 @@ public sealed class FakeSferaSession : ISferaSession
         _bookedHb[hbId] = opId;
         return Task.FromResult(new BookResultDto(opId, hbId, Linked: true, AlreadyBooked: false, null));
     }
+
+    public Task<long?> GetBookedOperationIdAsync(long hbId, CancellationToken ct)
+        => Task.FromResult(_bookedHb.TryGetValue(hbId, out var op) ? op : (long?)null);
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 

@@ -109,6 +109,12 @@ public interface ISferaSession : IAsyncDisposable
     /// dostaje rozkaz "zaksięguj hb_id". Rzuca <see cref="BankBookingException"/>.
     /// </summary>
     Task<BookResultDto> BookBankTransactionAsync(long hbId, long? contractorSubiektId, bool keepUnlinked, CancellationToken ct);
+
+    /// <summary>
+    /// Zwraca hb_idOperacjiBankowej dla transakcji (live), albo null gdy niezaksięgowana. Do re-walidacji
+    /// idempotency-replay (czy zacache'owana operacja wciąż istnieje/jest powiązana).
+    /// </summary>
+    Task<long?> GetBookedOperationIdAsync(long hbId, CancellationToken ct);
 }
 
 public sealed record SferaHealthDto(

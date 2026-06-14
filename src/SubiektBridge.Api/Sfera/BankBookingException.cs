@@ -6,6 +6,8 @@ public enum BookError
     TransactionNotFound,
     /// <summary>Transakcja nie ma powiązanego konta wyciągu (hb_NaglowekIStopka.hb_IdRachunku) -> 422 NO_BANK_ACCOUNT.</summary>
     NoAccount,
+    /// <summary>hb_Oznaczenie inne niż 'C'/'D' (puste/nieznane) -> 422 INVALID_DIRECTION (NIE tworzymy BP po cichu).</summary>
+    InvalidDirection,
     /// <summary>COM/Sfera padło przy tworzeniu operacji bankowej -> 500 INTERNAL_ERROR.</summary>
     Internal,
 }

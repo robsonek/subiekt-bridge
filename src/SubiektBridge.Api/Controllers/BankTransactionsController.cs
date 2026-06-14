@@ -76,11 +76,30 @@ public sealed class BankTransactionsController : ControllerBase
                 Message: "Nagłówek 'Idempotency-Key' jest wymagany."));
         }
 
-        // Replay: ten sam klucz -> ten sam wynik (chroni przed drugim BP przy retry, gdy Sfera nie auto-linkuje).
+        // Replay z weryfikacja: gdy cache mowi linked+op, sprawdz ze operacja WCIAZ powiazana (mogla zostac usunieta
+        // recznie w Subiekcie). Jak znikla -> invaliduj cache i wykonaj pelny flow (jak w endpointach faktur/rozrachunkow).
         var cached = await _idempotency.TryGetAsync<BookResultDto>(idempotencyKey, ct);
         if (cached is not null)
         {
-            return StatusCode(StatusForBook(cached), cached);
+            bool stale = false;
+            if (cached.Linked && cached.BankOperationSubiektId.HasValue)
+            {
+                try
+                {
+                    var live = await _sfera.GetBookedOperationIdAsync(hbId, ct);
+                    stale = live != cached.BankOperationSubiektId;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Book replay-verify failed (hb_id={HbId}) - zwracam cache", hbId);
+                }
+            }
+            if (!stale)
+            {
+                return StatusCode(StatusForBook(cached), cached);
+            }
+            _logger.LogWarning("Book idempotent cache invalidated: hb_id={HbId}, operacja {Op} zniknela - nowy flow", hbId, cached.BankOperationSubiektId);
+            await _idempotency.DeleteAsync(idempotencyKey, ct);
         }
 
         try
@@ -96,6 +115,10 @@ public sealed class BankTransactionsController : ControllerBase
         catch (BankBookingException ex) when (ex.Reason == BookError.NoAccount)
         {
             return UnprocessableEntity(new ErrorResponseDto("NO_BANK_ACCOUNT", ex.Message));
+        }
+        catch (BankBookingException ex) when (ex.Reason == BookError.InvalidDirection)
+        {
+            return UnprocessableEntity(new ErrorResponseDto("INVALID_DIRECTION", ex.Message));
         }
         catch (NotImplementedException ex)
         {
