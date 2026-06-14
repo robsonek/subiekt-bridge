@@ -824,21 +824,41 @@ public sealed class RealSferaSession : ISferaSession
                 return new BookResultDto(nzfId, hbId, Linked: true, AlreadyBooked: false, null);
             }
 
-            // rows == 0: linia powiazana miedzy naszym odczytem a UPDATE (operator w module Bankowosc / wyscig).
-            //   Guard IS NULL ochronil przed nadpisaniem cudzego linku. Cofamy NASZ swiezy BP.
-            _logger.LogWarning("Book: hb_id={HbId} raw UPDATE @@ROWCOUNT=0 (linia juz powiazana rownolegle) - cofam swoj BP {Op}", hbId, nzfId);
-            bool rbRace = await TryRollbackBp(nzfId, hbId);
-            long? winner = await Task.Run(() => ReadHbLink(hbId), CancellationToken.None);
+            // @@ROWCOUNT > 1 jest NIEMOZLIWE (hb_IdTransakcji = PK CLUSTERED), ale defensywnie NIE traktujemy go jak
+            //   wyscig (rows==0) - cofamy nasz BP i zglaszamy blad krytyczny (nie 2xx). Sygnal ewentualnego schema drift.
+            if (rows > 1)
+            {
+                _logger.LogError("Book: hb_id={HbId} raw UPDATE @@ROWCOUNT={Rows} (>1, niemozliwe przy PK!) - cofam BP {Op}", hbId, rows, nzfId);
+                bool rbMulti = await TryRollbackBp(nzfId, hbId);
+                throw new BankBookingException(rbMulti ? BookError.Internal : BookError.Orphan,
+                    $"Raw UPDATE @@ROWCOUNT={rows} (>1 - nieoczekiwane przy PK, mozliwy schema drift, hb_id={hbId}) - {(rbMulti ? "BP cofniety, NIE ponawiaj bez diagnozy" : "rollback BP padl, ORPHAN - usun recznie")}.");
+            }
 
+            // rows == 0: linia powiazana LUB status zmieniony (operator w module Bankowosc / wyscig) miedzy naszym
+            //   odczytem a UPDATE. Guard "IS NULL AND hb_Status IN(0,4)" ochronil przed nadpisaniem cudzego linku.
+            //   Cofamy NASZ swiezy BP. (Replay tym samym kluczem po ORPHANie jest BENIGNY: guard IS NULL gwarantuje
+            //   brak podwojnego LINKU - co najwyzej powstaje 2. NIEpowiazany BP, ktory i tak wymaga recznej kasacji
+            //   jak pierwotny orphan; ZERO podwojnego rozliczenia. Szczegoly w planie sekcja 8/R1.)
+            _logger.LogWarning("Book: hb_id={HbId} raw UPDATE @@ROWCOUNT=0 (linia juz powiazana/status zmieniony rownolegle) - cofam swoj BP {Op}", hbId, nzfId);
+            bool rbRace = await TryRollbackBp(nzfId, hbId);
             if (!rbRace)
                 throw new BankBookingException(BookError.Orphan,
                     $"Linia zaksiegowana rownolegle; rollback naszego BP {nzfId} padl - ORPHAN (hb_id={hbId}). Usun operacje recznie w module Bankowosc.");
 
+            long? winner;
+            try { winner = await Task.Run(() => ReadHbLink(hbId), CancellationToken.None); }
+            catch (Exception ex)
+            {
+                // BP juz CZYSTO cofniety (stan spojny) - czytelny retryowalny blad zamiast catch-all INTERNAL_ERROR ze stackiem.
+                throw new BankBookingException(BookError.Internal,
+                    $"Wyscig @@ROWCOUNT=0; odczyt zwyciezcy (ReadHbLink) padl po cofnieciu BP (hb_id={hbId}) - mozna ponowic.", ex);
+            }
+
             if (!winner.HasValue)
-                // Anomalia: @@ROWCOUNT=0, ale linia NIE jest powiazana mimo ze odczyt znalazl wiersz (WHERE nie trafil).
+                // Anomalia: @@ROWCOUNT=0, ale linia NIE jest powiazana (WHERE/status nie trafil mimo ze odczyt znalazl wiersz).
                 //   Nasz BP cofniety (stan spojny) - NIE udajemy already_booked; to blad do zbadania, retry bezpieczny.
                 throw new BankBookingException(BookError.Internal,
-                    $"Raw UPDATE @@ROWCOUNT=0, a hb_Transakcja {hbId} nadal niepowiazana (anomalia WHERE) - BP cofniety, mozna ponowic.");
+                    $"Raw UPDATE @@ROWCOUNT=0, a hb_Transakcja {hbId} nadal niepowiazana (anomalia WHERE/status) - BP cofniety, mozna ponowic.");
 
             _logger.LogInformation("Book: hb_id={HbId} zaksiegowana rownolegle -> operacja {Op} (already_booked)", hbId, winner);
             return new BookResultDto(winner, hbId, Linked: true, AlreadyBooked: true,
@@ -996,9 +1016,12 @@ public sealed class RealSferaSession : ISferaSession
         using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
         conn.Open();
         using var cmd = conn.CreateCommand();
+        // Guard w SAMYM UPDATE (nie tylko pre-check): IS NULL (brak linku) + hb_Status IN(0,4) (linia wciaz "do
+        // zaksiegowania"). Eliminuje wyscig "status zmienil sie po odczycie a link nadal NULL". @@ROWCOUNT==0 gdy
+        // ktorykolwiek warunek nie zachodzi -> wolajacy cofa swoj BP i czyta zwyciezce.
         cmd.CommandText =
             "UPDATE hb_Transakcja SET hb_idOperacjiBankowej = @nzf, hb_Status = 1 "
-          + "WHERE hb_IdNaglowekTr = @nag AND hb_IdTransakcji = @hb AND hb_idOperacjiBankowej IS NULL; "
+          + "WHERE hb_IdNaglowekTr = @nag AND hb_IdTransakcji = @hb AND hb_idOperacjiBankowej IS NULL AND hb_Status IN (0,4); "
           + "SELECT @@ROWCOUNT;";
         cmd.CommandTimeout = 30;
         cmd.Parameters.AddWithValue("@nzf", nzfId);

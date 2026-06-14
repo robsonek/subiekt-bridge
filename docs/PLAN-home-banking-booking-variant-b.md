@@ -113,6 +113,12 @@ wymagany, replay-with-verify po `GetBookedOperationIdAsync` (istnieje).
   Laravel — sens wariantu B to brak ręcznego księgowania). **Gdyby** kiedyś trzeba pełnej wzajemnej wykluczalności:
   INSERT/DELETE `ins_blokada(hbId,0,247)` na dedykowanym połączeniu obejmującym sekcję krytyczną (trigger zrobi
   applock/release). Na teraz: `SemaphoreSlim` per hb_id (intra-proces) + guard `IS NULL` (cross-proces) wystarcza.
+  - **Scenariusz „most zapisuje pierwszy, GUI nadpisuje później" (Codex #1):** GUI robi nieguardowany UPDATE, więc
+    teoretycznie mógłby nadpisać nasz link i osierocić nasz BP. **Blokuje to jednak sam GUI:** po naszym UPDATE
+    `hb_Status=1`, a grid „do zaksięgowania" w module Bankowość **wyklucza `hb_Status=1`** (ustalenie z audytu,
+    `vwHB...`/filtr GUI) — operator nie zobaczy zaksięgowanej przez most linii i nie wywoła na niej „Zaksięguj".
+    Plus: u tego klienta księgowanie jest zautomatyzowane (operator nie księguje ręcznie). Ryzyko rezydualne
+    (operator wymusza re-book inną ścieżką) — bardzo niskie, akceptowane do czasu testu §7.
 - **Rachunek walutowy (R7):** trigger `tr_NzFinanse_OpBank` (`nz__Finanse.sql`) **ROLLBACKuje** INSERT operacji
   19/20 gdy `rb_IdWaluty != 'PLN' AND waluta_dok != waluta_rach` (RAISERROR sev 16). To fail-closed (operacja
   nie powstaje, brak orphana), ale krok 3 padnie. **Przed księgowaniem odczytaj `rb_IdWaluty`; jeśli != 'PLN'
@@ -157,6 +163,12 @@ Endpoint i tak musi być przetestowany na Windowsie (COM + write). Plan:
 | R7 | Rachunek walutowy → `tr_NzFinanse_OpBank` rolluje INSERT (fail-closed) | low | tak | odrzucać `rb_IdWaluty != 'PLN'` lub ustawiać `Waluta`+`Kurs` (§5) |
 | R8 | Nazwy/semantyka kolumn `hb_` zmienią się w przyszłej wersji | low | częściowo | walidacja kolumn przy starcie (fail-fast); flaga wyłączająca |
 | R10 | `hb_Status` musi być `=1` (WYGENEROWANA), nie `2` | info | tak | hardcode literal `1` (potwierdzone w obu trace) |
+
+**Replay idempotency po `HB_BOOKING_ORPHAN` (Codex #4) — BENIGN, świadomie nie cache'owane:** orphan (rollback BP padł)
+NIE zapisuje wpisu idempotency, więc replay tym samym kluczem wykona pełny flow. Jest to **bezpieczne**: guard `IS NULL`
+gwarantuje BRAK podwójnego LINKU/rozliczenia — replay co najwyżej domyka księgowanie linii (BP #2 zlinkowany) zostawiając
+pierwotny niepowiązany orphan, który i tak wymagał ręcznej kasacji. Zero korupcji finansowej. (Cache'owanie błędu-orphana
+pominięto — fragile typowo, znikoma korzyść.) `HB_BOOKING_FAILED` jest celowo retryowalny (stan spójny, BP cofnięty).
 
 **Potwierdzone „NIE psuje":** integralność DB (0 złamanych FK/CHECK), saldo rachunku (wyliczane, 0 `UPDATE rb__RachBankowy`),
 `nz__Finanse` po insercie (0 UPDATE), `hb_PowiazanieTransakcji` (0 zapisów — to matching importu, nie link operacji).
