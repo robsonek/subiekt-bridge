@@ -26,6 +26,7 @@ REST API (główne endpointy + escape hatch):
 | `POST /api/v1/receipts` | Wystaw PZ — przyjęcie magazynowe (dropshipping) |
 | `POST /api/v1/transfers` | Wystaw MM — przesunięcie międzymagazynowe (dokument wewnętrzny, nie KSeF) |
 | `GET /api/v1/bank-operations?from&to&direction&unsettled_only` | Lista operacji bankowych (BP/BW) z wyciągu |
+| `GET /api/v1/bank-transactions?direction&unbooked_only&from&to` | Surowy passthrough przelewów z wyciągu (read-only); matching robi konsument |
 | `POST /api/v1/invoices/{id}/settlements` | Rozlicz fakturę (FS/FZ) z przelewem z wyciągu (z `Idempotency-Key`) |
 | `GET /api/v1/invoices/{id}/settlements` | Stan rozliczenia faktury |
 | `DELETE /api/v1/invoices/{id}/settlements/{rozliczenie_id}` | Cofnij rozliczenie |

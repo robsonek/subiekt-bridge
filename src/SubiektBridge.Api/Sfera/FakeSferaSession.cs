@@ -400,6 +400,22 @@ public sealed class FakeSferaSession : ISferaSession
         return Task.FromResult(ops);
     }
 
+    public Task<IReadOnlyList<BankTransactionDto>> QueryBankTransactionsAsync(BankTransactionQueryRequestDto request, CancellationToken ct)
+    {
+        IReadOnlyList<BankTransactionDto> all = new[]
+        {
+            new BankTransactionDto(13109, "2026-06-12", 371.12m, "in", "Google Commerce Limited", "PL61109010140000071219812874", "PRZELEW - payout", null, false, null),
+            new BankTransactionDto(13127, "2026-06-11", 3372.50m, "in", "Jan Szyszka", "PL27114020040000300201355387", "PRZELEW - zaplata", null, false, null),
+            new BankTransactionDto(12001, "2026-06-01", 500.00m, "out", "Dostawca XYZ", "PL11111111111111111111111111", "PRZELEW wychodzacy", null, true, 88001),
+        };
+
+        IEnumerable<BankTransactionDto> q = all;
+        if (request.UnbookedOnly) q = q.Where(t => !t.Booked);
+        if (string.Equals(request.Direction, "in", StringComparison.OrdinalIgnoreCase)) q = q.Where(t => t.Direction == "in");
+        else if (string.Equals(request.Direction, "out", StringComparison.OrdinalIgnoreCase)) q = q.Where(t => t.Direction == "out");
+        return Task.FromResult<IReadOnlyList<BankTransactionDto>>(q.Take(request.Limit > 0 ? request.Limit : 200).ToList());
+    }
+
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     private static int HashString(string value)

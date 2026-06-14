@@ -27,6 +27,7 @@
 | Stan rozliczenia faktury | `GET /api/v1/invoices/{id}/settlements` | — |
 | Cofnij rozliczenie | `DELETE /api/v1/invoices/{id}/settlements/{rozliczenie_id}` | — (idempotentny) |
 | Lista operacji bankowych z wyciągu | `GET /api/v1/bank-operations?from&to&direction&unsettled_only&limit` | — |
+| Surowe przelewy z wyciągu (do dopasowania po Twojej stronie) | `GET /api/v1/bank-transactions?direction&unbooked_only&from&to&limit` | — |
 | Sprawdź towar po EAN | `GET /api/v1/products?ean=` | — |
 | Sprawdź kontrahenta po NIP | `GET /api/v1/contractors?nip=` | — |
 | Lista FS/KFS | `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | — |
@@ -266,6 +267,27 @@ operacji bankowej ani faktury). Idempotentny: powtórny → `404 SETTLEMENT_NOT_
 **`GET /api/v1/bank-operations`** query: `from`/`to` (YYYY-MM-DD), `direction` (`in`=wpłata BP / `out`=wypłata BW),
 `unsettled_only` (true = tylko z niewykorzystanym saldem), `limit` (max 1000). Zwraca `subiekt_id, direction,
 date, amount, remaining, contractor_id, title, number` — `subiekt_id` to `bank_operation_subiekt_id` do POST settlements.
+
+### 3.10 Surowe przelewy z wyciągu — **most wystawia DANE, dopasowanie robisz TY**
+
+Analogicznie do `GET /invoices` (dopasowanie do zamówień): most to **głupi passthrough**, NIE matchuje, NIE
+klasyfikuje, NIE rozpoznaje kontrahenta. Logika „która wpłata do której należności" + tiery pewności + auto vs
+ręcznie = Twoja strona (znasz `subiekt_id` swoich FS z własnego modelu + `remaining` z `GET /invoices/{id}/settlements`).
+
+**`GET /api/v1/bank-transactions`** — surowe przelewy z wyciągu (przed zaksięgowaniem). Query: `direction`
+(`in`=C/wpłata, `out`=D/wypłata), `unbooked_only` (domyślnie true → `hb_idOperacjiBankowej IS NULL`), `from`/`to`,
+`limit`. Zwraca surowe pola: `hb_id, date, amount, direction, contractor_name, contractor_account, title,
+invoice_number, booked, bank_operation_subiekt_id` (= `hb_idOperacjiBankowej`; `null` gdy niezaksięgowana).
+
+Typowy przepływ po Twojej stronie: pobierz `bank-transactions?unbooked_only=true&direction=in`, dopasuj po
+`amount` + `contractor_name`/rachunku do swoich otwartych FS, zdecyduj (auto/ręcznie), zaksięguj
+(`POST /bank-transactions/{hb_id}/book` — **planowane**, patrz niżej), a potem rozlicz `POST /invoices/{id}/settlements`
+przekazując `bank_operation_subiekt_id` zwrócony przez book. Dwuznaczność (np. dwie faktury tej samej kwoty)
+rozstrzygasz po swojej stronie.
+
+> **`POST /api/v1/bank-transactions/{hb_id}/book` — w przygotowaniu.** Zaksięguje przelew na operację bankową
+> (BP) i zwróci `bank_operation_subiekt_id`. Wymaga potwierdzenia metody Sfery (probe COM); do tego czasu
+> księgowanie przelewu z wyciągu robi operator w module Bankowość Subiekta, a most rozlicza już zaksięgowaną operację.
 
 ---
 
