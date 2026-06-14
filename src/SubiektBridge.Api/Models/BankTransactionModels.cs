@@ -38,17 +38,14 @@ public sealed record BankTransactionDto(
 
 public sealed record BookRequestDto(
     // Opcjonalny - Laravel decyduje kogo przypisać; brak = operacja bez danych kontrahenta.
-    [property: JsonPropertyName("contractor_subiekt_id")] long? ContractorSubiektId = null,
-    // Domyślnie false: gdy Sfera nie powiąże BP z linią wyciągu (Branch B), most COFA BP (zero orphanów).
-    // true = zostaw niepowiązany BP do inspekcji (tylko do empirycznego testu probe Branch A/B; cofnij ręcznie).
-    [property: JsonPropertyName("keep_unlinked")] bool KeepUnlinked = false
+    [property: JsonPropertyName("contractor_subiekt_id")] long? ContractorSubiektId = null
 );
 
 public sealed record BookResultDto(
     // nzf_Id utworzonej operacji bankowej (gotowy do POST /invoices/{id}/settlements). null gdy nie powstała.
     [property: JsonPropertyName("bank_operation_subiekt_id")] long? BankOperationSubiektId,
     [property: JsonPropertyName("hb_id")] long HbId,
-    // czy Subiekt powiązał operację z linią wyciągu (hb_idOperacjiBankowej ustawiony) - rozstrzyga Branch A/B.
+    // Wariant B: most sam ustawia link (raw UPDATE hb_Transakcja). linked=true na każdym sukcesie/already_booked.
     [property: JsonPropertyName("linked")] bool Linked,
     [property: JsonPropertyName("already_booked")] bool AlreadyBooked,
     [property: JsonPropertyName("message")] string? Message = null

@@ -419,14 +419,18 @@ public sealed class FakeSferaSession : ISferaSession
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, long> _bookedHb = new();
     internal static void ResetBankBookingForTests() => _bookedHb.Clear();
 
-    public Task<BookResultDto> BookBankTransactionAsync(long hbId, long? contractorSubiektId, bool keepUnlinked, CancellationToken ct)
+    public Task<BookResultDto> BookBankTransactionAsync(long hbId, long? contractorSubiektId, CancellationToken ct)
     {
         if (hbId < 0) throw new BankBookingException(BookError.TransactionNotFound, $"hb_Transakcja {hbId} nie istnieje");
         if (hbId == 77_777) throw new BankBookingException(BookError.NoAccount, "hb_Transakcja bez konta wyciagu (fake)");
-        // Sentinel Branch B: Sfera nie linkuje -> BP cofniety (rollback), linked=false, op=null.
-        if (hbId == 88_888) return Task.FromResult(new BookResultDto(null, hbId, Linked: false, AlreadyBooked: false, "Branch B (fake): Sfera nie linkuje - BP cofniety"));
+        // Sentinel: rachunek walutowy (rb_IdWaluty != 'PLN') -> ForeignAccount (R7), zanim utworzymy BP.
+        if (hbId == 66_666) throw new BankBookingException(BookError.ForeignAccount, "hb_Transakcja na rachunku walutowym (fake)");
+        // Sentinele do testu mapowania błędów 500: Internal (BP cofnięty/nie powstał) i Orphan (rollback padł).
+        if (hbId == 55_555) throw new BankBookingException(BookError.Internal, "COM/raw UPDATE padl, BP cofniety (fake)");
+        if (hbId == 44_444) throw new BankBookingException(BookError.Orphan, "ORPHAN - operacja bez linku, rollback padl (fake)");
 
-        // Fake symuluje Branch A (Subiekt linkuje). Drugie wywolanie tego samego hb_id -> already_booked.
+        // Wariant B: most sam ustawia link (raw UPDATE), wiec sukces zawsze linked=true. Drugie wywolanie
+        // tego samego hb_id (stan) -> already_booked (jak guard ExistingOpId w RealSferaSession).
         if (_bookedHb.TryGetValue(hbId, out var existing))
         {
             return Task.FromResult(new BookResultDto(existing, hbId, Linked: true, AlreadyBooked: true, "Transakcja juz zaksiegowana"));
