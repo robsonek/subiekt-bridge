@@ -93,6 +93,14 @@ public interface ISferaSession : IAsyncDisposable
     Task<IReadOnlyList<BankOperationDto>> QueryBankOperationsAsync(
         BankOperationQueryRequestDto request,
         CancellationToken ct);
+
+    /// <summary>
+    /// Lista SUROWYCH przelewów z wyciągu (hb_Transakcja) - read-only, pula "do zaksięgowania".
+    /// Sfera nie wystawia API do hb_Transakcja, więc most czyta przez read-only SQL.
+    /// </summary>
+    Task<IReadOnlyList<BankTransactionDto>> QueryBankTransactionsAsync(
+        BankTransactionQueryRequestDto request,
+        CancellationToken ct);
 }
 
 public sealed record SferaHealthDto(

@@ -677,6 +677,72 @@ public sealed class RealSferaSession : ISferaSession
         return RunOnStaAsync<IReadOnlyList<BankOperationDto>>(() => QueryBankOperationsCore(request), ct);
     }
 
+    // Bank transactions (hb_Transakcja) - read-only SQL (hb_Transakcja nie jest wystawione przez Sfere).
+    // Lecimy przez SqlConnection (jak QueryAsync), poza STA workerem (czysty SQL, zero COM).
+
+    private string SqlConnStr() => new Microsoft.Data.SqlClient.SqlConnectionStringBuilder
+    {
+        DataSource = _options.Server,
+        InitialCatalog = _options.Database,
+        UserID = _options.DbUser,
+        Password = _options.DbPassword,
+        TrustServerCertificate = true,
+        ConnectTimeout = 10,
+    }.ToString();
+
+    public Task<IReadOnlyList<BankTransactionDto>> QueryBankTransactionsAsync(BankTransactionQueryRequestDto request, CancellationToken ct)
+    {
+        return Task.Run<IReadOnlyList<BankTransactionDto>>(() =>
+        {
+            string? dirChar = string.Equals(request.Direction, "in", StringComparison.OrdinalIgnoreCase) ? "C"
+                            : string.Equals(request.Direction, "out", StringComparison.OrdinalIgnoreCase) ? "D" : null;
+            int limit = Math.Clamp(request.Limit > 0 ? request.Limit : 200, 1, 1000);
+
+            var where = new List<string>();
+            if (request.UnbookedOnly) where.Add("hb_idOperacjiBankowej IS NULL");
+            if (dirChar != null) where.Add("hb_Oznaczenie = @dir");
+            if (IsIsoDate(request.From)) where.Add("hb_DataKsiegowania >= @from");
+            if (IsIsoDate(request.To)) where.Add("hb_DataKsiegowania < DATEADD(day, 1, @to)");
+
+            // Czysty passthrough surowych pol hb_Transakcja - bez rozpoznawania kontrahenta/matchingu (to Laravel).
+            string sql = "SELECT TOP (@limit) hb_IdTransakcji, hb_DataKsiegowania, hb_Kwota, hb_Oznaczenie, "
+                       + "hb_Kontrahent, hb_RachKontrahent, hb_Tytul, hb_NrFaktury, hb_idOperacjiBankowej "
+                       + "FROM hb_Transakcja "
+                       + (where.Count > 0 ? "WHERE " + string.Join(" AND ", where) + " " : "")
+                       + "ORDER BY hb_DataKsiegowania DESC";
+
+            using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.CommandTimeout = 30;
+            cmd.Parameters.AddWithValue("@limit", limit);
+            if (dirChar != null) cmd.Parameters.AddWithValue("@dir", dirChar);
+            if (IsIsoDate(request.From)) cmd.Parameters.AddWithValue("@from", DateTime.ParseExact(request.From!, "yyyy-MM-dd", CultureInfo.InvariantCulture));
+            if (IsIsoDate(request.To)) cmd.Parameters.AddWithValue("@to", DateTime.ParseExact(request.To!, "yyyy-MM-dd", CultureInfo.InvariantCulture));
+
+            var list = new List<BankTransactionDto>();
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                string oz = r["hb_Oznaczenie"]?.ToString() ?? "";
+                list.Add(new BankTransactionDto(
+                    HbId: Convert.ToInt64(r["hb_IdTransakcji"]),
+                    Date: r["hb_DataKsiegowania"] is DateTime d ? d.ToString("yyyy-MM-dd") : null,
+                    Amount: Convert.ToDecimal(r["hb_Kwota"]),
+                    Direction: oz.Equals("C", StringComparison.OrdinalIgnoreCase) ? "in" : "out",
+                    ContractorName: r["hb_Kontrahent"] as string,
+                    ContractorAccount: r["hb_RachKontrahent"] as string,
+                    Title: r["hb_Tytul"] as string,
+                    InvoiceNumber: r["hb_NrFaktury"] == DBNull.Value ? null : r["hb_NrFaktury"].ToString(),
+                    Booked: r["hb_idOperacjiBankowej"] != DBNull.Value,
+                    BankOperationSubiektId: r["hb_idOperacjiBankowej"] != DBNull.Value ? Convert.ToInt64(r["hb_idOperacjiBankowej"]) : null));
+            }
+            return list;
+        }, ct);
+    }
+
+
     private InvoiceResponseDto CreateReceiptCore(ReceiptIssueRequestDto request)
     {
         // PZ - Przyjęcie Zewnętrzne. Dokument magazynowy (zwiększa stan).
