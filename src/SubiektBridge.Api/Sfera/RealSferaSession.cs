@@ -761,7 +761,7 @@ public sealed class RealSferaSession : ISferaSession
         await gate.WaitAsync(ct);
         try
         {
-            // 1. Odczyt transakcji (SQL, poza STA). hb_Transakcja nie jest w Sferze - tylko read.
+            // 1. Odczyt transakcji (SQL, poza STA, ANULOWALNE - brak write). hb_Transakcja nie jest w Sferze.
             var tx = await Task.Run(() => ReadHbTransactionForBooking(hbId), ct);
             if (tx is null) throw new BankBookingException(BookError.TransactionNotFound, $"hb_Transakcja {hbId} nie istnieje");
 
@@ -775,15 +775,34 @@ public sealed class RealSferaSession : ISferaSession
             if (!tx.RachunekId.HasValue)
                 throw new BankBookingException(BookError.NoAccount, $"hb_Transakcja {hbId} nie ma powiazanego konta wyciagu (hb_NaglowekIStopka.hb_IdRachunku) - nie mozna zaksiegowac");
 
-            // 3. Utworz operacje bankowa przez Sfere (STA). Sfera nie ma natywnej metody bookingu HB (brak HB-managera
-            //    w CHM), wiec DodajOperacjeBankowa - i empirycznie sprawdzamy czy Subiekt sam ustawil link (krok 4).
-            _logger.LogInformation("Book: tworze BP hb_id={HbId} kwota={Kwota} oznaczenie={Oz} rb_Id={Rb} kontrahent={Kh}",
-                hbId, tx.Kwota, tx.Oznaczenie, tx.RachunekId, contractorSubiektId);
-            long nzfId = await RunOnStaAsync(() => CreateBankOperationCore(tx, contractorSubiektId), ct);
+            // Guard kierunku: hb_Oznaczenie MUSI byc 'C' lub 'D'. Puste/nieznane -> NIE tworzymy BP po cichu.
+            string oz = (tx.Oznaczenie ?? "").Trim().ToUpperInvariant();
+            if (oz != "C" && oz != "D")
+                throw new BankBookingException(BookError.InvalidDirection, $"hb_Transakcja {hbId} ma nieobslugiwane hb_Oznaczenie='{tx.Oznaczenie}' (oczekiwane C/D) - nie ksieguje");
 
-            // 4. Re-check linku (SQL): czy hb_idOperacjiBankowej == nowy nzf_Id. Rozstrzyga Branch A (true) / B (false).
-            long? linkedOp = await Task.Run(() => ReadHbLink(hbId), ct);
-            bool linked = linkedOp.HasValue && linkedOp.Value == nzfId;
+            // 3+4. SEKCJA KRYTYCZNA (NIEANULOWALNA): od DodajOperacjeBankowa/Zapisz az po verify+rollback uzywamy
+            //      CancellationToken.None. Inaczej timeout/cancel klienta po Zapisz() porzucilby nzfId -> orphan BP.
+            //      Sfera nie ma natywnej metody bookingu HB - po Zapisz sprawdzamy SQL-em czy Subiekt sam ustawil link.
+            _logger.LogInformation("Book: tworze BP hb_id={HbId} kwota={Kwota} oznaczenie={Oz} rb_Id={Rb} kontrahent={Kh}",
+                hbId, tx.Kwota, oz, tx.RachunekId, contractorSubiektId);
+            long nzfId = await RunOnStaAsync(() => CreateBankOperationCore(tx, contractorSubiektId), CancellationToken.None);
+
+            bool linked;
+            try
+            {
+                long? linkedOp = await Task.Run(() => ReadHbLink(hbId), CancellationToken.None);
+                linked = linkedOp.HasValue && linkedOp.Value == nzfId;
+            }
+            catch (Exception ex)
+            {
+                // Verify padl PO utworzeniu BP - NIE zostawiamy orphana bez akcji: rollback (lub glosny log).
+                _logger.LogError(ex, "Book: weryfikacja linku padla po utworzeniu BP {Op} (hb_id={HbId}) - rollback", nzfId, hbId);
+                bool rb = await TryRollbackBp(nzfId, hbId);
+                return new BookResultDto(rb ? null : nzfId, hbId, Linked: false, AlreadyBooked: false,
+                    rb ? "Weryfikacja linku padla po utworzeniu BP - BP cofniety."
+                       : $"Weryfikacja linku padla i rollback BP {nzfId} padl - ORPHAN, usun recznie w GUI Subiekta.");
+            }
+
             if (linked)
             {
                 _logger.LogInformation("Book OK: hb_id={HbId} -> BP {Op} (powiazany)", hbId, nzfId);
@@ -798,16 +817,7 @@ public sealed class RealSferaSession : ISferaSession
                     "Branch B: Sfera nie ustawila hb_idOperacjiBankowej. BP zostawiony (keep_unlinked) - cofnij recznie w GUI Subiekta.");
             }
 
-            bool rolledBack = false;
-            try
-            {
-                await RunOnStaAsync<bool>(() => { DeleteBankOperationCore(nzfId); return true; }, ct);
-                rolledBack = true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Book Branch B: rollback BP {Op} (hb_id={HbId}) NIE powiodl sie - ORPHAN", nzfId, hbId);
-            }
+            bool rolledBack = await TryRollbackBp(nzfId, hbId);
             _logger.LogWarning("Book Branch B: hb_id={HbId} BP {Op} NIEpowiazany - {Stan}", hbId, nzfId, rolledBack ? "cofniety" : "ORPHAN");
             return new BookResultDto(
                 BankOperationSubiektId: rolledBack ? null : nzfId,
@@ -835,6 +845,23 @@ public sealed class RealSferaSession : ISferaSession
             if (op is not null) TryClose(op);
         }
     }
+
+    // Rollback BP (nieanulowalny). Zwraca true gdy cofnieto; false (+log) gdy padl - wtedy orphan do recznego usuniecia.
+    private async Task<bool> TryRollbackBp(long nzfId, long hbId)
+    {
+        try
+        {
+            await RunOnStaAsync<bool>(() => { DeleteBankOperationCore(nzfId); return true; }, CancellationToken.None);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Book: rollback BP {Op} (hb_id={HbId}) padl - ORPHAN", nzfId, hbId);
+            return false;
+        }
+    }
+
+    public Task<long?> GetBookedOperationIdAsync(long hbId, CancellationToken ct) => Task.Run(() => ReadHbLink(hbId), ct);
 
     private long CreateBankOperationCore(HbTxForBooking tx, long? contractorId)
     {

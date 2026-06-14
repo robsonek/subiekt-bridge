@@ -143,4 +143,32 @@ public class BankReconciliationTests
         Assert.Equal(404, status);
         Assert.Equal("BANK_TRANSACTION_NOT_FOUND", ((ErrorResponseDto)value!).Code);
     }
+
+    [Fact]
+    public async Task Book_BranchB_NotLinked_NoOrphan()
+    {
+        var fake = new FakeSferaSession();
+        var r = await fake.BookBankTransactionAsync(88_888, null, keepUnlinked: false, CancellationToken.None);
+        Assert.False(r.Linked);
+        Assert.False(r.AlreadyBooked);
+        Assert.Null(r.BankOperationSubiektId); // BP cofniety - brak orphana
+    }
+
+    [Fact]
+    public async Task Book_NoAccount_Throws()
+    {
+        var fake = new FakeSferaSession();
+        var ex = await Assert.ThrowsAsync<BankBookingException>(() => fake.BookBankTransactionAsync(77_777, null, keepUnlinked: false, CancellationToken.None));
+        Assert.Equal(BookError.NoAccount, ex.Reason);
+    }
+
+    [Fact]
+    public async Task Controller_Book_BranchB_Returns200_NotLinked()
+    {
+        var controller = NewController(new FakeSferaSession());
+        var r = await controller.Book(88_888, new BookRequestDto(), idempotencyKey: "k-branchb", CancellationToken.None);
+        var (status, value) = Unwrap(r.Result);
+        Assert.Equal(200, status); // NIE 201 - klient czyta `linked`
+        Assert.False(Assert.IsType<BookResultDto>(value).Linked);
+    }
 }
