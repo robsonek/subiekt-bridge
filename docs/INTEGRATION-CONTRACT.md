@@ -23,6 +23,10 @@
 | Wystaw korektę (KFS) | `POST /api/v1/invoices/{id}/corrections` | ✅ |
 | Wystaw przyjęcie magazynowe (PZ) | `POST /api/v1/receipts` | ✅ |
 | Wystaw przesunięcie międzymagazynowe (MM) | `POST /api/v1/transfers` | ✅ |
+| Rozlicz fakturę z przelewem z wyciągu (**FS i FZ**, nie korekty) | `POST /api/v1/invoices/{id}/settlements` | ✅ |
+| Stan rozliczenia faktury | `GET /api/v1/invoices/{id}/settlements` | — |
+| Cofnij rozliczenie | `DELETE /api/v1/invoices/{id}/settlements/{rozliczenie_id}` | — (idempotentny) |
+| Lista operacji bankowych z wyciągu | `GET /api/v1/bank-operations?from&to&direction&unsettled_only&limit` | — |
 | Sprawdź towar po EAN | `GET /api/v1/products?ean=` | — |
 | Sprawdź kontrahenta po NIP | `GET /api/v1/contractors?nip=` | — |
 | Lista FS/KFS | `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | — |
@@ -215,6 +219,54 @@ wówczas tylko stan, nie ruszając dokumentu.
 `subiekt_id, number, type, issue_date, contractor_*, *_amount, notes`.
 `GET /api/v1/invoices/{id}/pdf` → strumień `application/pdf` (retro generacja).
 
+### 3.9 Rozliczenia — spinanie faktur z przelewami z wyciągu (**FS i FZ**)
+
+Zakłada, że wyciąg jest **już zaimportowany do Subiekta** (operacje bankowe BP/BW istnieją).
+Most spina istniejącą operację bankową z rozrachunkiem faktury — nie tworzy operacji ani nie zaciąga z banku.
+Obsługiwane: FS (sprzedaż, wpłata BP) i FZ (zakup, wypłata BW). Korekty (KFS/KFZ) → `422 UNSUPPORTED_DOCUMENT_TYPE`.
+
+**`POST /api/v1/invoices/{id}/settlements`** (wymaga `Idempotency-Key`). `{id}` = bridge id **FS lub FZ**.
+```jsonc
+{
+  "bank_operation_subiekt_id": 277,    // nzf_Id operacji bankowej (z GET /bank-operations)
+  "amount": 123.45,                    // PLN; częściowe rozliczenie dozwolone (≤ pozostało)
+  "external_reference": "nowysystem:order:ABC123"  // opcjonalne; tylko składnik Twojego Idempotency-Key (NIE zapisuje się w Subiekcie)
+}
+```
+> Most sam wybiera właściwy rozrachunek dokumentu po **otwartej kwocie** i **kontrahencie operacji bankowej**
+> (FS marketplace ma dwa rozrachunki: wyzerowany na kupującym + otwarty na płatniku/Allegro Pay). Dlatego
+> `bank_operation_subiekt_id` musi wskazywać przelew **tego samego kontrahenta** co otwarty rozrachunek — inaczej
+> `422 BANK_OPERATION_CONTRACTOR_MISMATCH`.
+Response `201`:
+```jsonc
+{
+  "rozliczenie_id": 5012, "document_id": "sub_142877", "document_subiekt_id": 142877,
+  "rozrachunek_subiekt_id": 90011, "bank_operation_subiekt_id": 277,
+  "amount": 123.45, "remaining_after": 0.00, "is_fully_settled": true,
+  "settled_at": "2026-06-14T10:00:00+00:00"
+}
+```
+
+**`GET /api/v1/invoices/{id}/settlements`** → stan:
+```jsonc
+{
+  "document_id": "sub_142877", "document_subiekt_id": 142877, "rozrachunek_subiekt_id": 90011,
+  "original_amount": 123.45, "remaining_amount": 0.00, "is_fully_settled": true,
+  "last_settlement_at": "2026-06-14T10:00:00+00:00",
+  "settlements": [
+    { "rozliczenie_id": 5012, "amount": 123.45, "settled_at": "2026-06-14T10:00:00+00:00",
+      "splata_subiekt_id": 277, "dlug_subiekt_id": 90011, "type": 1 }
+  ]
+}
+```
+
+**`DELETE /api/v1/invoices/{id}/settlements/{rozliczenie_id}`** → `204` (cofa rozliczenie; nie kasuje
+operacji bankowej ani faktury). Idempotentny: powtórny → `404 SETTLEMENT_NOT_FOUND`. Bez `Idempotency-Key`.
+
+**`GET /api/v1/bank-operations`** query: `from`/`to` (YYYY-MM-DD), `direction` (`in`=wpłata BP / `out`=wypłata BW),
+`unsettled_only` (true = tylko z niewykorzystanym saldem), `limit` (max 1000). Zwraca `subiekt_id, direction,
+date, amount, remaining, contractor_id, title, number` — `subiekt_id` to `bank_operation_subiekt_id` do POST settlements.
+
 ---
 
 ## 4. Obsługa odpowiedzi i błędów (kontrakt — zaimplementuj 1:1)
@@ -228,6 +280,9 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
   `external_reference` już istnieje → **auto-recovery**: pobierz `details.existing_subiekt_id` /
   `existing_bridge_id` i podbij swój rekord na „wystawione" (zamiast tworzyć nowy).
   To **nie** jest błąd do retry.
+- **409 `DUPLICATE_SETTLEMENT`** (settlements) → ta operacja bankowa jest już rozliczona z tym
+  rozrachunkiem → **auto-recovery**: pobierz `details.existing_rozliczenie_id` i oznacz płatność jako
+  rozliczoną. To **nie** jest błąd do retry.
 
 | HTTP | `code` | Co robisz |
 |---|---|---|
@@ -240,7 +295,14 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 422 | `UNSUPPORTED_VAT_RATE` | `vat_rate` ≠ 23 na wysyłce/pozycji usługowej (EAN=null) — usługi tylko 23%; pozycje towarowe biorą VAT z kartoteki |
 | 422 | `INVALID_DATE` | `issue_date`/`sale_date`/`source_invoice_date` nie w formacie `YYYY-MM-DD` (lub data niemożliwa kalendarzowo) |
 | 404 | `INVOICE_NOT_FOUND` / `RECEIPT_NOT_FOUND` | zły `{id}` |
-| **409** | **`DUPLICATE_INVOICE` / `DUPLICATE_RECEIPT` / `DUPLICATE_TRANSFER`** | **auto-recovery** (patrz wyżej) |
+| 404 | `SETTLEMENT_NOT_FOUND` | (DELETE) rozliczenie nie istnieje / już cofnięte |
+| 422 | `INVALID_BRIDGE_ID` | `{id}` nie w formacie `sub_<n>` |
+| 422 | `SETTLEMENT_NOT_SUPPORTED` | dokument bez rozrachunku (goły PZ/MM) lub rozrachunek na centrum kart/rat — nie retry |
+| 422 | `UNSUPPORTED_DOCUMENT_TYPE` | settlements obsługują tylko FS/FZ; korekty (KFS/KFZ) i inne typy odrzucane — nie retry |
+| 422 | `ALREADY_SETTLED` | rozrachunek już rozliczony (np. faktura gotówkowa) — nie retry |
+| 422 | `INVALID_AMOUNT` / `AMOUNT_EXCEEDS_REMAINING` | `amount` ≤ 0 lub > pozostało do zapłaty |
+| 422 | `BANK_OPERATION_NOT_FOUND` / `BANK_OPERATION_EXHAUSTED` / `BANK_OPERATION_CONTRACTOR_MISMATCH` | zła/skonsumowana operacja bankowa lub inny kontrahent niż rozrachunek |
+| **409** | **`DUPLICATE_INVOICE` / `DUPLICATE_RECEIPT` / `DUPLICATE_TRANSFER` / `DUPLICATE_SETTLEMENT`** | **auto-recovery** (patrz wyżej) |
 | 501 | `NOT_IMPLEMENTED` | operacja nieobsługiwana — zgłoś, nie retry |
 | 502 | `SUBIEKT_QUERY_FAILED` / `BRIDGE_DEGRADED` | Subiekt nie odpowiada — **retry** |
 | 503 | (health) | sesja Sfery martwa — **retry / circuit-breaker** |
@@ -328,6 +390,18 @@ co psuje raportowanie. Dla KFS, jeśli zależy Ci na konkretnej formie zwrotu, p
 ### 7.5 Magazyn
 `warehouse_subiekt_id` to id magazynu **w Subiekcie** (nie Twój wewnętrzny). Jeśli nie znasz —
 zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Subiekta.
+
+### 7.6 Rozliczenia (settlements)
+- **FS i FZ** obsługiwane (`SuDokument.Typ` 2/1). Korekty (KFS/KFZ) → `422 UNSUPPORTED_DOCUMENT_TYPE`
+  (mają dwa rozrachunki z różnymi kontrahentami — niejednoznaczne).
+- **Tylko płatność odroczona** (przelew/kredyt kupiecki). FS gotówkowa/kartowa/ratalna →
+  `422 ALREADY_SETTLED` (rozrachunek auto-rozliczony) lub `BANK_OPERATION_CONTRACTOR_MISMATCH`
+  (płatność kartą/ratami: rozrachunek na centrum autoryzacji, nie na kontrahencie przelewu).
+- **`Idempotency-Key`**: zbuduj stabilny klucz z `(document_subiekt_id × bank_operation_subiekt_id × amount)`.
+  `external_reference` służy tylko jako jego składnik — **nie zapisuje się w Subiekcie** (rozliczenie nie ma pola uwag).
+- **Jedna operacja bankowa rozlicza dany rozrachunek tylko raz** (powtórka → `409 DUPLICATE_SETTLEMENT`).
+  Zbiorcza wpłata na **różne** faktury (różne rozrachunki, ten sam `bank_operation_subiekt_id`) działa normalnie.
+- Tylko **PLN**. Walutowe rozrachunki → `422 UNSUPPORTED_CURRENCY`.
 
 ---
 
