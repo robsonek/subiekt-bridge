@@ -285,12 +285,11 @@ Typowy przepływ po Twojej stronie: pobierz `bank-transactions?unbooked_only=tru
 a potem rozlicz `POST /invoices/{id}/settlements` przekazując `bank_operation_subiekt_id` (z `bank-transactions`
 po zaksięgowaniu — pole `booked=true`). Dwuznaczność rozstrzygasz po swojej stronie.
 
-### `POST /api/v1/bank-transactions/{hb_id}/book` — księgowanie przelewu (opcjonalne, za flagą)
+### `POST /api/v1/bank-transactions/{hb_id}/book` — księgowanie przelewu
 
 Tworzy operację bankową BP/BW z surowej linii wyciągu i powiązuje ją (`hb_idOperacjiBankowej`), gotową do
-`/settlements`. **Domyślnie WYŁĄCZONE** na serwerze klienta (`Bridge:EnableHbBooking=false`) → `501 HB_BOOKING_NOT_SUPPORTED`
-— wtedy księgowanie robi operator w module Bankowość, a Ty rozliczasz przez `/settlements` (jak wyżej). Po włączeniu flagi
-endpoint działa:
+`/settlements`. **Aktywne domyślnie** (wyłącznik serwerowy `Bridge:EnableHbBooking=false` → `501 HB_BOOKING_NOT_SUPPORTED`,
+wtedy księgowanie robi operator w module Bankowość). Działanie:
 
 - **Nagłówek `Idempotency-Key` wymagany** (jak FS). Body opcjonalne: `{ "contractor_subiekt_id": 142877 }` (kogo
   przypisać do operacji; brak = operacja bez danych kontrahenta). Most NIE dopasowuje — dostaje rozkaz „zaksięguj hb_id".
@@ -331,7 +330,7 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 422 | `INVALID_DATE` | `issue_date`/`sale_date`/`source_invoice_date` nie w formacie `YYYY-MM-DD` (lub data niemożliwa kalendarzowo) |
 | 404 | `INVOICE_NOT_FOUND` / `RECEIPT_NOT_FOUND` | zły `{id}` |
 | 404 | `SETTLEMENT_NOT_FOUND` | (DELETE) rozliczenie nie istnieje / już cofnięte |
-| 501 | `HB_BOOKING_NOT_SUPPORTED` | (book) flaga `EnableHbBooking` wyłączona — księguj w module Bankowość, potem `/settlements` |
+| 501 | `HB_BOOKING_NOT_SUPPORTED` | (book) księgowanie wyłączone serwerowo (`EnableHbBooking=false`) — księguj w module Bankowość, potem `/settlements` |
 | 422 | `UNSUPPORTED_FOREIGN_ACCOUNT` / `UNSUPPORTED_HB_STATUS` | (book) rachunek wyciągu nie-PLN lub linia w nietypowym `hb_Status` — nie retry |
 | 404 | `BANK_TRANSACTION_NOT_FOUND` | (book) zły `hb_id` |
 | 422 | `NO_BANK_ACCOUNT` / `INVALID_DIRECTION` | (book) linia bez konta wyciągu lub `hb_Oznaczenie` ∉ {C,D} — nie retry |

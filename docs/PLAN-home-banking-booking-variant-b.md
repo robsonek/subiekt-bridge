@@ -1,9 +1,10 @@
 # Plan pracy: księgowanie przelewu HB (wariant B — Sfera + raw UPDATE)
 
-> Status: **ZAIMPLEMENTOWANE za flagą** (branch `feat/hb-booking-variant-b`, 46/46 testów, po adwersaryjnym review).
-> `POST /bank-transactions/{hb_id}/book`: `EnableHbBooking=false` (default) → `501 HB_BOOKING_NOT_SUPPORTED`;
-> `=true` → realny flow wariantu B. **Flagę włączyć DOPIERO po zielonym teście odwracalnym na prodzie (§7) —
-> R2/R3 nierozstrzygalne statycznie.** Kontekst pełny: `~/.claude/.../memory/home-banking-booking.md`.
+> Status: **ZAIMPLEMENTOWANE, AKTYWNE domyślnie** (zmergowane do `main` PR #9; po 2 rundach review: agenci + Codex).
+> `POST /bank-transactions/{hb_id}/book` działa od razu po deployu; `EnableHbBooking=false` (serwerowy wyłącznik) → 501.
+> **Wydane BEZ testu §7** (klient bez dostępu do serwera, nikt nie operuje na bridge → świadome ryzyko właściciela 2026-06-14):
+> R2/R3 niezweryfikowane empirycznie. Integralność zapisu chronią mechanizmy w kodzie (guard IS NULL + rollback/orphan→500
+> + guardy), niezależne od flagi. §7 = zalecana walidacja gdyby pojawił się dostęp do serwera. Kontekst: `memory/home-banking-booking`.
 
 ## 1. Cel
 
@@ -99,8 +100,9 @@ wymagany, replay-with-verify po `GetBookedOperationIdAsync` (istnieje).
 
 ## 5. Bezpieczeństwo / mitygacje ryzyka
 
-- **Flaga w configu** `Bridge:EnableHbBooking` (domyślnie `false`). Gdy false → 501-stub (obecny stan).
-  Pozwala wyłączyć bez redeployu kodu, gdyby raw UPDATE zaczął szkodzić.
+- **Flaga w configu** `Bridge:EnableHbBooking` (**domyślnie `true`** — aktywne od razu po deployu; self-update zachowuje
+  appsettings, więc brak klucza = domyślny ON, a klient nie ma dostępu do serwera by ustawiać flagę ręcznie). Serwerowy
+  wyłącznik: `false` + restart → 501-stub. NIE jest mechanizmem integralności (te są w kodzie, niezależne od flagi).
 - **Koordynacja cross-process z operatorem (R6) — ŚWIADOMA DECYZJA: NIE `sp_getapplock`/`ins_blokada`, tylko guard `IS NULL`.**
   Ustalenie z audytu: `ins_blokada` jest **oparte na `sp_getapplock`** — trigger `INSTEAD OF INSERT` robi
   `sp_getapplock @resource='<obid>:<obextra>:<obtype>','exclusive','session',0` (DELETE → `sp_releaseapplock`).
@@ -183,14 +185,14 @@ pominięto — fragile typowo, znikoma korzyść.) `HB_BOOKING_FAILED` jest celo
   raw UPDATE + weryfikację), `CreateBankOperationCore` (jest), `ReadHbTransactionForBooking`/`ReadHbLink` (są).
 - `src/SubiektBridge.Api/Controllers/BankTransactionsController.cs` — odblokuj `Book` (z 501-stub na realny flow;
   przywróć z historii git PR #4/#5, dostosuj: zamiast rollback przy linked=false → raw UPDATE).
-- `src/SubiektBridge.Api/Configuration/BridgeOptions.cs` — `EnableHbBooking` (bool, default false).
+- `src/SubiektBridge.Api/Configuration/BridgeOptions.cs` — `EnableHbBooking` (bool, **default true**; serwerowy wyłącznik).
 - `src/SubiektBridge.Api/Sfera/FakeSferaSession.cs` — przywróć symulację linked=true.
 - `tests/SubiektBridge.Tests/BankReconciliationTests.cs` — testy book happy/idempotent/guards.
 - Docs: `INTEGRATION-CONTRACT.md`, `CLAUDE.md`(+AGENTS), `README.md` — opis `/book` jako działający (z flagą).
 
 ## 10. Checklist wykonawczy
 
-- [x] `EnableHbBooking` w configu (default false) — bramka w kontrolerze (flaga off → 501-stub)
+- [x] `EnableHbBooking` w configu (**default true** — aktywne po deployu; `=false` serwerowo → 501-stub)
 - [x] `BookBankTransactionAsync`: Sfera operacja → raw UPDATE (`LinkHbToOperation`) z guardem `IS NULL` (§3) → `@@ROWCOUNT` (==1 sukces / ==0 already_booked / błąd → rollback)
 - [x] guard `hb_Status IN (0,4)` przed księgowaniem (nie nadpisuj `=2`) → `UNSUPPORTED_HB_STATUS`
 - [x] ~~`sp_getapplock`~~ R6: **świadomie pominięte** — guard `IS NULL` wystarcza (uzasadnienie §5)
@@ -199,7 +201,9 @@ pominięto — fragile typowo, znikoma korzyść.) `HB_BOOKING_FAILED` jest celo
 - [x] schema drift (R8): nazwane kolumny w SELECT/UPDATE faila-fast czytelnym błędem (osobna walidacja przy starcie zbędna)
 - [x] audit log: `LogInformation` przed/po (`hb_id`, `nzfId`), `LogError` na każdą ścieżkę orphan/błędu
 - [x] replay idempotency FAIL-CLOSED (verify-fail → pełny flow, nie cache) + nowe kody błędów (HB_BOOKING_FAILED/ORPHAN)
-- [x] Fake (sentinele 66666/55555/44444) + 12 testów xUnit (46/46 zielone)
+- [x] Fake (sentinele 66666/55555/44444) + testy xUnit (47/47 zielone)
 - [x] docs: plan + `CLAUDE.md`(+AGENTS) + `INTEGRATION-CONTRACT.md`
-- [ ] release (tag) → wdrożenie → **test odwracalny na prodzie (§7) jako BRAMKA** (R2 odwracalność + R3 re-import) → dopiero potem `EnableHbBooking=true`
+- [x] domyślnie aktywne (decyzja właściciela 2026-06-14: brak dostępu do serwera, nikt nie operuje na bridge → bez testu §7)
+- [ ] release (tag `v0.10.0`) → wdrożenie (self-update)
+- [ ] (zalecane, gdy pojawi się dostęp do serwera) test odwracalny §7 — empiryczna walidacja R2/R3 + ewentualnie `book-and-settle`
 - [ ] po potwierdzeniu: ewentualnie `book-and-settle`

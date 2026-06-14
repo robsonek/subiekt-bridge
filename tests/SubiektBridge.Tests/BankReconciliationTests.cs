@@ -139,9 +139,23 @@ public class BankReconciliationTests
     // ---------- POST /bank-transactions/{hb_id}/book - kontroler (HTTP) ----------
 
     [Fact]
-    public async Task Controller_Book_FlagOff_Returns501()
+    public async Task Controller_Book_DefaultOptions_BookingActive()
     {
-        // EnableHbBooking=false (default) -> 501 (bezpieczny stan, raw UPDATE nieosiągalny przez HTTP).
+        // Domyslny config (brak klucza EnableHbBooking) -> ksiegowanie AKTYWNE (nie 501). Flaga zostaje jako
+        // wylacznik (default ON) na wypadek dostepu do serwera; brak dostepu = i tak dziala po deployu.
+        var controller = new BankTransactionsController(
+            new FakeSferaSession(), NewStore(),
+            Options.Create(new BridgeOptions()),
+            NullLogger<BankTransactionsController>.Instance);
+        var r = await controller.Book(13128, new BookRequestDto(), "key-default", CancellationToken.None);
+        var (status, _) = Unwrap(r.Result);
+        Assert.Equal(201, status);
+    }
+
+    [Fact]
+    public async Task Controller_Book_FlagExplicitlyOff_Returns501()
+    {
+        // Jawne EnableHbBooking=false -> 501 (wylacznik dziala dla kogos z dostepem do appsettings).
         var controller = NewController(new FakeSferaSession(), enableBooking: false);
         var r = await controller.Book(13128, new BookRequestDto(), "key-off", CancellationToken.None);
         var (status, value) = Unwrap(r.Result);

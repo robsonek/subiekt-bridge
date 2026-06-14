@@ -27,12 +27,15 @@ public sealed class BridgeOptions
     public bool AllowSelfUpdate { get; init; } = true;
 
     /// <summary>
-    /// Wlacza ksiegowanie home-bankingu (POST /bank-transactions/{hb_id}/book, wariant B: Sfera tworzy
-    /// operacje + most domyka link raw UPDATE hb_Transakcja). Domyslnie FALSE -> endpoint zwraca 501-stub.
-    /// Kill-switch bez redeployu: gdy raw UPDATE zaczalby szkodzic, ustaw false i restart. Wlaczac dopiero
-    /// po zielonym tescie odwracalnym na prodzie (docs/PLAN-home-banking-booking-variant-b.md sekcja 7).
+    /// Ksiegowanie home-bankingu (POST /bank-transactions/{hb_id}/book, wariant B: Sfera tworzy operacje +
+    /// most domyka link raw UPDATE hb_Transakcja). **Domyslnie TRUE** - endpoint aktywny od razu po deployu
+    /// (self-update zachowuje appsettings, wiec brak klucza => domyslny ON; klient nie ma dostepu do serwera,
+    /// nie ma jak ustawic flagi recznie). Pozostaje jako wylacznik: ustaw false + restart, by wrocic do 501-stub.
+    /// Integralnosc danych zapewniaja mechanizmy w kodzie (guard IS NULL + @@ROWCOUNT, rollback/orphan->500,
+    /// guardy PLN/status/kierunek, fail-closed idempotency) - NIEZALEZNE od tej flagi. R2/R3 niezweryfikowane
+    /// empirycznie (brak dostepu do serwera do testu sekcja 7) - swiadome ryzyko wlasciciela.
     /// </summary>
-    public bool EnableHbBooking { get; init; } = false;
+    public bool EnableHbBooking { get; init; } = true;
 }
 
 public sealed class SubiektOptions
