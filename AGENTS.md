@@ -314,8 +314,10 @@ której faktury" + decyzja auto/ręcznie → Laravel (jak dopasowanie `GET /invo
   w Sferze): surowe pola (hb_id, data, kwota, direction, hb_Kontrahent, hb_RachKontrahent, hb_Tytul, hb_NrFaktury,
   booked, bank_operation_subiekt_id=hb_idOperacjiBankowej, rachunek_id/rachunek_numer=konto wyciągu przez
   `hb_NaglowekIStopka` LEFT JOIN po `hb_IdNaglowekTr`). Most NIE rozpoznaje kontrahenta po rachunku, NIE matchuje.
-- **`POST /bank-transactions/{hb_id}/book`** — `FinManager.DodajOperacjeBankowa(19|20, rb_Id)` (na STA) + Data +
-  WartoscPoczatkowa(double) + `ObiektPowiazanyWstaw(1, kh)`/`OperacjaBezDanychKh` + Zapisz, potem SQL re-check
+- **`POST /bank-transactions/{hb_id}/book`** — `FinManager.DodajOperacjeBankowa(19|20, rb_Id)` (na STA): kontrahent
+  (`ObiektPowiazanyWstaw(1,kh)`)/`OperacjaBezDanychKh` PRZED kwotą, kwota przez **`WartoscPoczatkowaWaluta`**
+  (NIE `WartoscPoczatkowa` — to **read-only**, set rzuca; CHM: „aby ustawić wartość początkową użyj WartoscPoczatkowaWaluta"),
+  Data, Zapisz, potem SQL re-check
   `hb_idOperacjiBankowej`. Sfera NIE ma metody bookingu HB (brak HB-managera w CHM; `Importer`=EPP), więc czy BP
   zostanie powiązany rozstrzyga się **empirycznie** — pole `linked` w odpowiedzi:
   - `linked=true` (Branch A) → 201, gotowe do `/settlements`.
