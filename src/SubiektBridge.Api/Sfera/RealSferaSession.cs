@@ -871,24 +871,52 @@ public sealed class RealSferaSession : ISferaSession
         try
         {
             bp = Session.FinManager.DodajOperacjeBankowa(typ, tx.RachunekId!.Value);
-            if (tx.Data.HasValue) SetCom((object)bp, "Data", tx.Data.Value);
-            SetCom((object)bp, "WartoscPoczatkowa", (double)Math.Abs(tx.Kwota));
+            var bpObj = (object)bp;
+
+            // SetCom (reflection InvokeMember) opakowuje bledy COM w TargetInvocationException - rozpakowujemy,
+            // logujemy property + HRESULT i rzucamy czytelny blad (zamiast golego TargetInvocationException).
+            void SetLogged(string prop, object val)
+            {
+                try { SetCom(bpObj, prop, val); }
+                catch (Exception ex)
+                {
+                    var com = ex is System.Reflection.TargetInvocationException tie && tie.InnerException is not null ? tie.InnerException : ex;
+                    int hr = com is COMException ce ? ce.ErrorCode : Marshal.GetHRForException(com);
+                    _logger.LogError(com, "Book CreateBP: SetCom({Prop}={Val}) padl 0x{Hr:X8}", prop, val, hr);
+                    throw new BankBookingException(BookError.Internal, $"Ustawienie {prop}={val} na operacji bankowej padlo: 0x{hr:X8} {com.Message}", ex);
+                }
+            }
+
+            // Kolejnosc jak w przykladzie CHM DodajOperacjeBankowa: kontrahent/brak-danych-kh PRZED kwota.
             if (contractorId.HasValue)
             {
-                bp.ObiektPowiazanyWstaw(1, contractorId.Value); // 1 = gtaDokFinObiektKontrahent
+                try { bp.ObiektPowiazanyWstaw(1, contractorId.Value); } // 1 = gtaDokFinObiektKontrahent
+                catch (Exception ex)
+                {
+                    var com = ex is System.Reflection.TargetInvocationException tie && tie.InnerException is not null ? tie.InnerException : ex;
+                    int hr = com is COMException ce ? ce.ErrorCode : Marshal.GetHRForException(com);
+                    _logger.LogError(com, "Book CreateBP: ObiektPowiazanyWstaw(kontrahent={Kh}) padl 0x{Hr:X8}", contractorId.Value, hr);
+                    throw new BankBookingException(BookError.Internal, $"Powiazanie kontrahenta {contractorId.Value} z operacja bankowa padlo: 0x{hr:X8} {com.Message}", ex);
+                }
             }
             else
             {
-                TrySet((object)bp, "OperacjaBezDanychKh", true);
+                TrySet(bpObj, "OperacjaBezDanychKh", true);
             }
-            if (!string.IsNullOrEmpty(tx.Tytul)) TrySet((object)bp, "Tytulem", tx.Tytul);
+
+            // KWOTA przez WartoscPoczatkowaWaluta (settable). WartoscPoczatkowa jest READ-ONLY ("Aby ustawic wartosc
+            // poczatkowa ... uzyj WartoscPoczatkowaWaluta" - CHM) i jej set rzucal. Dla PLN waluta dokumentu = bazowa.
+            SetLogged("WartoscPoczatkowaWaluta", (double)Math.Abs(tx.Kwota));
+            if (tx.Data.HasValue) SetLogged("Data", tx.Data.Value);
+            if (!string.IsNullOrEmpty(tx.Tytul)) TrySet(bpObj, "Tytulem", tx.Tytul);
+
             bp.Zapisz();
             return ToInt64(bp.Identyfikator);
         }
         catch (COMException cex)
         {
             var inner = Marshal.GetExceptionForHR(cex.ErrorCode);
-            _logger.LogError(cex, "DodajOperacjeBankowa/Zapisz padl 0x{Hr:X8} (rb_Id={Rb})", cex.ErrorCode, tx.RachunekId);
+            _logger.LogError(cex, "Book CreateBP: DodajOperacjeBankowa/Zapisz padl 0x{Hr:X8} (rb_Id={Rb})", cex.ErrorCode, tx.RachunekId);
             throw new BankBookingException(BookError.Internal, $"DodajOperacjeBankowa/Zapisz padl: 0x{cex.ErrorCode:X8} {inner?.Message ?? cex.Message}", cex);
         }
         finally
