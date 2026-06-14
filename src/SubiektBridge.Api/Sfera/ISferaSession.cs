@@ -47,6 +47,15 @@ public interface ISferaSession : IAsyncDisposable
     /// <summary>Pobierz metadata pojedynczej FV po Subiekt ID. Null gdy nie istnieje.</summary>
     Task<InvoiceQueryItemDto?> FindInvoiceByIdAsync(long subiektId, CancellationToken ct);
 
+    /// <summary>
+    /// Lista otwartych naleznosci (rozrachunki sprzedazy nzf_Typ=39 z WartoscBiezaca&gt;0) w oknie kwoty
+    /// - kandydaci do dopasowania z przychodzacym przelewem. Read-only, przez COM (FinManager.OtworzKolekcje
+    /// + atrybuty FinDokument), NIE raw SQL. Most NIE matchuje - zwraca okno, dopasowanie robi klient.
+    /// </summary>
+    Task<IReadOnlyList<OpenReceivableDto>> QueryOpenReceivablesAsync(
+        OpenReceivablesQueryRequestDto request,
+        CancellationToken ct);
+
     /// <summary>Wygeneruj PDF pojedynczej FV (retroaktywnie). Null gdy nie istnieje lub generowanie padło.</summary>
     Task<byte[]?> GetInvoicePdfAsync(long subiektId, CancellationToken ct);
 
