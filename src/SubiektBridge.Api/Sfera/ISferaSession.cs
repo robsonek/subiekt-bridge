@@ -101,6 +101,14 @@ public interface ISferaSession : IAsyncDisposable
     Task<IReadOnlyList<BankTransactionDto>> QueryBankTransactionsAsync(
         BankTransactionQueryRequestDto request,
         CancellationToken ct);
+
+    /// <summary>
+    /// Zaksięguj surowy przelew (hb_Transakcja) na operację bankową BP/BW przez Sferę.
+    /// Zwraca nzf_Id operacji + flagę `linked` (czy Subiekt ustawił hb_idOperacjiBankowej).
+    /// Jeśli transakcja już zaksięgowana → zwraca istniejącą (AlreadyBooked). Most NIE matchuje,
+    /// dostaje rozkaz "zaksięguj hb_id". Rzuca <see cref="BankBookingException"/>.
+    /// </summary>
+    Task<BookResultDto> BookBankTransactionAsync(long hbId, long? contractorSubiektId, bool keepUnlinked, CancellationToken ct);
 }
 
 public sealed record SferaHealthDto(
