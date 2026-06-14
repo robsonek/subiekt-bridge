@@ -77,6 +77,8 @@ public sealed class InvoicesController : ControllerBase
         [FromQuery(Name = "max_amount")] decimal? maxAmount,
         [FromQuery] string? currency,
         [FromQuery(Name = "contractor_id")] long? contractorId,
+        [FromQuery] string? from,
+        [FromQuery] string? to,
         [FromQuery] int limit,
         CancellationToken ct)
     {
@@ -96,6 +98,8 @@ public sealed class InvoicesController : ControllerBase
             MaxAmount: maxAmount,
             Currency: "PLN",
             ContractorId: contractorId,
+            From: from,
+            To: to,
             Limit: limit > 0 ? limit : 50);
 
         try

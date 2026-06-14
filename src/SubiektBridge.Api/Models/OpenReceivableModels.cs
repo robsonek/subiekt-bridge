@@ -21,7 +21,12 @@ public sealed record OpenReceivablesQueryRequestDto(
     [property: JsonPropertyName("currency")] string? Currency = "PLN",
     // Opcjonalne zawezenie do jednego kontrahenta (ObiektPowiazanyId rozrachunku).
     [property: JsonPropertyName("contractor_id")] long? ContractorId = null,
-    // Default 50, hard cap 200 (okno kwoty i tak zaweza; przy duzym zbiorze COM grozil 502/30s).
+    // Okno daty dokumentu (nzf_Data), YYYY-MM-DD. Klient podaje zakres wokol przelewu (FV jest przed wplata) -
+    // zaweza skan po stronie bazy i jest semantycznie poprawne (swiezy przelew -> swieza FV).
+    [property: JsonPropertyName("from")] string? From = null,
+    [property: JsonPropertyName("to")] string? To = null,
+    // Default 50, hard cap 200. Predykaty ida do filtra OtworzKolekcje (server-side), wiec to cap WYNIKU
+    // (najnowsze wg nzf_Data), nie skanu - brak enumeracji calej tabeli (fix perf v0.11.0).
     [property: JsonPropertyName("limit")] int Limit = 50
 );
 
