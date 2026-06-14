@@ -1768,59 +1768,48 @@ public sealed class RealSferaSession : ISferaSession
         return results;
     }
 
-    // Hard cap iteracji - zabezpieczenie przed 502/timeout (flagowane dla /bank-operations przy duzym zbiorze).
-    // nzf_Typ=39 obejmuje WSZYSTKIE naleznosci sprzedazy (rowniez rozliczone, z WartoscBiezaca=0), wiec
-    // sortujemy nzf_Data DESC (najnowsze = najbardziej prawdopodobni kandydaci do biezacego przelewu) i
-    // skanujemy najwyzej tyle wierszy. Wiekszosc wierszy odpada po JEDNYM odczycie (WartoscBiezaca poza oknem),
-    // wiec skan jest tani; cap to backstop, nie norma. Przekroczenie -> log WARNING (NIE cichy cap).
-    private const int OpenReceivablesScanCap = 5000;
-
     /// <summary>
-    /// Otwarte naleznosci (rozrachunki sprzedazy nzf_Typ=39 z otwartym saldem) w oknie kwoty. CZYSTO COM:
-    /// FinManager.OtworzKolekcje (filtr po kolumnie DB nzf_Typ - jak bank-operations, przyklad CHM) +
-    /// atrybuty FinDokument (zweryfikowane w prod): WartoscBiezaca=pozostalo (RO, PLN), Waluta, ObiektPowiazanyId,
-    /// DokumentZrodlowyId=nzf_IdDokumentAuto (id dok. handlowego), NumerPelny=numer dok. zrodlowego.
-    /// Filtr kwoty/waluty CLIENT-SIDE (kolumna pozostalej kwoty nie jest udokumentowana; semantyka WartoscBiezaca
-    /// jest pewna). Most NIE matchuje - zwraca okno; dopasowanie robi klient.
+    /// Otwarte naleznosci (rozrachunki sprzedazy nzf_Typ=39 z otwartym saldem) w oknie kwoty - kandydaci do
+    /// dopasowania z przelewem. Most NIE matchuje - zwraca okno; dopasowanie robi klient.
+    ///
+    /// PERF (fix prod v0.11.0: 35s / timeout &gt;90s -&gt; &lt;kilka s): WSZYSTKIE predykaty (kwota/waluta/kontrahent/data)
+    /// ida do filtra OtworzKolekcje (raw kolumny nz__Finanse, jak /bank-operations), wiec Sfera filtruje po stronie
+    /// BAZY i zwraca MALA kolekcje (dziesiatki) - zamiast enumerowac ~30k rozrachunkow typ-39 i filtrowac w pamieci.
+    /// Kolumny zweryfikowane w zrzucie schematu InsERT 1.88 (Skrypty_SQL/.../dbo.nz__Finanse.sql, MS_Description):
+    ///  - nzf_Wartosc (money) = "Wartosc pozostala do zaplacenia ... przeliczona na zlotowki" (= COM WartoscBiezaca,
+    ///    PLN); dla typ-39 maleje z rozliczeniami (CK_..._WartoscRozrachunku: nzf_Wartosc&lt;=nzf_WartoscPierwotna),
+    ///    wiec nzf_Wartosc&gt;0 = otwarty, a porownania = okno kwoty. Pierwotna to nzf_WartoscPierwotna.
+    ///  - nzf_IdWaluty (char(3), FK sl_Waluta) = waluta; nzf_IdObiektu = kontrahent; nzf_Data = data dokumentu.
+    /// Wartosci wstawiane wprost (decimal/long/ISO-data) - bez ryzyka injekcji (numeryczne / data IsIsoDate-walidowana,
+    /// jak interpolacja w /bank-operations). DTO skladamy z atrybutow COM (te same co wczesniej).
     /// </summary>
     private IReadOnlyList<OpenReceivableDto> QueryOpenReceivablesCore(OpenReceivablesQueryRequestDto request)
     {
-        decimal min = request.MinAmount ?? 0m;
-        decimal max = request.MaxAmount ?? decimal.MaxValue;
         int limit = Math.Clamp(request.Limit > 0 ? request.Limit : 50, 1, 200);
 
+        // Server-side: typ=39 (naleznosc), otwarte (nzf_Wartosc>0), PLN; + okno kwoty / kontrahent / data gdy podane.
+        var conditions = new List<string> { "nzf_Typ = 39", "nzf_Wartosc > 0", "nzf_IdWaluty = 'PLN'" };
+        if (request.MinAmount is { } min) conditions.Add($"nzf_Wartosc >= {min.ToString(CultureInfo.InvariantCulture)}");
+        if (request.MaxAmount is { } max) conditions.Add($"nzf_Wartosc <= {max.ToString(CultureInfo.InvariantCulture)}");
+        if (request.ContractorId is { } kh) conditions.Add($"nzf_IdObiektu = {kh}");
+        if (IsIsoDate(request.From)) conditions.Add($"nzf_Data >= '{request.From}'");
+        if (IsIsoDate(request.To)) conditions.Add($"nzf_Data <= '{request.To}'");
+        string filter = string.Join(" AND ", conditions);
+
         var results = new List<OpenReceivableDto>();
-        int scanned = 0;
-        bool scanCapped = false;
         dynamic? kolekcja = null;
         try
         {
-            // 39 = naleznosc sprzedazy. NIE filtrujemy kwoty/waluty w stringu OtworzKolekcje (kolumna pozostalej
-            // kwoty nie jest udokumentowana) - robimy to client-side na WartoscBiezaca (RO, pewna semantyka).
-            kolekcja = Session.FinManager.OtworzKolekcje("nzf_Typ = 39", "nzf_Data DESC");
+            kolekcja = Session.FinManager.OtworzKolekcje(filter, "nzf_Data DESC");
             foreach (dynamic roz in (System.Collections.IEnumerable)kolekcja)
             {
                 try
                 {
-                    if (scanned >= OpenReceivablesScanCap) { scanCapped = true; break; }
-                    scanned++;
-
-                    // Pozostalo do zaplaty (WartoscBiezaca, PLN). Czytamy NAJPIERW - wiekszosc wierszy odpada tu
-                    // (1 odczyt), wiec skan pozostaje tani mimo szerokiego nzf_Typ=39.
-                    decimal remaining = TryReadDecimal((object)roz, "WartoscBiezaca") ?? 0m;
-                    if (remaining <= 0.005m) continue;            // rozliczony -> nie jest "otwarty"
-                    if (remaining < min || remaining > max) continue;
-
-                    // Tylko PLN. WartoscBiezaca jest ZAWSZE w PLN (CHM); rozrachunek walutowy mialby liczbe PLN
-                    // pod etykieta obcej waluty (mylace) i tak czy siak nie jest rozliczalny przez most (/settlements
-                    // odrzuca nie-PLN). Controller juz odrzucil currency != PLN (422); tu defensywnie pomijamy
-                    // ewentualny wiersz walutowy, by remaining ZAWSZE odpowiadal etykiecie currency="PLN".
+                    // Wartosci juz przefiltrowane po stronie bazy - tu tylko skladamy DTO z atrybutow COM.
+                    decimal remaining = TryReadDecimal((object)roz, "WartoscBiezaca") ?? 0m;  // PLN (= nzf_Wartosc)
                     string cur = (TryReadString((object)roz, "Waluta") ?? "PLN").Trim().ToUpperInvariant();
                     if (cur.Length == 0) cur = "PLN";
-                    if (!string.Equals(cur, "PLN", StringComparison.Ordinal)) continue;
-
                     long? contractorId = TryReadInt64((object)roz, "ObiektPowiazanyId");
-                    if (request.ContractorId.HasValue && contractorId != request.ContractorId.Value) continue;
 
                     // DokumentZrodlowyId = nzf_IdDokumentAuto (id dok. handlowego) - klucz do POST /settlements.
                     // Bez dokumentu nie ma czego rozliczac -> pomijamy (np. rozrachunek reczny bez dok. zrodlowego).
@@ -1850,13 +1839,6 @@ public sealed class RealSferaSession : ISferaSession
         finally
         {
             if (kolekcja is not null) { try { Marshal.ReleaseComObject(kolekcja); } catch { /* cleanup */ } }
-        }
-
-        if (scanCapped)
-        {
-            _logger.LogWarning(
-                "QueryOpenReceivables: scan cap {Cap} osiagniety (znaleziono {Found} PLN w oknie [{Min};{Max}]) - skan idzie nzf_Data DESC, wiec STARE otwarte naleznosci poza najnowszymi (cap) moga byc pominiete; zaw okno/podaj contractor_id",
-                OpenReceivablesScanCap, results.Count, min, max == decimal.MaxValue ? "inf" : max.ToString(CultureInfo.InvariantCulture));
         }
 
         return results;

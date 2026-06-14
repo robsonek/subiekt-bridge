@@ -65,6 +65,18 @@ ls InsERT/pomoc/gta/htm/ | grep -i "DodajFS\|SuDokument_Platnosc"
 grep -rl "MagazynId" InsERT/pomoc/gta/htm/ | head
 ```
 
+**Zrzut schematu SQL** (autorytatywne nazwy/typy kolumn): `InsERT/Skrypty_SQL_1_88_HF3(1)/Tables/dbo.*.sql`
+— jeden plik per tabela, z `MS_Description` (opis kolumn), CHECK/FK/indeksami. **Zanim napiszesz raw SQL lub
+filtr `OtworzKolekcje` na surowych kolumnach — sprawdź tam nazwę i semantykę**, np.:
+
+```bash
+D="InsERT/Skrypty_SQL_1_88_HF3(1)/Tables"
+grep -iE "nzf_(Wartosc|IdWaluty|IdObiektu)" "$D/dbo.nz__Finanse.sql"   # + MS_Description niżej w pliku
+```
+
+Tu rozstrzygnięto m.in.: `nzf_Wartosc`=pozostało (PLN), `nzf_WartoscPierwotna`=pierwotna, `nzf_NumerPelny` to
+REALNA kolumna (≠ `dok_NumerPelny`, który jest computed COM — w `dok__Dokument` numer to kolumna `dok_NrPelny`).
+
 ## Kontrakt API dla klientów
 
 `docs/INTEGRATION-CONTRACT.md` — kompletny przewodnik dla konsumenta API (nowego systemu
@@ -342,13 +354,17 @@ której faktury" + decyzja auto/ręcznie → Laravel (jak dopasowanie `GET /invo
   Mapowania COM `FinDokument` (CHM, od GT 1.13): `DokumentZrodlowyId`=`nzf_IdDokumentAuto` (id dok. handlowego →
   `document_subiekt_id`); `WartoscBiezaca`=pozostało (RO, PLN); `NumerPelny` rozrachunku=numer dok. źródłowego
   (`doc_type`=prefiks; COM `Typ` ≠ `nzf_Typ` od GT 1.17); `ObiektPowiazanyId`+`Kontrahenci.Wczytaj(id).Nazwa`;
-  `Waluta`=symbol sl_Waluta. Filtr `OtworzKolekcje("nzf_Typ = 39")` + okno kwoty CLIENT-SIDE + scan cap (log przy
-  przekroczeniu, sort `nzf_Data DESC`). FZ/wypłaty poza zakresem. **Tylko PLN** (controller odrzuca `currency≠PLN`
-  → 422; `WartoscBiezaca` jest ZAWSZE w PLN, więc wiersz walutowy byłby liczbą PLN pod etykietą obcej waluty —
-  mislabel; i tak nierozliczalny). Świadome ograniczenia (udokumentowane w kontrakcie §3.11): scan `nzf_Data DESC`
-  + cap 5000 może POMINĄĆ stare otwarte należności (zalecane `contractor_id`); `nzf_Typ=39` obejmuje też korekty
-  (`doc_type` np. KFS) nierozliczalne przez `/settlements` — klient filtruje po `doc_type` (NIE filtrujemy w moście:
-  prefiks bywa „FH", świadomie głupi most jak przy `/invoices`).
+  `Waluta`=symbol sl_Waluta. **PERF (fix po prod v0.11.0: 35s / timeout >90s → <kilka s):** WSZYSTKIE predykaty
+  (kwota/waluta/kontrahent/data) idą do **filtra `OtworzKolekcje`** (raw kolumny `nz__Finanse`, jak `/bank-operations`),
+  więc Sfera filtruje po stronie BAZY i zwraca małą kolekcję — NIE enumerujemy ~30k rozrachunków typ-39 w pamięci
+  (to był bug). Filtr: `nzf_Typ=39 AND nzf_Wartosc>0 AND nzf_IdWaluty='PLN'` [+ `nzf_Wartosc>=/<=`, `nzf_IdObiektu=`,
+  `nzf_Data>=/<=`]; sort `nzf_Data DESC`; `limit` cap WYNIKU (najnowsze), nie skanu. Kolumny zweryfikowane w zrzucie
+  schematu (patrz niżej): **`nzf_Wartosc`=pozostało (PLN, = `WartoscBiezaca`; maleje z rozliczeniami, `<=nzf_WartoscPierwotna`)**,
+  `nzf_WartoscPierwotna`=pierwotna, `nzf_NumerPelny`=pełny numer (REALNA kolumna, nie atrybut COM jak `dok_NumerPelny`!),
+  `nzf_IdObiektu`=kontrahent, `nzf_IdWaluty`=waluta. **Tylko PLN** (controller odrzuca `currency≠PLN` → 422; `nzf_Wartosc`
+  jest w PLN, wiersz walutowy byłby mislabel + nierozliczalny). `nzf_Typ=39` obejmuje też korekty (`doc_type` np. KFS)
+  nierozliczalne przez `/settlements` — klient filtruje po `doc_type` (NIE w moście: prefiks bywa „FH", głupi most jak `/invoices`).
+  FZ/wypłaty poza zakresem.
 
 ## Idempotency (3 warstwy)
 

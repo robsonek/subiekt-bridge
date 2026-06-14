@@ -18,8 +18,9 @@ namespace SubiektBridge.Tests;
 public class OpenReceivablesTests
 {
     private static OpenReceivablesQueryRequestDto Req(
-        decimal? min = null, decimal? max = null, string? currency = "PLN", long? contractorId = null, int limit = 50)
-        => new(min, max, currency, contractorId, limit);
+        decimal? min = null, decimal? max = null, string? currency = "PLN", long? contractorId = null,
+        string? from = null, string? to = null, int limit = 50)
+        => new(min, max, currency, contractorId, from, to, limit);
 
     private static IdempotencyStore NewStore()
         => new(new BridgeOptions
@@ -124,6 +125,28 @@ public class OpenReceivablesTests
         Assert.DoesNotContain(r, x => x.DocumentSubiektId == 52001);
     }
 
+    [Fact]
+    public async Task DateFrom_NarrowsToRecent()
+    {
+        var fake = new FakeSferaSession();
+        // from=2026-05-01 -> tylko czerwcowe (53447, 53310); 52001 (kwiecien) i 51900 (marzec) odpadaja.
+        // Klient poda okno daty wokol przelewu - swiezy przelew -> swieza FV, dodatkowo tnie skan.
+        var r = await fake.QueryOpenReceivablesAsync(Req(from: "2026-05-01"), CancellationToken.None);
+
+        Assert.Equal(2, r.Count);
+        Assert.All(r, x => Assert.Contains(x.DocumentSubiektId, new[] { 53447L, 53310L }));
+    }
+
+    [Fact]
+    public async Task EmptyWindow_ReturnsEmpty_NoHang()
+    {
+        var fake = new FakeSferaSession();
+        // Okno bez trafien (min=999990) - przypadek, ktory na prod v0.11.0 robil pelny skan -> timeout >90s.
+        // Po fixie filtr jest server-side: SQL zwraca 0 wierszy -> natychmiast pusta lista (zero enumeracji).
+        var r = await fake.QueryOpenReceivablesAsync(Req(min: 999990m), CancellationToken.None);
+        Assert.Empty(r);
+    }
+
     // ----------------------------- Controller (HTTP) -----------------------------
 
     [Fact]
@@ -131,7 +154,7 @@ public class OpenReceivablesTests
     {
         var controller = NewController(new FakeSferaSession());
         var r = await controller.OpenReceivables(
-            minAmount: null, maxAmount: null, currency: null, contractorId: null, limit: 0, CancellationToken.None);
+            minAmount: null, maxAmount: null, currency: null, contractorId: null, from: null, to: null, limit: 0, CancellationToken.None);
 
         var (status, value) = Unwrap(r.Result);
         Assert.Equal(200, status);
@@ -147,7 +170,7 @@ public class OpenReceivablesTests
         // pod etykieta obcej waluty). Spojnie z UNSUPPORTED_CURRENCY w FS i guardem PLN w /settlements.
         var controller = NewController(new FakeSferaSession());
         var r = await controller.OpenReceivables(
-            minAmount: null, maxAmount: null, currency: "EUR", contractorId: null, limit: 0, CancellationToken.None);
+            minAmount: null, maxAmount: null, currency: "EUR", contractorId: null, from: null, to: null, limit: 0, CancellationToken.None);
 
         var (status, value) = Unwrap(r.Result);
         Assert.Equal(422, status);
@@ -159,11 +182,27 @@ public class OpenReceivablesTests
     {
         var controller = NewController(new FakeSferaSession());
         var r = await controller.OpenReceivables(
-            minAmount: 100m, maxAmount: 200m, currency: "PLN", contractorId: 13292, limit: 0, CancellationToken.None);
+            minAmount: 100m, maxAmount: 200m, currency: "PLN", contractorId: 13292, from: null, to: null, limit: 0, CancellationToken.None);
 
         var (status, value) = Unwrap(r.Result);
         Assert.Equal(200, status);
         var item = Assert.Single(Assert.IsAssignableFrom<IReadOnlyList<OpenReceivableDto>>(value));
         Assert.Equal(52001, item.DocumentSubiektId); // 120 PLN, kontrahent 13292
+    }
+
+    [Fact]
+    public async Task Controller_DateWindow_PassedThrough()
+    {
+        var controller = NewController(new FakeSferaSession());
+        var r = await controller.OpenReceivables(
+            minAmount: null, maxAmount: null, currency: null, contractorId: null,
+            from: "2026-05-01", to: "2026-12-31", limit: 0, CancellationToken.None);
+
+        var (status, value) = Unwrap(r.Result);
+        Assert.Equal(200, status);
+        var list = Assert.IsAssignableFrom<IReadOnlyList<OpenReceivableDto>>(value);
+        // Tylko czerwcowe (53447, 53310); kwiecien/marzec poza oknem daty.
+        Assert.Equal(2, list.Count);
+        Assert.All(list, x => Assert.Contains(x.DocumentSubiektId, new[] { 53447L, 53310L }));
     }
 }

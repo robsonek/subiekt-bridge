@@ -198,31 +198,37 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenReceivablesAsync(OpenReceivablesQueryRequestDto request, CancellationToken ct)
     {
-        // Deterministyczne otwarte naleznosci (rozrachunki sprzedazy z otwartym saldem). Most NIE matchuje -
-        // zwraca okno kwotowe; filtrowanie min/max/contractor/limit lustrem RealSferaSession. TYLKO PLN:
-        // 51900 (EUR) jest tu po to, by potwierdzic ze most go WYKLUCZA (Real: WartoscBiezaca zawsze w PLN,
-        // wiersz walutowy bylby mylacy + nierozliczalny -> controller odrzuca currency!=PLN, Core pomija nie-PLN).
-        // 52001 (ten sam kontrahent 13292 co 53447) sprawdza filtr contractor_id.
-        OpenReceivableDto[] all =
+        // Deterministyczne otwarte naleznosci (rozrachunki sprzedazy z otwartym saldem) + data (nzf_Data) do
+        // testu filtra from/to. Most NIE matchuje - zwraca okno; filtr min/max/contractor/from/to/limit lustrem
+        // RealSferaSession. TYLKO PLN: 51900 (EUR) jest tu po to, by potwierdzic ze most go WYKLUCZA (Real:
+        // nzf_IdWaluty='PLN' w filtrze + controller odrzuca currency!=PLN). 52001 (ten sam kontrahent 13292 co
+        // 53447, starsza data) sprawdza filtr contractor_id ORAZ from/to.
+        (OpenReceivableDto Dto, string Date)[] all =
         {
-            new("sub_53447", 53447, "FS", "PLN", 3372.50m, 13292, "Szyszka Krzysztof", "FS 573/05/2026"),
-            new("sub_53310", 53310, "FS", "PLN", 371.12m, 14001, "Google Commerce Limited", "FS 540/05/2026"),
-            new("sub_52001", 52001, "FS", "PLN", 120.00m, 13292, "Szyszka Krzysztof", "FS 410/04/2026"),
-            new("sub_51900", 51900, "FS", "EUR", 99.00m, 15000, "Mock Foreign GmbH", "FS 300/03/2026"),
+            (new("sub_53447", 53447, "FS", "PLN", 3372.50m, 13292, "Szyszka Krzysztof", "FS 573/05/2026"), "2026-06-12"),
+            (new("sub_53310", 53310, "FS", "PLN", 371.12m, 14001, "Google Commerce Limited", "FS 540/05/2026"), "2026-06-11"),
+            (new("sub_52001", 52001, "FS", "PLN", 120.00m, 13292, "Szyszka Krzysztof", "FS 410/04/2026"), "2026-04-15"),
+            (new("sub_51900", 51900, "FS", "EUR", 99.00m, 15000, "Mock Foreign GmbH", "FS 300/03/2026"), "2026-03-01"),
         };
 
         decimal min = request.MinAmount ?? 0m;
         decimal max = request.MaxAmount ?? decimal.MaxValue;
         int limit = Math.Clamp(request.Limit > 0 ? request.Limit : 50, 1, 200);
 
-        // Tylko PLN (parytet z Real: rozrachunki walutowe pomijane; controller i tak odrzuca currency!=PLN).
-        IEnumerable<OpenReceivableDto> q = all
-            .Where(r => r.Remaining > 0.005m)
-            .Where(r => r.Remaining >= min && r.Remaining <= max)
-            .Where(r => string.Equals(r.Currency, "PLN", StringComparison.OrdinalIgnoreCase));
-        if (request.ContractorId.HasValue) q = q.Where(r => r.ContractorId == request.ContractorId.Value);
+        // Daty ISO (yyyy-MM-dd) porownywalne leksykograficznie = chronologicznie.
+        static bool IsIso(string? d) => !string.IsNullOrWhiteSpace(d)
+            && DateTime.TryParseExact(d, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _);
 
-        return Task.FromResult<IReadOnlyList<OpenReceivableDto>>(q.Take(limit).ToList());
+        // Tylko PLN (parytet z Real: filtr nzf_IdWaluty='PLN'; controller i tak odrzuca currency!=PLN).
+        IEnumerable<(OpenReceivableDto Dto, string Date)> q = all
+            .Where(r => r.Dto.Remaining > 0.005m)
+            .Where(r => r.Dto.Remaining >= min && r.Dto.Remaining <= max)
+            .Where(r => string.Equals(r.Dto.Currency, "PLN", StringComparison.OrdinalIgnoreCase));
+        if (request.ContractorId.HasValue) q = q.Where(r => r.Dto.ContractorId == request.ContractorId.Value);
+        if (IsIso(request.From)) q = q.Where(r => string.CompareOrdinal(r.Date, request.From) >= 0);
+        if (IsIso(request.To)) q = q.Where(r => string.CompareOrdinal(r.Date, request.To) <= 0);
+
+        return Task.FromResult<IReadOnlyList<OpenReceivableDto>>(q.Take(limit).Select(r => r.Dto).ToList());
     }
 
     public Task<byte[]?> GetInvoicePdfAsync(long subiektId, CancellationToken ct)
