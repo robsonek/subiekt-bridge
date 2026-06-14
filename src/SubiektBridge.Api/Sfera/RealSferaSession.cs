@@ -946,6 +946,14 @@ public sealed class RealSferaSession : ISferaSession
             // poczatkowa ... uzyj WartoscPoczatkowaWaluta" - CHM) i jej set rzucal. Dla PLN waluta dokumentu = bazowa.
             SetLogged("WartoscPoczatkowaWaluta", (double)Math.Abs(tx.Kwota));
             if (tx.Data.HasValue) SetLogged("Data", tx.Data.Value);
+
+            // TYTUL: chcemy SUROWY opis przelewu (hb_Tytul) jak operacja reczna w GUI. DodajOperacjeBankowa domyslnie
+            // ustawia GenerujTytulemNaPodstawieRozl=true (mimo nzf_GenerujTytulem DEFAULT 0 w schemacie) - wtedy Subiekt
+            // po rozliczeniu REGENERUJE "Tytulem" z numerow rozrachunkow ("FS 573/05(3372.50)"), nadpisujac nasz surowy
+            // tytul (stad wczesniej Tytulem "nie dzialal"). GUI ma ten checkbox ODZNACZONY. Wylaczamy autogeneracje
+            // (atrybut FinDokument od GT 1.32 -> nzf_GenerujTytulem) PRZED ustawieniem Tytulem. Bezwarunkowo, by byc 1:1
+            // z reczna operacja (idempotentne; przy OperacjaBezDanychKh=true Sfera i tak sama daje false - CHM).
+            TrySet(bpObj, "GenerujTytulemNaPodstawieRozl", false);
             if (!string.IsNullOrEmpty(tx.Tytul)) TrySet(bpObj, "Tytulem", tx.Tytul);
 
             // UZGODNIENIE operacji z wyciagiem (przez Sfere, w tym samym Zapisz - nie raw UPDATE nz__Finanse!).
