@@ -1,8 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging.Abstractions;
-using SubiektBridge.Api.Configuration;
 using SubiektBridge.Api.Controllers;
-using SubiektBridge.Api.Idempotency;
 using SubiektBridge.Api.Models;
 using SubiektBridge.Api.Sfera;
 using Xunit;
@@ -25,12 +23,8 @@ public class BankReconciliationTests
         _ => (-1, null),
     };
 
-    private static IdempotencyStore NewStore() => new(
-        new BridgeOptions { IdempotencyStorePath = Path.Combine(Path.GetTempPath(), $"idem_bt_{Guid.NewGuid():N}.db"), IdempotencyTtlDays = 30 },
-        NullLogger<IdempotencyStore>.Instance);
-
     private static BankTransactionsController NewController(FakeSferaSession fake)
-        => new(fake, NewStore(), NullLogger<BankTransactionsController>.Instance);
+        => new(fake, NullLogger<BankTransactionsController>.Instance);
 
     [Fact]
     public async Task BankTransactions_UnbookedOnly_ExcludesBooked()
@@ -113,35 +107,14 @@ public class BankReconciliationTests
     }
 
     [Fact]
-    public async Task Controller_Book_MissingIdempotencyKey_Returns400()
+    public void Controller_Book_Returns501_NotSupported()
     {
+        // Ksiegowanie HB przez Sfere niemozliwe (potwierdzone) - endpoint to 501-stub.
         var controller = NewController(new FakeSferaSession());
-        var r = await controller.Book(13128, new BookRequestDto(), idempotencyKey: null, CancellationToken.None);
-        var (status, value) = Unwrap(r.Result);
-        Assert.Equal(400, status);
-        Assert.Equal("MISSING_IDEMPOTENCY_KEY", ((ErrorResponseDto)value!).Code);
-    }
-
-    [Fact]
-    public async Task Controller_Book_Success_Returns201()
-    {
-        var controller = NewController(new FakeSferaSession());
-        var r = await controller.Book(13128, new BookRequestDto(), idempotencyKey: "k-book-1", CancellationToken.None);
-        var (status, value) = Unwrap(r.Result);
-        Assert.Equal(201, status);
-        var dto = Assert.IsType<BookResultDto>(value);
-        Assert.True(dto.Linked);
-        Assert.NotNull(dto.BankOperationSubiektId);
-    }
-
-    [Fact]
-    public async Task Controller_Book_NotFound_Returns404()
-    {
-        var controller = NewController(new FakeSferaSession());
-        var r = await controller.Book(-5, new BookRequestDto(), idempotencyKey: "k-book-404", CancellationToken.None);
-        var (status, value) = Unwrap(r.Result);
-        Assert.Equal(404, status);
-        Assert.Equal("BANK_TRANSACTION_NOT_FOUND", ((ErrorResponseDto)value!).Code);
+        var r = controller.Book(13128, new BookRequestDto());
+        var (status, value) = Unwrap(r);
+        Assert.Equal(501, status);
+        Assert.Equal("HB_BOOKING_NOT_SUPPORTED", ((ErrorResponseDto)value!).Code);
     }
 
     [Fact]
@@ -162,13 +135,4 @@ public class BankReconciliationTests
         Assert.Equal(BookError.NoAccount, ex.Reason);
     }
 
-    [Fact]
-    public async Task Controller_Book_BranchB_Returns200_NotLinked()
-    {
-        var controller = NewController(new FakeSferaSession());
-        var r = await controller.Book(88_888, new BookRequestDto(), idempotencyKey: "k-branchb", CancellationToken.None);
-        var (status, value) = Unwrap(r.Result);
-        Assert.Equal(200, status); // NIE 201 - klient czyta `linked`
-        Assert.False(Assert.IsType<BookResultDto>(value).Linked);
-    }
 }

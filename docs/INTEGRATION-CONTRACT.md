@@ -281,21 +281,15 @@ invoice_number, booked, bank_operation_subiekt_id` (= `hb_idOperacjiBankowej`; `
 `rachunek_id` (rb_Id konta wyciągu, na które wpłynął przelew) + `rachunek_numer` (IBAN wyciągu).
 
 Typowy przepływ po Twojej stronie: pobierz `bank-transactions?unbooked_only=true&direction=in`, dopasuj po
-`amount` + `contractor_name`/rachunku do swoich otwartych FS, zdecyduj (auto/ręcznie), zaksięguj
-(`POST /bank-transactions/{hb_id}/book`), a potem rozlicz `POST /invoices/{id}/settlements` przekazując
-`bank_operation_subiekt_id` zwrócony przez book. Dwuznaczność (np. dwie faktury tej samej kwoty) rozstrzygasz po swojej stronie.
+`amount` + `contractor_name`/rachunku do swoich FS, **zaksięguj przelew w module Bankowość Subiekta** (operator),
+a potem rozlicz `POST /invoices/{id}/settlements` przekazując `bank_operation_subiekt_id` (z `bank-transactions`
+po zaksięgowaniu — pole `booked=true`). Dwuznaczność rozstrzygasz po swojej stronie.
 
-**`POST /api/v1/bank-transactions/{hb_id}/book`** (wymaga `Idempotency-Key`). Body opcjonalne:
-`{ "contractor_subiekt_id": <id|null>, "keep_unlinked": false }`. Tworzy operację bankową BP (C/wpłata) lub BW
-(D/wypłata) na koncie wyciągu. Response:
-```jsonc
-{ "bank_operation_subiekt_id": 72946, "hb_id": 13128, "linked": true, "already_booked": false, "message": null }
-```
-- **Sprawdzaj `linked`, NIE sam status HTTP.** `linked=true` → operacja powiązana z wyciągiem, `bank_operation_subiekt_id`
-  gotowy do `/settlements` (201). `already_booked=true` → była już zaksięgowana (200, idempotentne).
-- `linked=false` → Sfera nie powiązała operacji z linią wyciągu; most **cofa** utworzony BP (200, `bank_operation_subiekt_id=null`,
-  `message` wyjaśnia). Wtedy księgowanie zostaje w module Bankowość Subiekta. (`keep_unlinked=true` zostawia BP do inspekcji — tylko do diagnostyki.)
-- Idempotentne: powtórka z tym samym kluczem → ten sam wynik; ponowne `book` już zaksięgowanej → `already_booked`.
+> **`POST /api/v1/bank-transactions/{hb_id}/book` → `501 HB_BOOKING_NOT_SUPPORTED`.** Księgowanie przelewu z wyciągu
+> **nie jest możliwe przez Sferę** (potwierdzone empirycznie: `DodajOperacjeBankowa` tworzy operację samodzielną, a
+> powiązania z linią wyciągu / przypisania do wyciągu Sfera nie ustawia). Księgowanie robi operator w module
+> Bankowość Subiekta; most rozlicza już zaksięgowaną operację przez `/settlements`. Endpoint zostaje w kontrakcie
+> jako jawny 501 (zamiast 404), by sygnalizować granicę.
 
 ---
 
@@ -326,8 +320,7 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 422 | `INVALID_DATE` | `issue_date`/`sale_date`/`source_invoice_date` nie w formacie `YYYY-MM-DD` (lub data niemożliwa kalendarzowo) |
 | 404 | `INVOICE_NOT_FOUND` / `RECEIPT_NOT_FOUND` | zły `{id}` |
 | 404 | `SETTLEMENT_NOT_FOUND` | (DELETE) rozliczenie nie istnieje / już cofnięte |
-| 404 | `BANK_TRANSACTION_NOT_FOUND` | (book) hb_id nie istnieje |
-| 422 | `NO_BANK_ACCOUNT` / `INVALID_DIRECTION` | (book) transakcja bez konta wyciągu / hb_Oznaczenie ≠ C/D |
+| 501 | `HB_BOOKING_NOT_SUPPORTED` | (book) księgowanie HB niedostępne przez Sferę — księguj w module Bankowość, potem `/settlements` |
 | 422 | `INVALID_BRIDGE_ID` | `{id}` nie w formacie `sub_<n>` |
 | 422 | `SETTLEMENT_NOT_SUPPORTED` | dokument bez rozrachunku (goły PZ/MM) lub rozrachunek na centrum kart/rat — nie retry |
 | 422 | `UNSUPPORTED_DOCUMENT_TYPE` | settlements obsługują tylko FS/FZ; korekty (KFS/KFZ) i inne typy odrzucane — nie retry |
