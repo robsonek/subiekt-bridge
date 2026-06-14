@@ -954,7 +954,20 @@ public sealed class RealSferaSession : ISferaSession
             // (atrybut FinDokument od GT 1.32 -> nzf_GenerujTytulem) PRZED ustawieniem Tytulem. Bezwarunkowo, by byc 1:1
             // z reczna operacja (idempotentne; przy OperacjaBezDanychKh=true Sfera i tak sama daje false - CHM).
             TrySet(bpObj, "GenerujTytulemNaPodstawieRozl", false);
-            if (!string.IsNullOrEmpty(tx.Tytul)) TrySet(bpObj, "Tytulem", tx.Tytul);
+            // nzf_Tytulem to TTytulem = varchar(144). hb_Tytul bywa dluzszy (np. hb_id=13128: 180 znakow) -> set
+            // rzucalby "wartosc za dluga", a TrySet polykal wyjatek -> pole zostawalo NULL. Przycinamy do 144 jak GUI.
+            // Glosny, ale NIE-fatalny set (Warning, nie throw): tytul to pole opisowe - nie wywala ksiegowania,
+            // ale ewentualny blad NIE ginie po cichu (lekcja z TrySet).
+            if (!string.IsNullOrEmpty(tx.Tytul))
+            {
+                var tytul = tx.Tytul.Length > 144 ? tx.Tytul[..144] : tx.Tytul;
+                try { SetCom(bpObj, "Tytulem", tytul); }
+                catch (Exception ex)
+                {
+                    var com = ex is System.Reflection.TargetInvocationException tie && tie.InnerException is not null ? tie.InnerException : ex;
+                    _logger.LogWarning(com, "Book CreateBP: ustawienie Tytulem (len={Len}) padlo - operacja bez tytulu", tytul.Length);
+                }
+            }
 
             // UZGODNIENIE operacji z wyciagiem (przez Sfere, w tym samym Zapisz - nie raw UPDATE nz__Finanse!).
             // FinDokument ma 3 settable atrybuty (CHM, od GT 1.13): NrWyciagu->nzf_NumerWyciagu,
