@@ -101,14 +101,6 @@ public interface ISferaSession : IAsyncDisposable
     Task<IReadOnlyList<BankTransactionDto>> QueryBankTransactionsAsync(
         BankTransactionQueryRequestDto request,
         CancellationToken ct);
-
-    /// <summary>
-    /// Lista OTWARTYCH rozrachunków (należności 39 / zobowiązań 40 z niewykorzystaną kwotą) - read-only.
-    /// Druga strona danych do matchingu po stronie Laravela; most NIE dopasowuje sam.
-    /// </summary>
-    Task<IReadOnlyList<OpenReceivableDto>> QueryOpenReceivablesAsync(
-        OpenReceivableQueryRequestDto request,
-        CancellationToken ct);
 }
 
 public sealed record SferaHealthDto(

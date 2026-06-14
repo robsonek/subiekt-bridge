@@ -8,8 +8,9 @@ using Xunit;
 namespace SubiektBridge.Tests;
 
 /// <summary>
-/// Most wystawia DANE (surowe przelewy + otwarte rozrachunki), matching robi Laravel.
-/// Testy przeciw FakeSferaSession + kontrolerom (HTTP). Real (read-only SQL) testowalny tylko na prod DB.
+/// Most = czysty passthrough surowych przelewów (hb_Transakcja). Bez matchingu, bez interpretacji -
+/// dopasowanie i decyzje robi Laravel. Testy przeciw FakeSferaSession + kontrolerowi (HTTP).
+/// Real (read-only SQL) testowalny tylko na prod DB.
 /// </summary>
 public class BankReconciliationTests
 {
@@ -19,8 +20,6 @@ public class BankReconciliationTests
         StatusCodeResult s => (s.StatusCode, null),
         _ => (-1, null),
     };
-
-    // ---------- bank-transactions (surowe przelewy) ----------
 
     [Fact]
     public async Task BankTransactions_UnbookedOnly_ExcludesBooked()
@@ -44,13 +43,23 @@ public class BankReconciliationTests
     }
 
     [Fact]
-    public async Task BankTransactions_ResolvesContractorIdAsData()
+    public async Task BankTransactions_RawPassthrough_NoMatching()
     {
         var fake = new FakeSferaSession();
-        var items = await fake.QueryBankTransactionsAsync(new BankTransactionQueryRequestDto("in"), CancellationToken.None);
-        // 13109 (Google) ma rozpoznany rachunek -> contractor_id; 13127 (Szyszka) nie -> null. To DANA, nie decyzja.
-        Assert.Equal(623, items.Single(t => t.HbId == 13109).ContractorId);
-        Assert.Null(items.Single(t => t.HbId == 13127).ContractorId);
+        var all = await fake.QueryBankTransactionsAsync(new BankTransactionQueryRequestDto(null, UnbookedOnly: false), CancellationToken.None);
+
+        // Niezaksięgowana: bank_operation_subiekt_id == null; zaksięgowana niesie nzf_Id (gotowe do /settlements).
+        var unbooked = all.Single(t => t.HbId == 13127);
+        Assert.False(unbooked.Booked);
+        Assert.Null(unbooked.BankOperationSubiektId);
+
+        var booked = all.Single(t => t.HbId == 12001);
+        Assert.True(booked.Booked);
+        Assert.Equal(88001, booked.BankOperationSubiektId);
+
+        // Surowe pola kontrahenta są przekazywane jak są (most NIE rozpoznaje kontrahenta po rachunku).
+        Assert.Equal("Jan Szyszka", unbooked.ContractorName);
+        Assert.Equal("PL27114020040000300201355387", unbooked.ContractorAccount);
     }
 
     [Fact]
@@ -61,54 +70,5 @@ public class BankReconciliationTests
         var (status, value) = Unwrap(r.Result);
         Assert.Equal(200, status);
         Assert.NotEmpty(Assert.IsAssignableFrom<IReadOnlyList<BankTransactionDto>>(value));
-    }
-
-    // ---------- open-receivables (otwarte rozrachunki) ----------
-
-    [Fact]
-    public async Task OpenReceivables_DirectionIn_OnlyReceivables()
-    {
-        var fake = new FakeSferaSession();
-        var recv = await fake.QueryOpenReceivablesAsync(new OpenReceivableQueryRequestDto("in", null, null), CancellationToken.None);
-        Assert.NotEmpty(recv);
-        Assert.All(recv, o => Assert.Equal("receivable", o.Kind));
-    }
-
-    [Fact]
-    public async Task OpenReceivables_DirectionOut_OnlyLiabilities()
-    {
-        var fake = new FakeSferaSession();
-        var liab = await fake.QueryOpenReceivablesAsync(new OpenReceivableQueryRequestDto("out", null, null), CancellationToken.None);
-        Assert.NotEmpty(liab);
-        Assert.All(liab, o => Assert.Equal("liability", o.Kind));
-    }
-
-    [Fact]
-    public async Task OpenReceivables_AmountFilter_KeepsAmbiguityAsData()
-    {
-        var fake = new FakeSferaSession();
-        // Szyszka: dwie faktury po 3372,50 -> most ZWRACA OBIE (dane); dwuznaczność rozstrzyga Laravel.
-        var matches = await fake.QueryOpenReceivablesAsync(new OpenReceivableQueryRequestDto("in", null, 3372.50m), CancellationToken.None);
-        Assert.Equal(2, matches.Count);
-        Assert.All(matches, o => Assert.Equal(3372.50m, o.Remaining));
-    }
-
-    [Fact]
-    public async Task OpenReceivables_ContractorFilter_Narrows()
-    {
-        var fake = new FakeSferaSession();
-        var forKh = await fake.QueryOpenReceivablesAsync(new OpenReceivableQueryRequestDto(null, ContractorId: 623, null), CancellationToken.None);
-        Assert.NotEmpty(forKh);
-        Assert.All(forKh, o => Assert.Equal(623, o.ContractorId));
-    }
-
-    [Fact]
-    public async Task Controller_OpenReceivables_Returns200()
-    {
-        var controller = new OpenReceivablesController(new FakeSferaSession(), NullLogger<OpenReceivablesController>.Instance);
-        var r = await controller.Query(direction: null, contractorId: null, amount: null, limit: 0, CancellationToken.None);
-        var (status, value) = Unwrap(r.Result);
-        Assert.Equal(200, status);
-        Assert.NotEmpty(Assert.IsAssignableFrom<IReadOnlyList<OpenReceivableDto>>(value));
     }
 }

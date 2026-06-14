@@ -108,8 +108,7 @@ Invoke-RestMethod -Uri "https://localhost:988/api/v1/admin/update" -Method POST 
 | `POST /api/v1/receipts` | Wystaw PZ (dropshipping) |
 | `POST /api/v1/transfers` | Wystaw MM — przesunięcie międzymagazynowe (DodajMM, dokument wewnętrzny, NIE KSeF) |
 | `GET /api/v1/bank-operations?from&to&direction&unsettled_only&limit` | Listing operacji bankowych BP/BW z wyciągu (źródło `bank_operation_subiekt_id`) |
-| `GET /api/v1/bank-transactions?direction&unbooked_only&from&to&limit` | Surowe przelewy z wyciągu (`hb_Transakcja`, read-only) — pula „do zaksięgowania" |
-| `GET /api/v1/open-receivables?direction&contractor_id&amount&limit` | Otwarte rozrachunki (read-only) — druga strona danych do matchingu w Laravelu |
+| `GET /api/v1/bank-transactions?direction&unbooked_only&from&to&limit` | Surowy passthrough `hb_Transakcja` (read-only) — pula „do zaksięgowania" |
 | `POST /api/v1/invoices/{id}/settlements` | Rozlicz rozrachunek FS/FZ z operacją bankową (Idempotency-Key required) — korekty nieobsługiwane |
 | `GET /api/v1/invoices/{id}/settlements` | Stan rozliczenia dokumentu (pozostało + lista rozliczeń) |
 | `DELETE /api/v1/invoices/{id}/settlements/{rozliczenie_id}` | Cofnij rozliczenie (FinRozliczenie.Usun, rozkojarza) |
@@ -306,17 +305,20 @@ Spinanie zaimportowanych z wyciągu operacji bankowych z fakturami (`/invoices/{
 - **Bank-operations: filtruj po kolumnie DB `nzf_Typ`** (19=BP/20=BW) w stringu `OtworzKolekcje`,
   NIE po `FinDokument.Typ` (atrybut COM ≠ DB od v1.17).
 
-### Home banking — most wystawia DANE, matching robi Laravel
+### Home banking — most = GŁUPIE prymitywy, matching robi Laravel
 
-Surowe przelewy z wyciągu są w `hb_Transakcja` (niezaksięgowane: `hb_idOperacjiBankowej IS NULL`).
-- **`GET /bank-transactions`** (read-only SQL — `hb_Transakcja` nie jest w Sferze) + **`GET /open-receivables`**
-  (otwarte rozrachunki) wystawiają obie strony danych. **Most NIE dopasowuje** (tiery, auto vs ręcznie) —
-  to polityka biznesowa konsumenta (Laravel), jak dopasowanie `GET /invoices` do zamówień. `contractor_id`
-  na przelewie to rozpoznanie po rachunku (`rb__RachBankowy.rb_NumerZnormalizowany`) — DANA, nie decyzja.
-- **Księgowanie przelewu (`hb_Transakcja` → BP + `hb_idOperacjiBankowej`) NIE jest wystawione przez Sferę**
-  (brak HB-managera w CHM; `Importer` = pliki EPP; `FinManager.DodajOperacjeBankowa` tworzy SAMODZIELNY BP
-  bez powiązania). Booking zostaje w module Bankowość Subiekta — chyba że probe COM na Windowsie potwierdzi
-  metodę. NIE pisać surowym SQL do `hb_Transakcja`/`nz__Finanse`.
+Most to cienki adapter: surowe prymitywy nad Sferą, ZERO klasyfikacji/matchingu/tierów. „Który przelew do
+której faktury" + decyzja auto/ręcznie → Laravel (jak dopasowanie `GET /invoices` do zamówień).
+- **`GET /bank-transactions`** — czysty passthrough `hb_Transakcja` (read-only SQL, bo `hb_Transakcja` nie jest
+  w Sferze): surowe pola (hb_id, data, kwota, direction, hb_Kontrahent, hb_RachKontrahent, hb_Tytul, hb_NrFaktury,
+  booked, bank_operation_subiekt_id=hb_idOperacjiBankowej). Most NIE rozpoznaje kontrahenta po rachunku, NIE matchuje.
+- **`POST /bank-transactions/{hb_id}/book`** (PLANOWANE, gated probe COM) — zaksięguj transakcję na operację BP +
+  ustaw `hb_idOperacjiBankowej`, zwróć `bank_operation_subiekt_id` (gotowy do `/settlements`). To JEDYNY research:
+  Sfera nie ma udokumentowanego API HB (brak HB-managera w CHM; `Importer`=EPP; `FinManager.DodajOperacjeBankowa`
+  tworzy SAMODZIELNY BP bez powiązania). Fallback: BP + powiązanie, zweryfikowane empirycznie że transakcja znika
+  z „do zaksięgowania". NIE pisać surowym SQL do `hb_Transakcja`/`nz__Finanse`.
+- Rozliczenie już jest (`POST /invoices/{id}/settlements`) — most nie decyduje co z czym, dostaje rozkaz
+  „zaksięguj X" / „rozlicz Y z Z". Otwarte rozrachunki Laravel zna z własnego modelu + `GET /invoices/{id}/settlements`.
 
 ## Idempotency (3 warstwy)
 
