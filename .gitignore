@@ -31,3 +31,6 @@ Thumbs.db
 # - 35 MB referencji nie ma sensu w releaseach
 # - licencja InsERTu nie pokrywa redystrybucji
 InsERT/
+
+# Dokumentacja wewnetrzna - trzymana lokalnie, NIE w public repo.
+docs/
