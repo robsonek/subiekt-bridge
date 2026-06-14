@@ -751,7 +751,7 @@ public sealed class RealSferaSession : ISferaSession
 
     private sealed record HbTxForBooking(
         decimal Kwota, DateTime? Data, string Oznaczenie, string? Tytul, long? ExistingOpId,
-        long? RachunekId, long NaglowekId, int Status, string? Currency);
+        long? RachunekId, long NaglowekId, int Status, string? Currency, string? NumerWyciagu);
 
     // Lock per hb_id - serializuje ksiegowanie tej samej transakcji w obrebie procesu (most jest jednoinstancyjny).
     // Bez tego dwa rownolegle requesty z ROZNYMI Idempotency-Key moglyby oba przejsc guard ExistingOpId i utworzyc 2 BP.
@@ -948,6 +948,40 @@ public sealed class RealSferaSession : ISferaSession
             if (tx.Data.HasValue) SetLogged("Data", tx.Data.Value);
             if (!string.IsNullOrEmpty(tx.Tytul)) TrySet(bpObj, "Tytulem", tx.Tytul);
 
+            // UZGODNIENIE operacji z wyciagiem (przez Sfere, w tym samym Zapisz - nie raw UPDATE nz__Finanse!).
+            // FinDokument ma 3 settable atrybuty (CHM, od GT 1.13): NrWyciagu->nzf_NumerWyciagu,
+            // UzgodnienieData->nzf_DataUzgodnienia, UzgodnienieTyp->nzf_Status (enum: 2=gtaOperBankZgodna).
+            // Bez tego operacja jest "luzna ?" w gridzie (nzf_Status=1 do uzgodnienia) - rozjazd vs reczne GUI.
+            // LAGODNA DEGRADACJA: uzgodnienie to UX/operacyjny gap, NIE integralnosc - blad set NIE wywala
+            // ksiegowania (operacja i tak powstanie + zlinkuje sie), tylko log ostrzezenia (NIE po cichu).
+            // Uzgadniamy TYLKO gdy mamy numer wyciagu z pliku banku (hb_NumerWyciagu) - bez numeru nie ma sie
+            // z czym uzgadniac, wiec zostawiamy "do uzgodnienia" (uczciwie) zamiast falszywie oznaczac "zgodna".
+            string? numerWyciagu = tx.NumerWyciagu?.Trim();
+            if (!string.IsNullOrEmpty(numerWyciagu))
+            {
+                bool TryReconcile(string prop, object val)
+                {
+                    try { SetCom(bpObj, prop, val); return true; }
+                    catch (Exception ex)
+                    {
+                        var com = ex is System.Reflection.TargetInvocationException tie && tie.InnerException is not null ? tie.InnerException : ex;
+                        _logger.LogWarning(com, "Book CreateBP: uzgodnienie {Prop}={Val} padlo hb_NumerWyciagu={Nr}", prop, val, numerWyciagu);
+                        return false;
+                    }
+                }
+                // ALL-OR-NOTHING: oznaczamy "zgodna" (UzgodnienieTyp=2) TYLKO gdy OBA pola danych weszly. Inaczej
+                // powstalby nzf_Status=2 z niekompletnym uzgodnieniem (np. pusty numer/data) = falszywa zgodnosc.
+                // '&' (nie '&&') - oba zawsze probowane, oba ewentualne bledy zalogowane.
+                if (TryReconcile("NrWyciagu", numerWyciagu) & TryReconcile("UzgodnienieData", DateTime.Today))
+                    TryReconcile("UzgodnienieTyp", 2);           // nzf_Status=2 gtaOperBankZgodna (znika "?" z gridu)
+                else
+                    _logger.LogWarning("Book CreateBP: uzgodnienie niekompletne - operacja zostaje NIEuzgodniona (nzf_Status=1)");
+            }
+            else
+            {
+                _logger.LogInformation("Book CreateBP: brak hb_NumerWyciagu - operacja zostaje NIEuzgodniona (nzf_Status=1)");
+            }
+
             bp.Zapisz();
             return ToInt64(bp.Identyfikator);
         }
@@ -969,9 +1003,10 @@ public sealed class RealSferaSession : ISferaSession
         conn.Open();
         using var cmd = conn.CreateCommand();
         // hb_IdNaglowekTr + hb_Status do raw UPDATE (zlozony WHERE jak w profilerze + guard statusu);
-        // rb_IdWaluty (char(3), default 'PLN') do guardu waluty (R7).
+        // rb_IdWaluty (char(3), default 'PLN') do guardu waluty (R7); hb_NumerWyciagu (numer wyciagu z PLIKU
+        // banku, varchar(30) "unikalny w obrebie roku") do uzgodnienia operacji - NIE generujemy, bierzemy z pliku.
         cmd.CommandText = "SELECT t.hb_Kwota, t.hb_DataKsiegowania, t.hb_Oznaczenie, t.hb_Tytul, t.hb_idOperacjiBankowej, "
-                        + "t.hb_IdNaglowekTr, t.hb_Status, n.hb_IdRachunku, rb.rb_IdWaluty "
+                        + "t.hb_IdNaglowekTr, t.hb_Status, n.hb_IdRachunku, n.hb_NumerWyciagu, rb.rb_IdWaluty "
                         + "FROM hb_Transakcja t "
                         + "LEFT JOIN hb_NaglowekIStopka n ON n.hb_IdNaglowek = t.hb_IdNaglowekTr "
                         + "LEFT JOIN rb__RachBankowy rb ON rb.rb_Id = n.hb_IdRachunku "
@@ -989,7 +1024,8 @@ public sealed class RealSferaSession : ISferaSession
             RachunekId: r["hb_IdRachunku"] != DBNull.Value ? Convert.ToInt64(r["hb_IdRachunku"]) : null,
             NaglowekId: Convert.ToInt64(r["hb_IdNaglowekTr"]),
             Status: Convert.ToInt32(r["hb_Status"]),
-            Currency: r["rb_IdWaluty"] == DBNull.Value ? null : r["rb_IdWaluty"].ToString());
+            Currency: r["rb_IdWaluty"] == DBNull.Value ? null : r["rb_IdWaluty"].ToString(),
+            NumerWyciagu: r["hb_NumerWyciagu"] == DBNull.Value ? null : r["hb_NumerWyciagu"].ToString());
     }
 
     private long? ReadHbLink(long hbId)
