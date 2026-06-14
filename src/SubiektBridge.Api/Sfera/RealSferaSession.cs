@@ -699,17 +699,20 @@ public sealed class RealSferaSession : ISferaSession
             int limit = Math.Clamp(request.Limit > 0 ? request.Limit : 200, 1, 1000);
 
             var where = new List<string>();
-            if (request.UnbookedOnly) where.Add("hb_idOperacjiBankowej IS NULL");
-            if (dirChar != null) where.Add("hb_Oznaczenie = @dir");
-            if (IsIsoDate(request.From)) where.Add("hb_DataKsiegowania >= @from");
-            if (IsIsoDate(request.To)) where.Add("hb_DataKsiegowania < DATEADD(day, 1, @to)");
+            if (request.UnbookedOnly) where.Add("t.hb_idOperacjiBankowej IS NULL");
+            if (dirChar != null) where.Add("t.hb_Oznaczenie = @dir");
+            if (IsIsoDate(request.From)) where.Add("t.hb_DataKsiegowania >= @from");
+            if (IsIsoDate(request.To)) where.Add("t.hb_DataKsiegowania < DATEADD(day, 1, @to)");
 
-            // Czysty passthrough surowych pol hb_Transakcja - bez rozpoznawania kontrahenta/matchingu (to Laravel).
-            string sql = "SELECT TOP (@limit) hb_IdTransakcji, hb_DataKsiegowania, hb_Kwota, hb_Oznaczenie, "
-                       + "hb_Kontrahent, hb_RachKontrahent, hb_Tytul, hb_NrFaktury, hb_idOperacjiBankowej "
-                       + "FROM hb_Transakcja "
+            // Czysty passthrough surowych pol hb_Transakcja. rachunek_id/rachunek_numer = konto wyciagu przez
+            // naglowek (LEFT JOIN - by NIE wyciac transakcji bez naglowka, np. recznie wprowadzonej). Surowe dane.
+            string sql = "SELECT TOP (@limit) t.hb_IdTransakcji, t.hb_DataKsiegowania, t.hb_Kwota, t.hb_Oznaczenie, "
+                       + "t.hb_Kontrahent, t.hb_RachKontrahent, t.hb_Tytul, t.hb_NrFaktury, t.hb_idOperacjiBankowej, "
+                       + "n.hb_IdRachunku AS rachunek_id, n.hb_NumerRachunkuWyciagu AS rachunek_numer "
+                       + "FROM hb_Transakcja t "
+                       + "LEFT JOIN hb_NaglowekIStopka n ON n.hb_IdNaglowek = t.hb_IdNaglowekTr "
                        + (where.Count > 0 ? "WHERE " + string.Join(" AND ", where) + " " : "")
-                       + "ORDER BY hb_DataKsiegowania DESC";
+                       + "ORDER BY t.hb_DataKsiegowania DESC";
 
             using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
             conn.Open();
@@ -736,7 +739,9 @@ public sealed class RealSferaSession : ISferaSession
                     Title: r["hb_Tytul"] as string,
                     InvoiceNumber: r["hb_NrFaktury"] == DBNull.Value ? null : r["hb_NrFaktury"].ToString(),
                     Booked: r["hb_idOperacjiBankowej"] != DBNull.Value,
-                    BankOperationSubiektId: r["hb_idOperacjiBankowej"] != DBNull.Value ? Convert.ToInt64(r["hb_idOperacjiBankowej"]) : null));
+                    BankOperationSubiektId: r["hb_idOperacjiBankowej"] != DBNull.Value ? Convert.ToInt64(r["hb_idOperacjiBankowej"]) : null,
+                    RachunekId: r["rachunek_id"] != DBNull.Value ? Convert.ToInt64(r["rachunek_id"]) : null,
+                    RachunekNumer: r["rachunek_numer"] == DBNull.Value ? null : r["rachunek_numer"].ToString()));
             }
             return list;
         }, ct);

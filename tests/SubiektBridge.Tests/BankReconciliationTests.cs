@@ -60,6 +60,10 @@ public class BankReconciliationTests
         // Surowe pola kontrahenta są przekazywane jak są (most NIE rozpoznaje kontrahenta po rachunku).
         Assert.Equal("Jan Szyszka", unbooked.ContractorName);
         Assert.Equal("PL27114020040000300201355387", unbooked.ContractorAccount);
+
+        // rachunek_id/numer = konto wyciągu (do późniejszego /book na właściwym koncie) - surowa dana.
+        Assert.Equal(1, unbooked.RachunekId);
+        Assert.NotNull(unbooked.RachunekNumer);
     }
 
     [Fact]
