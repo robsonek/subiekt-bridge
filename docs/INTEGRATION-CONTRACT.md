@@ -285,11 +285,22 @@ Typowy przepływ po Twojej stronie: pobierz `bank-transactions?unbooked_only=tru
 a potem rozlicz `POST /invoices/{id}/settlements` przekazując `bank_operation_subiekt_id` (z `bank-transactions`
 po zaksięgowaniu — pole `booked=true`). Dwuznaczność rozstrzygasz po swojej stronie.
 
-> **`POST /api/v1/bank-transactions/{hb_id}/book` → `501 HB_BOOKING_NOT_SUPPORTED`.** Księgowanie przelewu z wyciągu
-> **nie jest możliwe przez Sferę** (potwierdzone empirycznie: `DodajOperacjeBankowa` tworzy operację samodzielną, a
-> powiązania z linią wyciągu / przypisania do wyciągu Sfera nie ustawia). Księgowanie robi operator w module
-> Bankowość Subiekta; most rozlicza już zaksięgowaną operację przez `/settlements`. Endpoint zostaje w kontrakcie
-> jako jawny 501 (zamiast 404), by sygnalizować granicę.
+### `POST /api/v1/bank-transactions/{hb_id}/book` — księgowanie przelewu (opcjonalne, za flagą)
+
+Tworzy operację bankową BP/BW z surowej linii wyciągu i powiązuje ją (`hb_idOperacjiBankowej`), gotową do
+`/settlements`. **Domyślnie WYŁĄCZONE** na serwerze klienta (`Bridge:EnableHbBooking=false`) → `501 HB_BOOKING_NOT_SUPPORTED`
+— wtedy księgowanie robi operator w module Bankowość, a Ty rozliczasz przez `/settlements` (jak wyżej). Po włączeniu flagi
+endpoint działa:
+
+- **Nagłówek `Idempotency-Key` wymagany** (jak FS). Body opcjonalne: `{ "contractor_subiekt_id": 142877 }` (kogo
+  przypisać do operacji; brak = operacja bez danych kontrahenta). Most NIE dopasowuje — dostaje rozkaz „zaksięguj hb_id".
+- **201** (nowe): `{ "bank_operation_subiekt_id": 73291, "hb_id": 13128, "linked": true, "already_booked": false }`.
+  **200** gdy już zaksięgowana (`already_booked: true`) — `bank_operation_subiekt_id` gotowe do `/settlements`.
+- Błędy: `404 BANK_TRANSACTION_NOT_FOUND`; `422 NO_BANK_ACCOUNT` / `INVALID_DIRECTION` / `UNSUPPORTED_FOREIGN_ACCOUNT`
+  (rachunek nie-PLN) / `UNSUPPORTED_HB_STATUS`; `500 HB_BOOKING_FAILED` (czyste niepowodzenie — **bezpieczny retry**);
+  `500 HB_BOOKING_ORPHAN` (operacja powstała bez linku, rollback padł — **NIE retry'uj na ślepo**, zgłoś do ręcznego
+  usunięcia operacji w Subiekcie); `501 HB_BOOKING_NOT_SUPPORTED` (flaga wyłączona).
+- Po `201/200` → rozlicz `POST /invoices/{id}/settlements` z `bank_operation_subiekt_id`.
 
 ---
 
@@ -320,7 +331,12 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 422 | `INVALID_DATE` | `issue_date`/`sale_date`/`source_invoice_date` nie w formacie `YYYY-MM-DD` (lub data niemożliwa kalendarzowo) |
 | 404 | `INVOICE_NOT_FOUND` / `RECEIPT_NOT_FOUND` | zły `{id}` |
 | 404 | `SETTLEMENT_NOT_FOUND` | (DELETE) rozliczenie nie istnieje / już cofnięte |
-| 501 | `HB_BOOKING_NOT_SUPPORTED` | (book) księgowanie HB niedostępne przez Sferę — księguj w module Bankowość, potem `/settlements` |
+| 501 | `HB_BOOKING_NOT_SUPPORTED` | (book) flaga `EnableHbBooking` wyłączona — księguj w module Bankowość, potem `/settlements` |
+| 422 | `UNSUPPORTED_FOREIGN_ACCOUNT` / `UNSUPPORTED_HB_STATUS` | (book) rachunek wyciągu nie-PLN lub linia w nietypowym `hb_Status` — nie retry |
+| 404 | `BANK_TRANSACTION_NOT_FOUND` | (book) zły `hb_id` |
+| 422 | `NO_BANK_ACCOUNT` / `INVALID_DIRECTION` | (book) linia bez konta wyciągu lub `hb_Oznaczenie` ∉ {C,D} — nie retry |
+| 500 | `HB_BOOKING_FAILED` | (book) czyste niepowodzenie, operacja cofnięta — **bezpieczny retry** |
+| 500 | `HB_BOOKING_ORPHAN` | (book) operacja powstała bez linku, rollback padł — **NIE retry**, zgłoś do ręcznego usunięcia w Subiekcie |
 | 422 | `INVALID_BRIDGE_ID` | `{id}` nie w formacie `sub_<n>` |
 | 422 | `SETTLEMENT_NOT_SUPPORTED` | dokument bez rozrachunku (goły PZ/MM) lub rozrachunek na centrum kart/rat — nie retry |
 | 422 | `UNSUPPORTED_DOCUMENT_TYPE` | settlements obsługują tylko FS/FZ; korekty (KFS/KFZ) i inne typy odrzucane — nie retry |

@@ -749,19 +749,23 @@ public sealed class RealSferaSession : ISferaSession
 
     // -------------------------- Ksiegowanie przelewu (hb_Transakcja -> operacja bankowa BP/BW) --------------------------
 
-    private sealed record HbTxForBooking(decimal Kwota, DateTime? Data, string Oznaczenie, string? Tytul, long? ExistingOpId, long? RachunekId);
+    private sealed record HbTxForBooking(
+        decimal Kwota, DateTime? Data, string Oznaczenie, string? Tytul, long? ExistingOpId,
+        long? RachunekId, long NaglowekId, int Status, string? Currency);
 
     // Lock per hb_id - serializuje ksiegowanie tej samej transakcji w obrebie procesu (most jest jednoinstancyjny).
     // Bez tego dwa rownolegle requesty z ROZNYMI Idempotency-Key moglyby oba przejsc guard ExistingOpId i utworzyc 2 BP.
     private static readonly ConcurrentDictionary<long, SemaphoreSlim> _bookLocks = new();
 
-    public async Task<BookResultDto> BookBankTransactionAsync(long hbId, long? contractorSubiektId, bool keepUnlinked, CancellationToken ct)
+    public async Task<BookResultDto> BookBankTransactionAsync(long hbId, long? contractorSubiektId, CancellationToken ct)
     {
         var gate = _bookLocks.GetOrAdd(hbId, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(ct);
         try
         {
             // 1. Odczyt transakcji (SQL, poza STA, ANULOWALNE - brak write). hb_Transakcja nie jest w Sferze.
+            //    Schemat hb_ jest nieudokumentowany ale stabilny; gdyby kolumna zmienila nazwe, ten SELECT
+            //    (nazwane kolumny) faila-fast czytelnym bledem zanim cokolwiek zapiszemy.
             var tx = await Task.Run(() => ReadHbTransactionForBooking(hbId), ct);
             if (tx is null) throw new BankBookingException(BookError.TransactionNotFound, $"hb_Transakcja {hbId} nie istnieje");
 
@@ -780,51 +784,65 @@ public sealed class RealSferaSession : ISferaSession
             if (oz != "C" && oz != "D")
                 throw new BankBookingException(BookError.InvalidDirection, $"hb_Transakcja {hbId} ma nieobslugiwane hb_Oznaczenie='{tx.Oznaczenie}' (oczekiwane C/D) - nie ksieguje");
 
-            // 3+4. SEKCJA KRYTYCZNA (NIEANULOWALNA): od DodajOperacjeBankowa/Zapisz az po verify+rollback uzywamy
-            //      CancellationToken.None. Inaczej timeout/cancel klienta po Zapisz() porzucilby nzfId -> orphan BP.
-            //      Sfera nie ma natywnej metody bookingu HB - po Zapisz sprawdzamy SQL-em czy Subiekt sam ustawil link.
+            // Guard waluty (R7): wariant B obsluguje tylko PLN. Dla rachunku walutowego trigger tr_NzFinanse_OpBank
+            // zrollowalby INSERT operacji (RAISERROR) - odrzucamy wczesniej z czytelnym bledem (fail-fast, bez BP).
+            string cur = (tx.Currency ?? "PLN").Trim().ToUpperInvariant();
+            if (cur != "PLN")
+                throw new BankBookingException(BookError.ForeignAccount, $"hb_Transakcja {hbId}: rachunek wyciagu jest walutowy (rb_IdWaluty='{tx.Currency}'). Wariant B obsluguje tylko PLN.");
+
+            // Guard statusu: ksiegujemy tylko NOWA(0)/WSTEPNIESKOJARZONA(4). Inne (2=SKOJARZONA z wyciagiem, 3=POMINIETA)
+            // przy braku linku -> poza zakresem (nie nadpisujemy linii w nietypowym stanie).
+            if (tx.Status != 0 && tx.Status != 4)
+                throw new BankBookingException(BookError.UnsupportedStatus, $"hb_Transakcja {hbId} ma hb_Status={tx.Status} (oczekiwane 0/4) - nie ksieguje (linia w nietypowym stanie).");
+
+            // 3. SEKCJA KRYTYCZNA (NIEANULOWALNA): od DodajOperacjeBankowa/Zapisz az po link+rollback uzywamy
+            //    CancellationToken.None. Inaczej timeout/cancel klienta po Zapisz() porzucilby nzfId -> orphan BP.
             _logger.LogInformation("Book: tworze BP hb_id={HbId} kwota={Kwota} oznaczenie={Oz} rb_Id={Rb} kontrahent={Kh}",
                 hbId, tx.Kwota, oz, tx.RachunekId, contractorSubiektId);
             long nzfId = await RunOnStaAsync(() => CreateBankOperationCore(tx, contractorSubiektId), CancellationToken.None);
 
-            bool linked;
+            // 4. RAW UPDATE - most domyka link transakcji wyciagu -> operacja (Sfera nie wystawia API hb_).
+            //    Atomowy guard IS NULL: @@ROWCOUNT==1 = ustawilismy link; ==0 = ktos juz powiazal (operator GUI/wyscig).
+            int rows;
             try
             {
-                long? linkedOp = await Task.Run(() => ReadHbLink(hbId), CancellationToken.None);
-                linked = linkedOp.HasValue && linkedOp.Value == nzfId;
+                rows = await Task.Run(() => LinkHbToOperation(hbId, tx.NaglowekId, nzfId), CancellationToken.None);
             }
             catch (Exception ex)
             {
-                // Verify padl PO utworzeniu BP - NIE zostawiamy orphana bez akcji: rollback (lub glosny log).
-                _logger.LogError(ex, "Book: weryfikacja linku padla po utworzeniu BP {Op} (hb_id={HbId}) - rollback", nzfId, hbId);
-                bool rb = await TryRollbackBp(nzfId, hbId);
-                return new BookResultDto(rb ? null : nzfId, hbId, Linked: false, AlreadyBooked: false,
-                    rb ? "Weryfikacja linku padla po utworzeniu BP - BP cofniety."
-                       : $"Weryfikacja linku padla i rollback BP {nzfId} padl - ORPHAN, usun recznie w GUI Subiekta.");
+                _logger.LogError(ex, "Book: raw UPDATE hb_Transakcja padl po utworzeniu BP {Op} (hb_id={HbId}) - rollback", nzfId, hbId);
+                if (await TryRollbackBp(nzfId, hbId))
+                    throw new BankBookingException(BookError.Internal,
+                        $"Raw UPDATE hb_Transakcja padl po utworzeniu BP (hb_id={hbId}) - BP cofniety, mozna ponowic.", ex);
+                throw new BankBookingException(BookError.Orphan,
+                    $"Raw UPDATE padl, a rollback BP {nzfId} padl - ORPHAN (operacja bez linku, hb_id={hbId}). Usun operacje recznie w module Bankowosc.", ex);
             }
 
-            if (linked)
+            if (rows == 1)
             {
-                _logger.LogInformation("Book OK: hb_id={HbId} -> BP {Op} (powiazany)", hbId, nzfId);
+                _logger.LogInformation("Book OK: hb_id={HbId} -> BP {Op} (powiazany raw UPDATE)", hbId, nzfId);
                 return new BookResultDto(nzfId, hbId, Linked: true, AlreadyBooked: false, null);
             }
 
-            // Branch B: Sfera NIE ustawila linku. Domyslnie COFAMY BP (zero orphanow). keep_unlinked zostawia do inspekcji.
-            if (keepUnlinked)
-            {
-                _logger.LogWarning("Book Branch B: hb_id={HbId} BP {Op} NIEpowiazany - zostawiony (keep_unlinked)", hbId, nzfId);
-                return new BookResultDto(nzfId, hbId, Linked: false, AlreadyBooked: false,
-                    "Branch B: Sfera nie ustawila hb_idOperacjiBankowej. BP zostawiony (keep_unlinked) - cofnij recznie w GUI Subiekta.");
-            }
+            // rows == 0: linia powiazana miedzy naszym odczytem a UPDATE (operator w module Bankowosc / wyscig).
+            //   Guard IS NULL ochronil przed nadpisaniem cudzego linku. Cofamy NASZ swiezy BP.
+            _logger.LogWarning("Book: hb_id={HbId} raw UPDATE @@ROWCOUNT=0 (linia juz powiazana rownolegle) - cofam swoj BP {Op}", hbId, nzfId);
+            bool rbRace = await TryRollbackBp(nzfId, hbId);
+            long? winner = await Task.Run(() => ReadHbLink(hbId), CancellationToken.None);
 
-            bool rolledBack = await TryRollbackBp(nzfId, hbId);
-            _logger.LogWarning("Book Branch B: hb_id={HbId} BP {Op} NIEpowiazany - {Stan}", hbId, nzfId, rolledBack ? "cofniety" : "ORPHAN");
-            return new BookResultDto(
-                BankOperationSubiektId: rolledBack ? null : nzfId,
-                HbId: hbId, Linked: false, AlreadyBooked: false,
-                Message: rolledBack
-                    ? "Branch B: Sfera nie ksieguje home-bankingu (link NULL) - BP cofniety. Ksiegowanie zostaje w module Bankowosc Subiekta."
-                    : $"Branch B + rollback BP {nzfId} NIE powiodl sie - ORPHAN, usun recznie w GUI Subiekta.");
+            if (!rbRace)
+                throw new BankBookingException(BookError.Orphan,
+                    $"Linia zaksiegowana rownolegle; rollback naszego BP {nzfId} padl - ORPHAN (hb_id={hbId}). Usun operacje recznie w module Bankowosc.");
+
+            if (!winner.HasValue)
+                // Anomalia: @@ROWCOUNT=0, ale linia NIE jest powiazana mimo ze odczyt znalazl wiersz (WHERE nie trafil).
+                //   Nasz BP cofniety (stan spojny) - NIE udajemy already_booked; to blad do zbadania, retry bezpieczny.
+                throw new BankBookingException(BookError.Internal,
+                    $"Raw UPDATE @@ROWCOUNT=0, a hb_Transakcja {hbId} nadal niepowiazana (anomalia WHERE) - BP cofniety, mozna ponowic.");
+
+            _logger.LogInformation("Book: hb_id={HbId} zaksiegowana rownolegle -> operacja {Op} (already_booked)", hbId, winner);
+            return new BookResultDto(winner, hbId, Linked: true, AlreadyBooked: true,
+                "Transakcja zaksiegowana rownolegle (operator/inny request) - zwrocono istniejaca operacje, nasz BP cofniety.");
         }
         finally
         {
@@ -930,8 +948,13 @@ public sealed class RealSferaSession : ISferaSession
         using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
         conn.Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT t.hb_Kwota, t.hb_DataKsiegowania, t.hb_Oznaczenie, t.hb_Tytul, t.hb_idOperacjiBankowej, n.hb_IdRachunku "
-                        + "FROM hb_Transakcja t LEFT JOIN hb_NaglowekIStopka n ON n.hb_IdNaglowek = t.hb_IdNaglowekTr "
+        // hb_IdNaglowekTr + hb_Status do raw UPDATE (zlozony WHERE jak w profilerze + guard statusu);
+        // rb_IdWaluty (char(3), default 'PLN') do guardu waluty (R7).
+        cmd.CommandText = "SELECT t.hb_Kwota, t.hb_DataKsiegowania, t.hb_Oznaczenie, t.hb_Tytul, t.hb_idOperacjiBankowej, "
+                        + "t.hb_IdNaglowekTr, t.hb_Status, n.hb_IdRachunku, rb.rb_IdWaluty "
+                        + "FROM hb_Transakcja t "
+                        + "LEFT JOIN hb_NaglowekIStopka n ON n.hb_IdNaglowek = t.hb_IdNaglowekTr "
+                        + "LEFT JOIN rb__RachBankowy rb ON rb.rb_Id = n.hb_IdRachunku "
                         + "WHERE t.hb_IdTransakcji = @hb";
         cmd.CommandTimeout = 30;
         cmd.Parameters.AddWithValue("@hb", hbId);
@@ -943,7 +966,10 @@ public sealed class RealSferaSession : ISferaSession
             Oznaczenie: r["hb_Oznaczenie"]?.ToString() ?? "C",
             Tytul: r["hb_Tytul"] as string,
             ExistingOpId: r["hb_idOperacjiBankowej"] != DBNull.Value ? Convert.ToInt64(r["hb_idOperacjiBankowej"]) : null,
-            RachunekId: r["hb_IdRachunku"] != DBNull.Value ? Convert.ToInt64(r["hb_IdRachunku"]) : null);
+            RachunekId: r["hb_IdRachunku"] != DBNull.Value ? Convert.ToInt64(r["hb_IdRachunku"]) : null,
+            NaglowekId: Convert.ToInt64(r["hb_IdNaglowekTr"]),
+            Status: Convert.ToInt32(r["hb_Status"]),
+            Currency: r["rb_IdWaluty"] == DBNull.Value ? null : r["rb_IdWaluty"].ToString());
     }
 
     private long? ReadHbLink(long hbId)
@@ -956,6 +982,30 @@ public sealed class RealSferaSession : ISferaSession
         cmd.Parameters.AddWithValue("@hb", hbId);
         var v = cmd.ExecuteScalar();
         return v is null || v == DBNull.Value ? null : Convert.ToInt64(v);
+    }
+
+    // Wariant B: most domyka link transakcji wyciagu -> operacja bankowa raw UPDATE-em (Sfera nie wystawia API hb_).
+    // Odwzorowuje DOKLADNIE UPDATE z profilera GUI "Zaksieguj" (hb_Status=1 LITERAL), PLUS atomowy guard
+    // "AND hb_idOperacjiBankowej IS NULL": @@ROWCOUNT==1 = ustawilismy link; ==0 = linia juz powiazana (operator GUI
+    // lub rownolegly request) - NIE nadpisujemy cudzego linku. Audyt schematu (2026-06-14) potwierdzil: hb_Transakcja
+    // ma 0 triggerow, 0 FK/CHECK na hb_idOperacjiBankowej/hb_Status, zaden artefakt SQL nie pisze tych kolumn -
+    // ten UPDATE niczego nie kaskaduje. NIE ruszamy hb_PowiazanieTransakcji ani ins_blokada (cross-process race
+    // chroni atomowy guard IS NULL: przegrany cofa swoj BP). hb_IdTransakcji to PK, ale zlozony WHERE = jak GUI.
+    private int LinkHbToOperation(long hbId, long naglowekId, long nzfId)
+    {
+        using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText =
+            "UPDATE hb_Transakcja SET hb_idOperacjiBankowej = @nzf, hb_Status = 1 "
+          + "WHERE hb_IdNaglowekTr = @nag AND hb_IdTransakcji = @hb AND hb_idOperacjiBankowej IS NULL; "
+          + "SELECT @@ROWCOUNT;";
+        cmd.CommandTimeout = 30;
+        cmd.Parameters.AddWithValue("@nzf", nzfId);
+        cmd.Parameters.AddWithValue("@nag", naglowekId);
+        cmd.Parameters.AddWithValue("@hb", hbId);
+        var rows = cmd.ExecuteScalar();
+        return rows is null || rows == DBNull.Value ? 0 : Convert.ToInt32(rows);
     }
 
 
