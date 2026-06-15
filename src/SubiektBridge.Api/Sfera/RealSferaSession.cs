@@ -385,9 +385,9 @@ public sealed class RealSferaSession : ISferaSession
     }
 
     /// <summary>
-    /// Mapuje dokument przez statyczny pomocnik (bez session lookup) - dla foreach gdzie
-    /// nie chcemy ryzykowac N+1 obciaznia Sfery na duzych kolekcjach. Aktualnie nie uzywamy,
-    /// ale zostawiamy dla przyszlosci.
+    /// Statyczne pomocniki do odczytu atrybutow COM (bez session lookup) - dla foreach gdzie
+    /// nie chcemy ryzykowac N+1 obciaznia Sfery na duzych kolekcjach. Uzywane m.in. przez
+    /// ResolveContractor (Nazwa/NIP kontrahenta per wiersz open-receivables, N+1 <= limit).
     /// </summary>
     private static string? TryGetString(dynamic obj, string prop)
     {
@@ -1807,6 +1807,9 @@ public sealed class RealSferaSession : ISferaSession
                 {
                     // Wartosci juz przefiltrowane po stronie bazy - tu tylko skladamy DTO z atrybutow COM.
                     decimal remaining = TryReadDecimal((object)roz, "WartoscBiezaca") ?? 0m;  // PLN (= nzf_Wartosc)
+                    // Wartosc pierwotna (WartoscPoczatkowa = nzf_WartoscPierwotna, PLN brutto) - calkowita kwota FV.
+                    // remaining < original => czesciowo juz rozliczona. 0 gdy nie udalo sie odczytac (degraduje lagodnie).
+                    decimal original = TryReadDecimal((object)roz, "WartoscPoczatkowa") ?? 0m;
                     string cur = (TryReadString((object)roz, "Waluta") ?? "PLN").Trim().ToUpperInvariant();
                     if (cur.Length == 0) cur = "PLN";
                     long? contractorId = TryReadInt64((object)roz, "ObiektPowiazanyId");
@@ -1821,6 +1824,11 @@ public sealed class RealSferaSession : ISferaSession
                     string number = TryReadString((object)roz, "NumerPelny") ?? "";
                     string docType = number.Length > 0 ? number.Split(' ', 2)[0] : "";
 
+                    // Data dokumentu (nzf_Data, COM atrybut "Data") -> ISO yyyy-MM-dd. null gdy nieczytelna.
+                    string? date = TryReadDate((object)roz, "Data")?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                    // Nazwa + NIP jednym Wczytaj (NIE dwoma) - N+1 i tak ograniczone do <= limit wierszy.
+                    var (contractorName, contractorNip) = ResolveContractor(contractorId);
+
                     results.Add(new OpenReceivableDto(
                         DocumentId: $"sub_{docId.Value}",
                         DocumentSubiektId: docId.Value,
@@ -1828,8 +1836,11 @@ public sealed class RealSferaSession : ISferaSession
                         Currency: cur,
                         Remaining: remaining,
                         ContractorId: contractorId,
-                        ContractorName: ResolveContractorName(contractorId),
-                        Number: number));
+                        ContractorName: contractorName,
+                        Number: number,
+                        Date: date,
+                        Original: original,
+                        Nip: contractorNip));
 
                     if (results.Count >= limit) break;
                 }
@@ -1845,23 +1856,30 @@ public sealed class RealSferaSession : ISferaSession
     }
 
     /// <summary>
-    /// Nazwa kontrahenta po ObiektPowiazanyId (Kontrahenci.Wczytaj(id).Nazwa). Best-effort jak
-    /// MapDokumentToQueryItem: blad/nie-kontrahent -> null (NIE wywala listingu). Wolane na STA workerze,
-    /// tylko dla wierszy w oknie (<= limit), wiec N+1 jest ograniczone.
+    /// Nazwa + NIP kontrahenta po ObiektPowiazanyId (jeden Kontrahenci.Wczytaj(id) -> Nazwa + NIP).
+    /// Best-effort jak MapDokumentToQueryItem: blad/nie-kontrahent -> (null, null) (NIE wywala listingu).
+    /// Wolane na STA workerze, tylko dla wierszy w oknie (&lt;= limit), wiec N+1 jest ograniczone. NIP null dla
+    /// osob prywatnych (B2C). Jeden odczyt na oba pola - nie dublujemy Wczytaj.
     /// </summary>
-    private string? ResolveContractorName(long? contractorId)
+    private (string? Name, string? Nip) ResolveContractor(long? contractorId)
     {
-        if (!contractorId.HasValue) return null;
+        if (!contractorId.HasValue) return (null, null);
         try
         {
             dynamic kontr = Session.Kontrahenci.Wczytaj(contractorId.Value);
-            try { return TryGetString(kontr, "Nazwa"); }
+            try
+            {
+                // Real Subiekt zwraca dla B2C (osoba prywatna bez NIP) PUSTY string, nie null - normalizujemy
+                // do null, by Real == Fake == kontrakt DTO ("null dla B2C"); klient wykrywa B2C po nip === null.
+                string? nip = TryGetString(kontr, "NIP");
+                return (TryGetString(kontr, "Nazwa"), string.IsNullOrWhiteSpace(nip) ? null : nip);
+            }
             finally { try { kontr.Zamknij(); } catch { /* best-effort */ } }
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "QueryOpenReceivables: Kontrahenci.Wczytaj({Id}) failed", contractorId.Value);
-            return null;
+            return (null, null);
         }
     }
 

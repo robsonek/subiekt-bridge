@@ -46,5 +46,15 @@ public sealed record OpenReceivableDto(
     // Nazwa kontrahenta (Kontrahenci.Wczytaj(ObiektPowiazanyId).Nazwa). null gdy nie udalo sie odczytac.
     [property: JsonPropertyName("contractor_name")] string? ContractorName,
     // Pelny numer dokumentu zrodlowego (NumerPelny rozrachunku), np. "FS 573/05/2026".
-    [property: JsonPropertyName("number")] string Number
+    [property: JsonPropertyName("number")] string Number,
+    // Data dokumentu (nzf_Data, COM atrybut "Data"), YYYY-MM-DD. null gdy nie udalo sie odczytac.
+    // Operator dopasowuje przelew do FV po dacie - swiezy przelew zwykle do swiezej FV.
+    [property: JsonPropertyName("date")] string? Date = null,
+    // Wartosc pierwotna rozrachunku (WartoscPoczatkowa = nzf_WartoscPierwotna, PLN brutto) - calkowita
+    // kwota FV; "remaining" to ile jeszcze zostalo. Operator widzi czy to wplata pelna czy czesciowa.
+    // 0 gdy nie udalo sie odczytac.
+    [property: JsonPropertyName("original")] decimal Original = 0m,
+    // NIP kontrahenta (z tego samego Kontrahenci.Wczytaj co ContractorName). null dla osob prywatnych
+    // (B2C) lub gdy nie udalo sie odczytac. Pomaga rozroznic firmy o podobnych nazwach.
+    [property: JsonPropertyName("nip")] string? Nip = null
 );

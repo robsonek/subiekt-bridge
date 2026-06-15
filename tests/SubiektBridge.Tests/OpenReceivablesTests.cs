@@ -115,6 +115,32 @@ public class OpenReceivablesTests
     }
 
     [Fact]
+    public async Task Dto_Shape_IncludesDateOriginalNip()
+    {
+        // Operator widzi date FV, kwote pierwotna (brutto) i NIP, by dopasowac przelew do kontrahenta.
+        var fake = new FakeSferaSession();
+        var r = await fake.QueryOpenReceivablesAsync(Req(min: 3000m, max: 3500m), CancellationToken.None);
+
+        var item = Assert.Single(r);
+        Assert.Equal("2026-06-12", item.Date);
+        Assert.Equal(3372.50m, item.Original);
+        Assert.Equal("1234563218", item.Nip);
+    }
+
+    [Fact]
+    public async Task Dto_Shape_NullNip_ForB2cContractor()
+    {
+        // Osoba prywatna (B2C) nie ma NIP -> null; kwota pierwotna nadal obecna.
+        var fake = new FakeSferaSession();
+        var r = await fake.QueryOpenReceivablesAsync(Req(min: 365m, max: 380m), CancellationToken.None);
+
+        var item = Assert.Single(r); // 53310
+        Assert.Null(item.Nip);
+        Assert.Equal(382.60m, item.Original);
+        Assert.Equal("2026-06-11", item.Date);
+    }
+
+    [Fact]
     public async Task MinOnly_NoUpperBound()
     {
         var fake = new FakeSferaSession();

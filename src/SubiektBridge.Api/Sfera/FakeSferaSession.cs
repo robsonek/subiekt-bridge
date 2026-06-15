@@ -203,12 +203,15 @@ public sealed class FakeSferaSession : ISferaSession
         // RealSferaSession. TYLKO PLN: 51900 (EUR) jest tu po to, by potwierdzic ze most go WYKLUCZA (Real:
         // nzf_IdWaluty='PLN' w filtrze + controller odrzuca currency!=PLN). 52001 (ten sam kontrahent 13292 co
         // 53447, starsza data) sprawdza filtr contractor_id ORAZ from/to.
-        (OpenReceivableDto Dto, string Date)[] all =
+        // Date/Original/Nip w DTO: data (nzf_Data) do testu filtra from/to ORAZ do prezentacji u klienta;
+        // original (WartoscPoczatkowa, brutto) i nip (Kontrahenci.NIP) - dane decyzyjne operatora. 53310 ma
+        // nip=null (parytet z B2C/osoba prywatna - brak NIP); 51900 (EUR) jest tu by potwierdzic wykluczenie.
+        OpenReceivableDto[] all =
         {
-            (new("sub_53447", 53447, "FS", "PLN", 3372.50m, 13292, "Szyszka Krzysztof", "FS 573/05/2026"), "2026-06-12"),
-            (new("sub_53310", 53310, "FS", "PLN", 371.12m, 14001, "Google Commerce Limited", "FS 540/05/2026"), "2026-06-11"),
-            (new("sub_52001", 52001, "FS", "PLN", 120.00m, 13292, "Szyszka Krzysztof", "FS 410/04/2026"), "2026-04-15"),
-            (new("sub_51900", 51900, "FS", "EUR", 99.00m, 15000, "Mock Foreign GmbH", "FS 300/03/2026"), "2026-03-01"),
+            new("sub_53447", 53447, "FS", "PLN", 3372.50m, 13292, "Szyszka Krzysztof", "FS 573/05/2026", "2026-06-12", 3372.50m, "1234563218"),
+            new("sub_53310", 53310, "FS", "PLN", 371.12m, 14001, "Google Commerce Limited", "FS 540/05/2026", "2026-06-11", 382.60m, null),
+            new("sub_52001", 52001, "FS", "PLN", 120.00m, 13292, "Szyszka Krzysztof", "FS 410/04/2026", "2026-04-15", 120.00m, "1234563218"),
+            new("sub_51900", 51900, "FS", "EUR", 99.00m, 15000, "Mock Foreign GmbH", "FS 300/03/2026", "2026-03-01", 99.00m, "DE123456789"),
         };
 
         decimal min = request.MinAmount ?? 0m;
@@ -220,15 +223,15 @@ public sealed class FakeSferaSession : ISferaSession
             && DateTime.TryParseExact(d, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _);
 
         // Tylko PLN (parytet z Real: filtr nzf_IdWaluty='PLN'; controller i tak odrzuca currency!=PLN).
-        IEnumerable<(OpenReceivableDto Dto, string Date)> q = all
-            .Where(r => r.Dto.Remaining > 0.005m)
-            .Where(r => r.Dto.Remaining >= min && r.Dto.Remaining <= max)
-            .Where(r => string.Equals(r.Dto.Currency, "PLN", StringComparison.OrdinalIgnoreCase));
-        if (request.ContractorId.HasValue) q = q.Where(r => r.Dto.ContractorId == request.ContractorId.Value);
+        IEnumerable<OpenReceivableDto> q = all
+            .Where(r => r.Remaining > 0.005m)
+            .Where(r => r.Remaining >= min && r.Remaining <= max)
+            .Where(r => string.Equals(r.Currency, "PLN", StringComparison.OrdinalIgnoreCase));
+        if (request.ContractorId.HasValue) q = q.Where(r => r.ContractorId == request.ContractorId.Value);
         if (IsIso(request.From)) q = q.Where(r => string.CompareOrdinal(r.Date, request.From) >= 0);
         if (IsIso(request.To)) q = q.Where(r => string.CompareOrdinal(r.Date, request.To) <= 0);
 
-        return Task.FromResult<IReadOnlyList<OpenReceivableDto>>(q.Take(limit).Select(r => r.Dto).ToList());
+        return Task.FromResult<IReadOnlyList<OpenReceivableDto>>(q.Take(limit).ToList());
     }
 
     public Task<byte[]?> GetInvoicePdfAsync(long subiektId, CancellationToken ct)
