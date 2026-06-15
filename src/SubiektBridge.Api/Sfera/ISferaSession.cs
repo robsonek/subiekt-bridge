@@ -56,6 +56,12 @@ public interface ISferaSession : IAsyncDisposable
         OpenReceivablesQueryRequestDto request,
         CancellationToken ct);
 
+    // Otwarte ZOBOWIAZANIA (rozrachunki zakupu nzf_Typ=40, FZ) - kandydaci do dopasowania z WYPLATA.
+    // Lustro QueryOpenReceivablesAsync; ten sam request/DTO (rozni je tylko nzf_Typ po stronie Sfery).
+    Task<IReadOnlyList<OpenReceivableDto>> QueryOpenPayablesAsync(
+        OpenReceivablesQueryRequestDto request,
+        CancellationToken ct);
+
     /// <summary>Wygeneruj PDF pojedynczej FV (retroaktywnie). Null gdy nie istnieje lub generowanie padło.</summary>
     Task<byte[]?> GetInvoicePdfAsync(long subiektId, CancellationToken ct);
 

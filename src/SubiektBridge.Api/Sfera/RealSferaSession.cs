@@ -679,7 +679,12 @@ public sealed class RealSferaSession : ISferaSession
 
     public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenReceivablesAsync(OpenReceivablesQueryRequestDto request, CancellationToken ct)
     {
-        return RunOnStaAsync<IReadOnlyList<OpenReceivableDto>>(() => QueryOpenReceivablesCore(request), ct);
+        return RunOnStaAsync<IReadOnlyList<OpenReceivableDto>>(() => QueryOpenSettlementsCore(39, request), ct);
+    }
+
+    public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenPayablesAsync(OpenReceivablesQueryRequestDto request, CancellationToken ct)
+    {
+        return RunOnStaAsync<IReadOnlyList<OpenReceivableDto>>(() => QueryOpenSettlementsCore(40, request), ct);
     }
 
     // Bank transactions (hb_Transakcja) - read-only SQL (hb_Transakcja nie jest wystawione przez Sfere).
@@ -1783,12 +1788,15 @@ public sealed class RealSferaSession : ISferaSession
     /// Wartosci wstawiane wprost (decimal/long/ISO-data) - bez ryzyka injekcji (numeryczne / data IsIsoDate-walidowana,
     /// jak interpolacja w /bank-operations). DTO skladamy z atrybutow COM (te same co wczesniej).
     /// </summary>
-    private IReadOnlyList<OpenReceivableDto> QueryOpenReceivablesCore(OpenReceivablesQueryRequestDto request)
+    // Wspolny rdzen dla open-receivables (nzfTyp=39, naleznosci) i open-payables (nzfTyp=40, zobowiazania).
+    // Jedyna roznica miedzy stronami to nzf_Typ; okno kwoty/kontrahent/data/search + ResolveContractor + scan-cap
+    // sa identyczne (rozrachunek zakupu i sprzedazy maja ten sam ksztalt atrybutow FinDokument).
+    private IReadOnlyList<OpenReceivableDto> QueryOpenSettlementsCore(int nzfTyp, OpenReceivablesQueryRequestDto request)
     {
         int limit = Math.Clamp(request.Limit > 0 ? request.Limit : 50, 1, 200);
 
-        // Server-side: typ=39 (naleznosc), otwarte (nzf_Wartosc>0), PLN; + okno kwoty / kontrahent / data gdy podane.
-        var conditions = new List<string> { "nzf_Typ = 39", "nzf_Wartosc > 0", "nzf_IdWaluty = 'PLN'" };
+        // Server-side: typ=nzfTyp (39=naleznosc / 40=zobowiazanie), otwarte (nzf_Wartosc>0), PLN; + okno kwoty / kontrahent / data gdy podane.
+        var conditions = new List<string> { $"nzf_Typ = {nzfTyp}", "nzf_Wartosc > 0", "nzf_IdWaluty = 'PLN'" };
         if (request.MinAmount is { } min) conditions.Add($"nzf_Wartosc >= {min.ToString(CultureInfo.InvariantCulture)}");
         if (request.MaxAmount is { } max) conditions.Add($"nzf_Wartosc <= {max.ToString(CultureInfo.InvariantCulture)}");
         if (request.ContractorId is { } kh) conditions.Add($"nzf_IdObiektu = {kh}");

@@ -267,6 +267,9 @@ public sealed class FakeSferaSession : ISferaSession
         return Task.FromResult<IReadOnlyList<OpenReceivableDto>>(q.Take(limit).ToList());
     }
 
+    public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenPayablesAsync(OpenReceivablesQueryRequestDto request, CancellationToken ct)
+        => Task.FromResult<IReadOnlyList<OpenReceivableDto>>(System.Array.Empty<OpenReceivableDto>());
+
     public Task<byte[]?> GetInvoicePdfAsync(long subiektId, CancellationToken ct)
     {
         // Minimal valid empty PDF stream
