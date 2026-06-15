@@ -118,6 +118,55 @@ public sealed class InvoicesController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Otwarte zobowiazania (rozrachunki zakupu FZ z otwartym saldem) w oknie kwoty - kandydaci do
+    /// dopasowania z WYCHODZACYM przelewem (wyplata). Lustro open-receivables (nzf_Typ=40 zamiast 39).
+    /// Read-only, PLN-only. Trasa literalna 'open-payables' ma pierwszenstwo nad {id}.
+    /// </summary>
+    [HttpGet("open-payables")]
+    public async Task<ActionResult<IReadOnlyList<OpenReceivableDto>>> OpenPayables(
+        [FromQuery(Name = "min_amount")] decimal? minAmount,
+        [FromQuery(Name = "max_amount")] decimal? maxAmount,
+        [FromQuery] string? currency,
+        [FromQuery(Name = "contractor_id")] long? contractorId,
+        [FromQuery] string? from,
+        [FromQuery] string? to,
+        [FromQuery] int limit,
+        [FromQuery] string? search,
+        CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(currency)
+            && !string.Equals(currency.Trim(), "PLN", StringComparison.OrdinalIgnoreCase))
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "UNSUPPORTED_CURRENCY",
+                Message: $"open-payables zwraca wyłącznie zobowiązania PLN (most rozlicza tylko PLN) - otrzymano '{currency}'."));
+        }
+
+        var request = new OpenReceivablesQueryRequestDto(
+            MinAmount: minAmount,
+            MaxAmount: maxAmount,
+            Currency: "PLN",
+            ContractorId: contractorId,
+            From: from,
+            To: to,
+            Limit: limit > 0 ? limit : 50,
+            Search: search);
+
+        try
+        {
+            var items = await _sfera.QueryOpenPayablesAsync(request, ct);
+            return Ok(items);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "QueryOpenPayables failed");
+            return StatusCode(StatusCodes.Status502BadGateway, new ErrorResponseDto(
+                Code: "SUBIEKT_QUERY_FAILED",
+                Message: ex.Message));
+        }
+    }
+
     /// <summary>Metadata pojedynczej FV po Bridge ID (sub_&lt;subiektId&gt;).</summary>
     [HttpGet("{id}")]
     public async Task<ActionResult<InvoiceQueryItemDto>> Get(string id, CancellationToken ct)
