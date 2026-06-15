@@ -232,6 +232,12 @@ public sealed class FakeSferaSession : ISferaSession
             new("sub_60011", 60011, "FZ", "PLN", 430.00m, 5002, "MPL Power Sp. z o.o.", "FZ 88/05/2026", "2026-05-18", 430.00m, "7282836136"),
             new("sub_60012", 60012, "FZ", "PLN", 1500.00m, 5001, "Sumernet Sp. z o.o.", "FZ 95/04/2026", "2026-04-30", 1500.00m, "5223044881"),
             new("sub_60013", 60013, "FZ", "EUR", 200.00m, 5099, "Foreign Supplier GmbH", "FZ 5/03/2026", "2026-03-10", 200.00m, "DE987654321"),
+            // Wiersz KOLIZYJNY (adwersaryjny dla Search_ContractorScope_TakesPrecedenceOverNumber): OBCY
+            // kontrahent (5199 "Nowak Logistyka" - NIE pasuje do "Sumernet" ani nazwa, ani NIP), ale NUMER FZ
+            // zawiera "sumernet". Gdy fraza "Sumernet" trafia w scope kontrahenta 5001, ten wiersz NIE moze
+            // wrocic - number-path jest WYKLUCZONY (nie OR-owany ze scope). Kwota 9999 jest poza oknem
+            // [100,5000] testu Payables_ReturnsOnlyFzRows_InAmountWindow, by go nie popsuc.
+            new("sub_60014", 60014, "FZ", "PLN", 9999.00m, 5199, "Nowak Logistyka", "FZ sumernet-9/06/2026", "2026-06-09", 9999.00m, "8888888888"),
         };
         return Task.FromResult(FilterOpenSettlements(all, request));
     }

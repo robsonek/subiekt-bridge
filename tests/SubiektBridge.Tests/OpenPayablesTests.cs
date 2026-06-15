@@ -73,6 +73,25 @@ public class OpenPayablesTests
         Assert.All(r, x => Assert.Equal("PLN", x.Currency));
     }
 
+    [Fact]
+    public async Task Payables_Search_ContractorScope_TakesPrecedenceOverNumber()
+    {
+        // Parytet z OpenReceivablesTests.Search_ContractorScope_TakesPrecedenceOverNumber dla strony FZ:
+        // gdy fraza pasuje do KONTRAHENTA (nazwa/NIP), zwracamy wiersze tego kontrahenta - number-path NIE
+        // jest mieszany (OR-owany). Lustro semantyki v0.14.0.
+        var fake = new FakeSferaSession();
+
+        // "Sumernet" -> scope = kontrahent 5001 -> tylko jego 2 wiersze (60010, 60012), nie inne.
+        var r = await fake.QueryOpenPayablesAsync(Req(search: "Sumernet"), CancellationToken.None);
+        Assert.Equal(2, r.Count);
+        Assert.All(r, x => Assert.Equal(5001, x.ContractorId));
+
+        // Twardy dowod precedencji: wiersz 60014 to OBCY kontrahent (5199 "Nowak Logistyka", nie pasuje do
+        // "Sumernet"), ALE jego numer FZ zawiera "sumernet". Gdyby number-path byl OR-owany ze scope (a nie
+        // wykluczony), 60014 by wrocil. Asercja, ze NIE wraca, lapie regresje OR-mieszania scope+number.
+        Assert.DoesNotContain(r, x => x.DocumentSubiektId == 60014);
+    }
+
     // ----------------------------- Controller (HTTP) -----------------------------
 
     [Fact]

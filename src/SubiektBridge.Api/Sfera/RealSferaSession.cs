@@ -1905,8 +1905,10 @@ public sealed class RealSferaSession : ISferaSession
         // Nie milcz o ucietym skanie - operator moze nie widziec starszej FV poza capem (sygnal: zaweź 'search'/'from').
         if (scanCapHit)
         {
-            _logger.LogWarning("QueryOpenReceivables: scan cap {ScanCap} osiagniety (search='{Search}', from='{From}') - " +
-                "starsze wiersze poza capem pominiete; zaweź fraze lub okno daty.", scanCap, request.Search, request.From);
+            // Rozroznij strone wg nzfTyp - inaczej payables (40) logowalyby sie jako receivables (mylace przy diagnozie).
+            string label = nzfTyp == 40 ? "QueryOpenPayables" : "QueryOpenReceivables";
+            _logger.LogWarning("{Label}: scan cap {ScanCap} osiagniety (search='{Search}', from='{From}') - " +
+                "starsze wiersze poza capem pominiete; zaweź fraze lub okno daty.", label, scanCap, request.Search, request.From);
         }
 
         return results;
