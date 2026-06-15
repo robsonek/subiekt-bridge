@@ -1794,6 +1794,24 @@ public sealed class RealSferaSession : ISferaSession
         if (request.ContractorId is { } kh) conditions.Add($"nzf_IdObiektu = {kh}");
         if (IsIsoDate(request.From)) conditions.Add($"nzf_Data >= '{request.From}'");
         if (IsIsoDate(request.To)) conditions.Add($"nzf_Data <= '{request.To}'");
+
+        // Wyszukiwarka FV (v0.14.0) - rdzen fixu perf: zamiast COM Kontrahenci.Wczytaj per wiersz (O(zbior)),
+        // pre-resolve pasujacych kontrahentow SQL-em (LIKE nazwa/NIP) i ZAWEZ OtworzKolekcje przez nzf_IdObiektu
+        // IN (...). Wtedy zwracane sa TYLKO wiersze pasujacych kontrahentow (maly zbior) -> ResolveContractor
+        // wolane garstke razy. contractorScope == true => match po kontrahencie zalatwiony SQL-em.
+        // Pusty wynik SQL (fraza to numer FV, nie nazwa) => contractorScope == false => number-path: pelny skan
+        // z TANIM number-checkiem (bez COM Kontrahenci.Wczytaj dla nie-matchy), bounded scan-capem.
+        bool searchActive = !string.IsNullOrWhiteSpace(request.Search);
+        bool contractorScope = false;
+        if (searchActive)
+        {
+            var matchIds = FindOpenReceivableContractorIds(request.Search!.Trim());
+            if (matchIds.Count > 0)
+            {
+                contractorScope = true;
+                conditions.Add($"nzf_IdObiektu IN ({string.Join(",", matchIds)})");
+            }
+        }
         string filter = string.Join(" AND ", conditions);
 
         // Bound liczby PRZESKANOWANYCH wierszy (NIE tylko dopasowanych). Krytyczne dla wyszukiwarki (Search):
@@ -1839,15 +1857,19 @@ public sealed class RealSferaSession : ISferaSession
 
                     // Data dokumentu (nzf_Data, COM atrybut "Data") -> ISO yyyy-MM-dd. null gdy nieczytelna.
                     string? date = TryReadDate((object)roz, "Data")?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-                    // Nazwa + NIP jednym Wczytaj (NIE dwoma) - N+1 i tak ograniczone do <= limit wierszy.
-                    var (contractorName, contractorNip) = ResolveContractor(contractorId);
 
-                    // Wyszukiwarka (v0.13.0): odfiltruj wiersze nie pasujace do frazy (numer/nazwa/NIP). Filtr PO
-                    // odczycie pol (NumerPelny/Nazwa to atrybuty COM, nie kolumny SQL). Klient podaje 'from' by zawezic skan.
-                    if (!OpenReceivableFields.MatchesSearch(request.Search, number, contractorName, contractorNip))
+                    // Wyszukiwarka (v0.14.0): gdy search aktywny ALE nie zawezilismy po kontrahencie (SQL nic nie
+                    // zwrocil => fraza to numer FV), filtruj TANIO po samym numerze PRZED COM ResolveContractor.
+                    // To eliminuje Kontrahenci.Wczytaj dla wszystkich nie-pasujacych wierszy (rdzen fixu perf).
+                    // Gdy contractorScope==true, IN juz zawezil zbior do pasujacych kontrahentow - wszystkie wiersze sa matchami.
+                    if (searchActive && !contractorScope
+                        && !OpenReceivableFields.MatchesSearch(request.Search, number, null, null))
                     {
                         continue;
                     }
+
+                    // Nazwa + NIP jednym Wczytaj (NIE dwoma). Wolane DOPIERO po przejsciu filtra search -> tylko dla matchy.
+                    var (contractorName, contractorNip) = ResolveContractor(contractorId);
 
                     results.Add(new OpenReceivableDto(
                         DocumentId: $"sub_{docId.Value}",
@@ -2389,6 +2411,47 @@ public sealed class RealSferaSession : ISferaSession
             _logger.LogWarning(ex, "FindContractorIdByNip({Nip}) failed", nip);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Wyszukiwarka FV (v0.14.0): kh_Id kontrahentow pasujacych do frazy po NAZWIE (adr_Nazwa = COM .Nazwa,
+    /// to samo co contractor_name) lub NIP (adr_NIP) - oba w adr__Ewid (TypAdresu=1, glowny adres; NIE ma ich
+    /// w kh__Kontrahent), przez czysty SQL LIKE, BEZ COM Kontrahenci.Wczytaj. To rdzen fixu perf:
+    /// zamiast resolwowac kontrahenta per wiersz otwartych naleznosci (COM, drogie, O(zbior)), pytamy bazy
+    /// raz o pasujace kh_Id, a potem zawezamy OtworzKolekcje przez nzf_IdObiektu IN (...). LIKE jest
+    /// parametryzowany (zero injection); wildcardy w term dzialaja jak wildcardy (akceptowalne). TOP 200 -
+    /// gdyby fraza byla bardzo szeroka (np. "sp"), nie budujemy gigantycznego IN.
+    /// </summary>
+    private HashSet<long> FindOpenReceivableContractorIds(string term)
+    {
+        var ids = new HashSet<long>();
+        try
+        {
+            using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT DISTINCT TOP 200 k.kh_Id
+                FROM kh__Kontrahent k
+                JOIN adr__Ewid a ON a.adr_IdObiektu = k.kh_Id AND a.adr_TypAdresu = 1
+                WHERE a.adr_Nazwa LIKE @s OR a.adr_NIP LIKE @s";
+            // Wildcardy LIKE neutralizowane (parametr-safe) - inaczej '%'/'_' we frazie operatora dzialaja jak
+            // wzorzec (np. samo '%' -> WSZYSCY kontrahenci -> contractorScope ze 200 kh_Id zamiast literalnego matcha).
+            cmd.Parameters.AddWithValue("@s", "%" + OpenReceivableFields.EscapeLikeWildcards(term) + "%");
+            cmd.CommandTimeout = 10;
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                ids.Add(Convert.ToInt64(r.GetValue(0)));
+            }
+        }
+        catch (Exception ex)
+        {
+            // Blad SQL -> pusty zbior: petla spadnie do number-path (skan po numerze). Nie wywala listingu.
+            _logger.LogWarning(ex, "FindOpenReceivableContractorIds({Term}) failed", term);
+        }
+
+        return ids;
     }
 
     /// <summary>Ustawia pola na nowo tworzonym kontrahencie (Symbol musi byc juz set).</summary>

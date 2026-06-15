@@ -96,4 +96,16 @@ public static class OpenReceivableFields
         static bool Contains(string? haystack, string needle) =>
             !string.IsNullOrEmpty(haystack) && haystack.ToLowerInvariant().Contains(needle);
     }
+
+    /// <summary>
+    /// Neutralizuje wildcardy LIKE (<c>%</c>, <c>_</c>, <c>[</c>) dla frazy idącej jako PARAMETR SQL (SqlParameter)
+    /// w wyszukiwarce kontrahentów (v0.14.0). Klasa znaków <c>[x]</c>, BEZ ESCAPE. NIE dubluje apostrofu (parametr
+    /// chroni przed injection; <c>''</c> w parametrze wstawiłoby dosłownie dwa apostrofy). Bez tego operator
+    /// wpisujący <c>%</c> dopasowałby WSZYSTKICH kontrahentów (samo <c>%</c> = wildcard „dowolny ciąg"). Wydzielone
+    /// tu (nie w windows-only RealSferaSession) by było testowalne cross-platform.
+    /// </summary>
+    public static string EscapeLikeWildcards(string s) => s
+        .Replace("[", "[[]")
+        .Replace("%", "[%]")
+        .Replace("_", "[_]");
 }

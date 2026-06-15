@@ -212,6 +212,11 @@ public sealed class FakeSferaSession : ISferaSession
             new("sub_53310", 53310, "FS", "PLN", 371.12m, 14001, "Google Commerce Limited", "FS 540/05/2026", "2026-06-11", 382.60m, null),
             new("sub_52001", 52001, "FS", "PLN", 120.00m, 13292, "Szyszka Krzysztof", "FS 410/04/2026", "2026-04-15", 120.00m, "1234563218"),
             new("sub_51900", 51900, "FS", "EUR", 99.00m, 15000, "Mock Foreign GmbH", "FS 300/03/2026", "2026-03-01", 99.00m, "DE123456789"),
+            // Wiersz KOLIZYJNY (adwersaryjny dla Search_ContractorScope_TakesPrecedenceOverNumber): OBCY
+            // kontrahent (16100 "Nowak Anna" - NIE pasuje do "Szyszka" ani nazwa, ani NIP), ale NUMER FV
+            // zawiera "szyszka". Gdy fraza "Szyszka" trafia w scope kontrahenta 13292, ten wiersz NIE moze
+            // wrocic - number-path jest WYKLUCZONY (nie OR-owany ze scope). Twardy dowod precedencji scope.
+            new("sub_53500", 53500, "FS", "PLN", 250.00m, 16100, "Nowak Anna", "FS szyszka-99/06/2026", "2026-06-13", 250.00m, "9999999999"),
         };
 
         decimal min = request.MinAmount ?? 0m;
@@ -230,8 +235,34 @@ public sealed class FakeSferaSession : ISferaSession
         if (request.ContractorId.HasValue) q = q.Where(r => r.ContractorId == request.ContractorId.Value);
         if (IsIso(request.From)) q = q.Where(r => string.CompareOrdinal(r.Date, request.From) >= 0);
         if (IsIso(request.To)) q = q.Where(r => string.CompareOrdinal(r.Date, request.To) <= 0);
-        // Wyszukiwarka (v0.13.0) - parytet z Real: filtr po numerze/nazwie/NIP (ta sama OpenReceivableFields.MatchesSearch).
-        q = q.Where(r => OpenReceivableFields.MatchesSearch(request.Search, r.Number, r.ContractorName, r.Nip));
+
+        // Wyszukiwarka (v0.14.0) - parytet z Real: contractor-scope-albo-number.
+        // Real: SQL LIKE nazwa/NIP -> kh_Id; jesli niepuste, zawez OtworzKolekcje nzf_IdObiektu IN (...) (match
+        // po kontrahencie); jesli puste (fraza = numer FV), skanuj po numerze. Fake nie ma SQL, wiec liczy
+        // scope z danych: kontrahenci pasujacy nazwa/NIP -> tylko ich wiersze; brak -> match po numerze.
+        //
+        // OGRANICZENIE PARYTETU (akceptowane): Real wyznacza scope SQL-em na CALEJ tabeli kh__Kontrahent
+        // (FindOpenReceivableContractorIds) - niezaleznie od tego, czy kontrahent ma otwarta naleznosc. Fake
+        // NIE ma globalnej bazy klientow, wiec aproksymuje scope tylko z 'all' (otwarte naleznosci). Rozjazd
+        // wystepuje wylacznie w sztucznym przypadku brzegowym: fraza pasuje do NAZWY/NIP kontrahenta, ktory
+        // ISTNIEJE w bazie, ale NIE MA otwartej naleznosci w oknie, a JEDNOCZESNIE jest fragmentem numeru
+        // obcej, otwartej FV. Wtedy Real: contractorScope=true -> IN(<kh bez naleznosci>) -> PUSTO (number-path
+        // nigdy nie wchodzi); Fake: scope puste -> number-path -> zwraca te obca FV. Fake jest tu liberalniejszy.
+        // Niewykrywalne na CI (Real = COM/SQL windows-only). Produkcyjnie nieistotne: operator szuka po nazwie
+        // KLIENTA Z OTWARTA FV (oba zwracaja to samo) lub po numerze FV (oba number-path). Fake celowo NIE
+        // modeluje "kontrahent znany w bazie, ale bez otwartej naleznosci" - to wymagaloby drugiej tabeli mock.
+        if (!string.IsNullOrWhiteSpace(request.Search))
+        {
+            var scopeIds = all
+                .Where(r => r.ContractorId.HasValue
+                    && OpenReceivableFields.MatchesSearch(request.Search, null, r.ContractorName, r.Nip))
+                .Select(r => r.ContractorId!.Value)
+                .ToHashSet();
+
+            q = scopeIds.Count > 0
+                ? q.Where(r => r.ContractorId.HasValue && scopeIds.Contains(r.ContractorId.Value))
+                : q.Where(r => OpenReceivableFields.MatchesSearch(request.Search, r.Number, null, null));
+        }
 
         return Task.FromResult<IReadOnlyList<OpenReceivableDto>>(q.Take(limit).ToList());
     }

@@ -60,8 +60,8 @@ public class OpenReceivablesTests
         var fake = new FakeSferaSession();
         var r = await fake.QueryOpenReceivablesAsync(Req(), CancellationToken.None);
 
-        // 3 PLN naleznosci; rekord EUR (51900) odfiltrowany przez default currency=PLN.
-        Assert.Equal(3, r.Count);
+        // 4 PLN naleznosci (53447, 53310, 52001, 53500); rekord EUR (51900) odfiltrowany przez default currency=PLN.
+        Assert.Equal(4, r.Count);
         Assert.All(r, x => Assert.Equal("PLN", x.Currency));
         Assert.DoesNotContain(r, x => x.DocumentSubiektId == 51900);
     }
@@ -162,6 +162,18 @@ public class OpenReceivablesTests
         Assert.True(OpenReceivableFields.MatchesSearch("google", "FS 540/05/2026", "Google Commerce Limited", null));
     }
 
+    [Theory]
+    [InlineData("Szyszka", "Szyszka")]      // zwykla fraza - bez zmian
+    [InlineData("50%", "50[%]")]            // % jako literal (inaczej = wszyscy kontrahenci)
+    [InlineData("A_B", "A[_]B")]            // _ jako literal
+    [InlineData("Sp[ar]", "Sp[[]ar]")]      // [ neutralizowane PIERWSZE (kolejnosc!)
+    [InlineData("", "")]
+    public void EscapeLikeWildcards_NeutralizesLikeMetachars(string raw, string expected)
+    {
+        // Parametr-safe (NIE dubluje apostrofu jak EscapeLikePattern) - dla LIKE @s w FindOpenReceivableContractorIds.
+        Assert.Equal(expected, OpenReceivableFields.EscapeLikeWildcards(raw));
+    }
+
     [Fact]
     public async Task Search_FiltersByContractorName()
     {
@@ -201,6 +213,26 @@ public class OpenReceivablesTests
     }
 
     [Fact]
+    public async Task Search_ContractorScope_TakesPrecedenceOverNumber()
+    {
+        // Semantyka v0.14.0 (perf fix): gdy fraza pasuje do KONTRAHENTA (SQL nazwa/NIP), zwracamy wiersze
+        // tego kontrahenta - number-path NIE jest mieszany. "410" pasuje do numeru FS 410/04/2026 (52001,
+        // Szyszka), ale rowniez do NIP "1234563218"? nie. Tu sprawdzamy odwrotnie: fraza pasujaca do nazwy
+        // kontrahenta zaweza po kontrahencie, a nie zwraca dodatkowo wierszy obcych o numerze z ta fraza.
+        var fake = new FakeSferaSession();
+
+        // "Szyszka" -> scope = kontrahent 13292 -> tylko jego 2 wiersze (53447, 52001), nie inne.
+        var r = await fake.QueryOpenReceivablesAsync(Req(search: "Szyszka"), CancellationToken.None);
+        Assert.Equal(2, r.Count);
+        Assert.All(r, x => Assert.Equal(13292, x.ContractorId));
+
+        // Twardy dowod precedencji: wiersz 53500 to OBCY kontrahent (16100 "Nowak Anna", nie pasuje do
+        // "Szyszka"), ALE jego numer FV zawiera "szyszka". Gdyby number-path byl OR-owany ze scope (a nie
+        // wykluczony), 53500 by wrocil. Asercja, ze NIE wraca, lapie regresje OR-mieszania scope+number.
+        Assert.DoesNotContain(r, x => x.DocumentSubiektId == 53500);
+    }
+
+    [Fact]
     public async Task Controller_SearchPassedThrough()
     {
         var controller = NewController(new FakeSferaSession());
@@ -232,10 +264,11 @@ public class OpenReceivablesTests
     public async Task MinOnly_NoUpperBound()
     {
         var fake = new FakeSferaSession();
-        // Tylko dolna granica - bez max (decimal? = null) zwraca wszystko >= 200 PLN (53447 i 53310, NIE 52001=120).
+        // Tylko dolna granica - bez max (decimal? = null) zwraca wszystko >= 200 PLN (53447, 53310, 53500=250;
+        // NIE 52001=120).
         var r = await fake.QueryOpenReceivablesAsync(Req(min: 200m), CancellationToken.None);
 
-        Assert.Equal(2, r.Count);
+        Assert.Equal(3, r.Count);
         Assert.DoesNotContain(r, x => x.DocumentSubiektId == 52001);
     }
 
@@ -243,12 +276,12 @@ public class OpenReceivablesTests
     public async Task DateFrom_NarrowsToRecent()
     {
         var fake = new FakeSferaSession();
-        // from=2026-05-01 -> tylko czerwcowe (53447, 53310); 52001 (kwiecien) i 51900 (marzec) odpadaja.
+        // from=2026-05-01 -> tylko czerwcowe (53447, 53310, 53500); 52001 (kwiecien) i 51900 (marzec) odpadaja.
         // Klient poda okno daty wokol przelewu - swiezy przelew -> swieza FV, dodatkowo tnie skan.
         var r = await fake.QueryOpenReceivablesAsync(Req(from: "2026-05-01"), CancellationToken.None);
 
-        Assert.Equal(2, r.Count);
-        Assert.All(r, x => Assert.Contains(x.DocumentSubiektId, new[] { 53447L, 53310L }));
+        Assert.Equal(3, r.Count);
+        Assert.All(r, x => Assert.Contains(x.DocumentSubiektId, new[] { 53447L, 53310L, 53500L }));
     }
 
     [Fact]
@@ -315,8 +348,8 @@ public class OpenReceivablesTests
         var (status, value) = Unwrap(r.Result);
         Assert.Equal(200, status);
         var list = Assert.IsAssignableFrom<IReadOnlyList<OpenReceivableDto>>(value);
-        // Tylko czerwcowe (53447, 53310); kwiecien/marzec poza oknem daty.
-        Assert.Equal(2, list.Count);
-        Assert.All(list, x => Assert.Contains(x.DocumentSubiektId, new[] { 53447L, 53310L }));
+        // Tylko czerwcowe (53447, 53310, 53500); kwiecien/marzec poza oknem daty.
+        Assert.Equal(3, list.Count);
+        Assert.All(list, x => Assert.Contains(x.DocumentSubiektId, new[] { 53447L, 53310L, 53500L }));
     }
 }
