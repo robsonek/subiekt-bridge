@@ -58,3 +58,17 @@ public sealed record OpenReceivableDto(
     // (B2C) lub gdy nie udalo sie odczytac. Pomaga rozroznic firmy o podobnych nazwach.
     [property: JsonPropertyName("nip")] string? Nip = null
 );
+
+/// <summary>
+/// Normalizacja pol kontrahenta z COM dla open-receivables. Wydzielone z RealSferaSession (ktory jest
+/// [SupportedOSPlatform("windows")] + COM, wiec nietestowalny na CI) - czysta logika string, testowalna
+/// cross-platform. Dzieki temu kontrakt "null dla B2C" jest pokryty testem jednostkowym (nie tylko Fake'iem).
+/// </summary>
+public static class OpenReceivableFields
+{
+    /// <summary>
+    /// NIP z COM -> null dla B2C: Real Subiekt zwraca dla osoby prywatnej (brak NIP) pusty/whitespace string,
+    /// nie null. Mapujemy na null, by Real == Fake == kontrakt DTO ("null dla B2C"); klient wykrywa B2C po nip == null.
+    /// </summary>
+    public static string? NormalizeNip(string? raw) => string.IsNullOrWhiteSpace(raw) ? null : raw;
+}

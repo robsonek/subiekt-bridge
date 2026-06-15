@@ -1869,10 +1869,9 @@ public sealed class RealSferaSession : ISferaSession
             dynamic kontr = Session.Kontrahenci.Wczytaj(contractorId.Value);
             try
             {
-                // Real Subiekt zwraca dla B2C (osoba prywatna bez NIP) PUSTY string, nie null - normalizujemy
-                // do null, by Real == Fake == kontrakt DTO ("null dla B2C"); klient wykrywa B2C po nip === null.
-                string? nip = TryGetString(kontr, "NIP");
-                return (TryGetString(kontr, "Nazwa"), string.IsNullOrWhiteSpace(nip) ? null : nip);
+                // NIP normalizowany ''->null (B2C) przez OpenReceivableFields.NormalizeNip - logika wydzielona
+                // i pokryta testem jednostkowym (ta metoda jest COM/windows-only, wiec nietestowalna na CI).
+                return (TryGetString(kontr, "Nazwa"), OpenReceivableFields.NormalizeNip(TryGetString(kontr, "NIP")));
             }
             finally { try { kontr.Zamknij(); } catch { /* best-effort */ } }
         }

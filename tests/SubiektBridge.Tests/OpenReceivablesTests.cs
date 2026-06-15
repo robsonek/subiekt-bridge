@@ -127,6 +127,17 @@ public class OpenReceivablesTests
         Assert.Equal("1234563218", item.Nip);
     }
 
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("", null)]
+    [InlineData("   ", null)]      // B2C: Real Subiekt zwraca pusty/whitespace NIP -> null
+    [InlineData("1234563218", "1234563218")]
+    public void NormalizeNip_MapsEmptyOrWhitespaceToNull(string? raw, string? expected)
+    {
+        // Kontrakt "null dla B2C" wydzielony z RealSferaSession (COM/windows-only) do testowalnej metody.
+        Assert.Equal(expected, OpenReceivableFields.NormalizeNip(raw));
+    }
+
     [Fact]
     public async Task Dto_Shape_NullNip_ForB2cContractor()
     {
