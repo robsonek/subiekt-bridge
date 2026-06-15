@@ -61,7 +61,7 @@ public class OpenPayablesTests
     {
         var fake = new FakeSferaSession();
         var r = await fake.QueryOpenPayablesAsync(Req(contractor: 5001), CancellationToken.None);
-        Assert.NotEmpty(r);
+        Assert.Equal(2, r.Count); // 60010 + 60012 (oba kontrahent 5001, PLN) - parytet z receivables; lapie tez under-inkluzje
         Assert.All(r, x => Assert.Equal(5001, x.ContractorId));
     }
 
