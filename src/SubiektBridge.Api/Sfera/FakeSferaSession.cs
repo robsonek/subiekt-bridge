@@ -219,6 +219,30 @@ public sealed class FakeSferaSession : ISferaSession
             new("sub_53500", 53500, "FS", "PLN", 250.00m, 16100, "Nowak Anna", "FS szyszka-99/06/2026", "2026-06-13", 250.00m, "9999999999"),
         };
 
+        return Task.FromResult(FilterOpenSettlements(all, request));
+    }
+
+    public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenPayablesAsync(OpenReceivablesQueryRequestDto request, CancellationToken ct)
+    {
+        // Deterministyczne otwarte ZOBOWIAZANIA (FZ, nzf_Typ=40). Lustro receivables: PLN-only, okno
+        // kwoty/kontrahent/data/limit + parytet wyszukiwarki (contractor-scope albo number-path).
+        OpenReceivableDto[] all =
+        {
+            new("sub_60010", 60010, "FZ", "PLN", 1500.00m, 5001, "Sumernet Sp. z o.o.", "FZ 120/05/2026", "2026-05-20", 1500.00m, "5223044881"),
+            new("sub_60011", 60011, "FZ", "PLN", 430.00m, 5002, "MPL Power Sp. z o.o.", "FZ 88/05/2026", "2026-05-18", 430.00m, "7282836136"),
+            new("sub_60012", 60012, "FZ", "PLN", 1500.00m, 5001, "Sumernet Sp. z o.o.", "FZ 95/04/2026", "2026-04-30", 1500.00m, "5223044881"),
+            new("sub_60013", 60013, "FZ", "EUR", 200.00m, 5099, "Foreign Supplier GmbH", "FZ 5/03/2026", "2026-03-10", 200.00m, "DE987654321"),
+        };
+        return Task.FromResult(FilterOpenSettlements(all, request));
+    }
+
+    // Wspolny filtr in-memory dla open-receivables (FS) i open-payables (FZ) - parytet z RealSferaSession
+    // QueryOpenSettlementsCore (rozne strony rozni TYLKO zbior 'all'; semantyka filtra identyczna):
+    // PLN-only, okno kwoty (WartoscBiezaca > 0 + min/max), kontrahent, okno daty (from/to), wyszukiwarka
+    // (contractor-scope-albo-number) i limit. Wydzielone (DRY) - obie metody wolaja ten sam kod.
+    private static IReadOnlyList<OpenReceivableDto> FilterOpenSettlements(
+        OpenReceivableDto[] all, OpenReceivablesQueryRequestDto request)
+    {
         decimal min = request.MinAmount ?? 0m;
         decimal max = request.MaxAmount ?? decimal.MaxValue;
         int limit = Math.Clamp(request.Limit > 0 ? request.Limit : 50, 1, 200);
@@ -264,11 +288,8 @@ public sealed class FakeSferaSession : ISferaSession
                 : q.Where(r => OpenReceivableFields.MatchesSearch(request.Search, r.Number, null, null));
         }
 
-        return Task.FromResult<IReadOnlyList<OpenReceivableDto>>(q.Take(limit).ToList());
+        return q.Take(limit).ToList();
     }
-
-    public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenPayablesAsync(OpenReceivablesQueryRequestDto request, CancellationToken ct)
-        => Task.FromResult<IReadOnlyList<OpenReceivableDto>>(System.Array.Empty<OpenReceivableDto>());
 
     public Task<byte[]?> GetInvoicePdfAsync(long subiektId, CancellationToken ct)
     {
