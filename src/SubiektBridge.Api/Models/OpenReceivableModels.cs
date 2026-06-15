@@ -27,7 +27,12 @@ public sealed record OpenReceivablesQueryRequestDto(
     [property: JsonPropertyName("to")] string? To = null,
     // Default 50, hard cap 200. Predykaty ida do filtra OtworzKolekcje (server-side), wiec to cap WYNIKU
     // (najnowsze wg nzf_Data), nie skanu - brak enumeracji calej tabeli (fix perf v0.11.0).
-    [property: JsonPropertyName("limit")] int Limit = 50
+    [property: JsonPropertyName("limit")] int Limit = 50,
+    // Wyszukiwarka FV (v0.13.0): fragment dopasowywany case-insensitive do NumerPelny / nazwy kontrahenta / NIP.
+    // Filtr robiony w petli (te pola sa juz czytane per wiersz - NumerPelny to atrybut COM, nie kolumna, wiec
+    // NIE da sie go dac do SQL OtworzKolekcje). Klient zwykle podaje search BEZ okna kwoty (szuka po nazwie/numerze),
+    // ale z 'from' (zaweza skan). null/pusty = brak filtra (zachowanie sprzed v0.13).
+    [property: JsonPropertyName("search")] string? Search = null
 );
 
 public sealed record OpenReceivableDto(
@@ -71,4 +76,24 @@ public static class OpenReceivableFields
     /// nie null. Mapujemy na null, by Real == Fake == kontrakt DTO ("null dla B2C"); klient wykrywa B2C po nip == null.
     /// </summary>
     public static string? NormalizeNip(string? raw) => string.IsNullOrWhiteSpace(raw) ? null : raw;
+
+    /// <summary>
+    /// Wyszukiwarka FV (v0.13.0): czy wiersz pasuje do frazy (case-insensitive substring na NumerPelny / nazwie
+    /// kontrahenta / NIP). Pusta/null fraza = pasuje wszystko (brak filtra). Wydzielone jako static - testowalne
+    /// cross-platform (RealSferaSession jest windows-only/COM). Logika dzielona przez Real i Fake (parytet).
+    /// </summary>
+    public static bool MatchesSearch(string? search, string? number, string? contractorName, string? nip)
+    {
+        if (string.IsNullOrWhiteSpace(search))
+        {
+            return true;
+        }
+
+        string needle = search.Trim().ToLowerInvariant();
+
+        return Contains(number, needle) || Contains(contractorName, needle) || Contains(nip, needle);
+
+        static bool Contains(string? haystack, string needle) =>
+            !string.IsNullOrEmpty(haystack) && haystack.ToLowerInvariant().Contains(needle);
+    }
 }

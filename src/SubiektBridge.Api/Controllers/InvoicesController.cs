@@ -80,6 +80,7 @@ public sealed class InvoicesController : ControllerBase
         [FromQuery] string? from,
         [FromQuery] string? to,
         [FromQuery] int limit,
+        [FromQuery] string? search,
         CancellationToken ct)
     {
         // Tylko PLN (jak /settlements). WartoscBiezaca jest ZAWSZE w PLN (CHM), wiec wiersz walutowy
@@ -100,7 +101,8 @@ public sealed class InvoicesController : ControllerBase
             ContractorId: contractorId,
             From: from,
             To: to,
-            Limit: limit > 0 ? limit : 50);
+            Limit: limit > 0 ? limit : 50,
+            Search: search);
 
         try
         {

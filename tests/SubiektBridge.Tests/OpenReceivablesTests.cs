@@ -19,8 +19,8 @@ public class OpenReceivablesTests
 {
     private static OpenReceivablesQueryRequestDto Req(
         decimal? min = null, decimal? max = null, string? currency = "PLN", long? contractorId = null,
-        string? from = null, string? to = null, int limit = 50)
-        => new(min, max, currency, contractorId, from, to, limit);
+        string? from = null, string? to = null, int limit = 50, string? search = null)
+        => new(min, max, currency, contractorId, from, to, limit, search);
 
     private static IdempotencyStore NewStore()
         => new(new BridgeOptions
@@ -138,6 +138,83 @@ public class OpenReceivablesTests
         Assert.Equal(expected, OpenReceivableFields.NormalizeNip(raw));
     }
 
+    // ----------------------------- Wyszukiwarka FV (v0.13.0) -----------------------------
+
+    [Theory]
+    [InlineData(null, true)]                                  // brak frazy = pasuje wszystko
+    [InlineData("", true)]
+    [InlineData("   ", true)]
+    [InlineData("szyszka", true)]                             // nazwa (case-insensitive)
+    [InlineData("SZYSZKA", true)]
+    [InlineData("573", true)]                                 // numer
+    [InlineData("1234563218", true)]                          // NIP
+    [InlineData("zzz-nie-ma", false)]
+    public void MatchesSearch_NumberNameNip(string? search, bool expected)
+    {
+        Assert.Equal(expected, OpenReceivableFields.MatchesSearch(search, "FS 573/05/2026", "Szyszka Krzysztof", "1234563218"));
+    }
+
+    [Fact]
+    public void MatchesSearch_NullNip_DoesNotMatchNipQuery()
+    {
+        // B2C bez NIP: fraza wygladajaca na NIP nie moze trafic w null.
+        Assert.False(OpenReceivableFields.MatchesSearch("1234563218", "FS 540/05/2026", "Google Commerce Limited", null));
+        Assert.True(OpenReceivableFields.MatchesSearch("google", "FS 540/05/2026", "Google Commerce Limited", null));
+    }
+
+    [Fact]
+    public async Task Search_FiltersByContractorName()
+    {
+        var fake = new FakeSferaSession();
+        var r = await fake.QueryOpenReceivablesAsync(Req(search: "szyszka"), CancellationToken.None);
+
+        Assert.Equal(2, r.Count); // 53447 + 52001 (oba Szyszka, PLN); 51900 EUR odpada
+        Assert.All(r, x => Assert.Equal("Szyszka Krzysztof", x.ContractorName));
+    }
+
+    [Fact]
+    public async Task Search_FiltersByInvoiceNumber()
+    {
+        var fake = new FakeSferaSession();
+        var r = await fake.QueryOpenReceivablesAsync(Req(search: "573"), CancellationToken.None);
+
+        var only = Assert.Single(r);
+        Assert.Equal(53447, only.DocumentSubiektId);
+    }
+
+    [Fact]
+    public async Task Search_FiltersByNip_CaseInsensitive()
+    {
+        var fake = new FakeSferaSession();
+        var r = await fake.QueryOpenReceivablesAsync(Req(search: "GOOGLE"), CancellationToken.None);
+
+        var only = Assert.Single(r);
+        Assert.Equal(53310, only.DocumentSubiektId);
+    }
+
+    [Fact]
+    public async Task Search_NoMatch_ReturnsEmpty()
+    {
+        var fake = new FakeSferaSession();
+        var r = await fake.QueryOpenReceivablesAsync(Req(search: "nie-istnieje-xyz"), CancellationToken.None);
+        Assert.Empty(r);
+    }
+
+    [Fact]
+    public async Task Controller_SearchPassedThrough()
+    {
+        var controller = NewController(new FakeSferaSession());
+        var r = await controller.OpenReceivables(
+            minAmount: null, maxAmount: null, currency: null, contractorId: null,
+            from: null, to: null, limit: 0, search: "szyszka", CancellationToken.None);
+
+        var (status, value) = Unwrap(r.Result);
+        Assert.Equal(200, status);
+        var list = Assert.IsAssignableFrom<IReadOnlyList<OpenReceivableDto>>(value);
+        Assert.Equal(2, list.Count);
+        Assert.All(list, x => Assert.Equal("Szyszka Krzysztof", x.ContractorName));
+    }
+
     [Fact]
     public async Task Dto_Shape_NullNip_ForB2cContractor()
     {
@@ -191,7 +268,7 @@ public class OpenReceivablesTests
     {
         var controller = NewController(new FakeSferaSession());
         var r = await controller.OpenReceivables(
-            minAmount: null, maxAmount: null, currency: null, contractorId: null, from: null, to: null, limit: 0, CancellationToken.None);
+            minAmount: null, maxAmount: null, currency: null, contractorId: null, from: null, to: null, limit: 0, search: null, CancellationToken.None);
 
         var (status, value) = Unwrap(r.Result);
         Assert.Equal(200, status);
@@ -207,7 +284,7 @@ public class OpenReceivablesTests
         // pod etykieta obcej waluty). Spojnie z UNSUPPORTED_CURRENCY w FS i guardem PLN w /settlements.
         var controller = NewController(new FakeSferaSession());
         var r = await controller.OpenReceivables(
-            minAmount: null, maxAmount: null, currency: "EUR", contractorId: null, from: null, to: null, limit: 0, CancellationToken.None);
+            minAmount: null, maxAmount: null, currency: "EUR", contractorId: null, from: null, to: null, limit: 0, search: null, CancellationToken.None);
 
         var (status, value) = Unwrap(r.Result);
         Assert.Equal(422, status);
@@ -219,7 +296,7 @@ public class OpenReceivablesTests
     {
         var controller = NewController(new FakeSferaSession());
         var r = await controller.OpenReceivables(
-            minAmount: 100m, maxAmount: 200m, currency: "PLN", contractorId: 13292, from: null, to: null, limit: 0, CancellationToken.None);
+            minAmount: 100m, maxAmount: 200m, currency: "PLN", contractorId: 13292, from: null, to: null, limit: 0, search: null, CancellationToken.None);
 
         var (status, value) = Unwrap(r.Result);
         Assert.Equal(200, status);
@@ -233,7 +310,7 @@ public class OpenReceivablesTests
         var controller = NewController(new FakeSferaSession());
         var r = await controller.OpenReceivables(
             minAmount: null, maxAmount: null, currency: null, contractorId: null,
-            from: "2026-05-01", to: "2026-12-31", limit: 0, CancellationToken.None);
+            from: "2026-05-01", to: "2026-12-31", limit: 0, search: null, CancellationToken.None);
 
         var (status, value) = Unwrap(r.Result);
         Assert.Equal(200, status);

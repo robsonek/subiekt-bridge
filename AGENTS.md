@@ -113,7 +113,7 @@ Invoke-RestMethod -Uri "https://localhost:988/api/v1/admin/update" -Method POST 
 | `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | Listing FS/KFS (filtry whitelist) |
 | `GET /api/v1/invoices/{id}` | Single FV metadata |
 | `GET /api/v1/invoices/{id}/pdf` | Retro PDF generation |
-| `GET /api/v1/invoices/open-receivables?min_amount&max_amount&currency&contractor_id&limit` | Otwarte należności (rozrachunki sprzedaży nzf_Typ=39, `WartoscBiezaca>0`) w oknie kwoty — kandydaci do dopasowania z przelewem. Read-only, **czysto COM** (FinManager.OtworzKolekcje + atrybuty FinDokument), NIE raw SQL |
+| `GET /api/v1/invoices/open-receivables?min_amount&max_amount&currency&contractor_id&from&to&search&limit` | Otwarte należności (rozrachunki sprzedaży nzf_Typ=39, `WartoscBiezaca>0`) w oknie kwoty — kandydaci do dopasowania z przelewem. Read-only, **czysto COM** (FinManager.OtworzKolekcje + atrybuty FinDokument), NIE raw SQL. `search` (v0.13.0) = fraza case-insensitive po numerze/nazwie/NIP, filtrowana **po odczycie** (NumerPelny/Nazwa to atrybuty COM, nie kolumny — `OpenReceivableFields.MatchesSearch`) |
 | `POST /api/v1/invoices` | Wystaw FS (Idempotency-Key required) |
 | `POST /api/v1/invoices/{id}/corrections` | Wystaw KFS |
 | `GET /api/v1/receipts?...` | Listing PZ |

@@ -230,6 +230,8 @@ public sealed class FakeSferaSession : ISferaSession
         if (request.ContractorId.HasValue) q = q.Where(r => r.ContractorId == request.ContractorId.Value);
         if (IsIso(request.From)) q = q.Where(r => string.CompareOrdinal(r.Date, request.From) >= 0);
         if (IsIso(request.To)) q = q.Where(r => string.CompareOrdinal(r.Date, request.To) <= 0);
+        // Wyszukiwarka (v0.13.0) - parytet z Real: filtr po numerze/nazwie/NIP (ta sama OpenReceivableFields.MatchesSearch).
+        q = q.Where(r => OpenReceivableFields.MatchesSearch(request.Search, r.Number, r.ContractorName, r.Nip));
 
         return Task.FromResult<IReadOnlyList<OpenReceivableDto>>(q.Take(limit).ToList());
     }

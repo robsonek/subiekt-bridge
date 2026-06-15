@@ -1796,6 +1796,15 @@ public sealed class RealSferaSession : ISferaSession
         if (IsIsoDate(request.To)) conditions.Add($"nzf_Data <= '{request.To}'");
         string filter = string.Join(" AND ", conditions);
 
+        // Bound liczby PRZESKANOWANYCH wierszy (NIE tylko dopasowanych). Krytyczne dla wyszukiwarki (Search):
+        // tam NIE ma okna kwoty, wiec gdy fraza pasuje do malo/zero wierszy, petla bez capa dobijala do konca
+        // calego zbioru otwartych naleznosci w oknie 'from' - z jednym COM Kontrahenci.Wczytaj per wiersz na
+        // wspoldzielonym STA (te same kolejce co FS/KFS/PZ + ksiegowanie). Sortowanie nzf_Data DESC => cap
+        // zachowuje NAJNOWSZE wiersze (akceptowalne dla operatorskiego search). 1000 = ten sam sufit co QueryInvoices.
+        int scanCap = 1000;
+        int scanned = 0;
+        bool scanCapHit = false;
+
         var results = new List<OpenReceivableDto>();
         dynamic? kolekcja = null;
         try
@@ -1805,6 +1814,10 @@ public sealed class RealSferaSession : ISferaSession
             {
                 try
                 {
+                    // Cap na SKAN (przed ResolveContractor) - bounduje COM round-trips, nie tylko wynik.
+                    if (scanned >= scanCap) { scanCapHit = true; break; }
+                    scanned++;
+
                     // Wartosci juz przefiltrowane po stronie bazy - tu tylko skladamy DTO z atrybutow COM.
                     decimal remaining = TryReadDecimal((object)roz, "WartoscBiezaca") ?? 0m;  // PLN (= nzf_Wartosc)
                     // Wartosc pierwotna (WartoscPoczatkowa = nzf_WartoscPierwotna, PLN brutto) - calkowita kwota FV.
@@ -1829,6 +1842,13 @@ public sealed class RealSferaSession : ISferaSession
                     // Nazwa + NIP jednym Wczytaj (NIE dwoma) - N+1 i tak ograniczone do <= limit wierszy.
                     var (contractorName, contractorNip) = ResolveContractor(contractorId);
 
+                    // Wyszukiwarka (v0.13.0): odfiltruj wiersze nie pasujace do frazy (numer/nazwa/NIP). Filtr PO
+                    // odczycie pol (NumerPelny/Nazwa to atrybuty COM, nie kolumny SQL). Klient podaje 'from' by zawezic skan.
+                    if (!OpenReceivableFields.MatchesSearch(request.Search, number, contractorName, contractorNip))
+                    {
+                        continue;
+                    }
+
                     results.Add(new OpenReceivableDto(
                         DocumentId: $"sub_{docId.Value}",
                         DocumentSubiektId: docId.Value,
@@ -1850,6 +1870,13 @@ public sealed class RealSferaSession : ISferaSession
         finally
         {
             if (kolekcja is not null) { try { Marshal.ReleaseComObject(kolekcja); } catch { /* cleanup */ } }
+        }
+
+        // Nie milcz o ucietym skanie - operator moze nie widziec starszej FV poza capem (sygnal: zaweź 'search'/'from').
+        if (scanCapHit)
+        {
+            _logger.LogWarning("QueryOpenReceivables: scan cap {ScanCap} osiagniety (search='{Search}', from='{From}') - " +
+                "starsze wiersze poza capem pominiete; zaweź fraze lub okno daty.", scanCap, request.Search, request.From);
         }
 
         return results;
