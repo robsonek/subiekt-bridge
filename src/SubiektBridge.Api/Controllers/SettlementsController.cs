@@ -8,7 +8,7 @@ namespace SubiektBridge.Api.Controllers;
 
 /// <summary>
 /// Rozliczenia rozrachunków - spinanie zaimportowanych z wyciągu operacji bankowych (przelewów BP)
-/// z fakturami przez Sferę (FinRozliczenia.Rozlicz OD STRONY ROZRACHUNKU). MVP: tylko FS.
+/// z fakturami przez Sferę (FinRozliczenia.Rozlicz OD STRONY ROZRACHUNKU). FS i FZ (Typ 2/1); korekty (KFS/KFZ) -> 422.
 ///
 /// Drugi kontroler z [Route("api/v1/invoices")] obok InvoicesController - ASP.NET Core to dopuszcza,
 /// bo szablony akcji są różne ({id}/settlements vs {id}/{id}/pdf/{id}/corrections). NIE duplikujemy
