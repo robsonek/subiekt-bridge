@@ -15,6 +15,17 @@ public class KsefTests
 {
     public KsefTests() => FakeSferaSession.ResetKsefForTests();
 
+    private static KsefController NewController(FakeSferaSession fake)
+        => new(fake, NullLogger<KsefController>.Instance);
+
+    private static (int status, object? value) Unwrap(IActionResult? result) => result switch
+    {
+        ObjectResult o => (o.StatusCode ?? 200, o.Value),
+        StatusCodeResult s => (s.StatusCode, null),
+        null => (0, null),
+        _ => (-1, null),
+    };
+
     // ----------------------------- Mapper statusow -----------------------------
 
     [Theory]
@@ -135,5 +146,97 @@ public class KsefTests
         var fake = new FakeSferaSession();
         var r = await fake.GetKsefStatusAsync(-5, CancellationToken.None);
         Assert.Null(r);
+    }
+
+    // ----------------------------- KsefController: mapowanie HTTP -----------------------------
+
+    [Fact]
+    public async Task Post_HappyPath_Returns200WithNumber()
+    {
+        var ctrl = NewController(new FakeSferaSession());
+        var (status, value) = Unwrap((await ctrl.Send("fake_inv_000001", CancellationToken.None)).Result);
+
+        Assert.Equal(200, status);
+        var dto = Assert.IsType<KsefStatusResponseDto>(value);
+        Assert.Equal("registered", dto.KsefStatus);
+        Assert.False(string.IsNullOrEmpty(dto.KsefNumber));
+    }
+
+    [Fact]
+    public async Task Post_Processing_Returns202()
+    {
+        var ctrl = NewController(new FakeSferaSession());
+        var (status, value) = Unwrap((await ctrl.Send("sub_1910004", CancellationToken.None)).Result);
+
+        Assert.Equal(202, status);
+        var dto = Assert.IsType<KsefStatusResponseDto>(value);
+        Assert.Equal("processing", dto.KsefStatus);
+    }
+
+    [Fact]
+    public async Task Post_NotFound_Returns404()
+    {
+        var ctrl = NewController(new FakeSferaSession());
+        var (status, value) = Unwrap((await ctrl.Send("sub_-5", CancellationToken.None)).Result);
+
+        Assert.Equal(404, status);
+        Assert.Equal("INVOICE_NOT_FOUND", Assert.IsType<ErrorResponseDto>(value).Code);
+    }
+
+    [Fact]
+    public async Task Post_InvalidBridgeId_Returns422()
+    {
+        var ctrl = NewController(new FakeSferaSession());
+        var (status, value) = Unwrap((await ctrl.Send("zly-format", CancellationToken.None)).Result);
+
+        Assert.Equal(422, status);
+        Assert.Equal("INVALID_BRIDGE_ID", Assert.IsType<ErrorResponseDto>(value).Code);
+    }
+
+    [Theory]
+    [InlineData("sub_3000001", 422, "UNSUPPORTED_DOCUMENT_TYPE")]
+    [InlineData("sub_1910001", 422, "NOT_KSEF_INVOICE")]
+    [InlineData("sub_1910002", 422, "KSEF_VALIDATION_FAILED")]
+    [InlineData("sub_1910003", 422, "KSEF_REJECTED")]
+    [InlineData("sub_1910005", 502, "KSEF_COMMUNICATION_ERROR")]
+    [InlineData("sub_1910006", 502, "KSEF_SEND_INCOMPLETE")] // stan nie-koncowy != sukces (exhaustive mapping)
+    public async Task Post_ErrorScenarios_MapToHttp(string bridgeId, int expectedStatus, string expectedCode)
+    {
+        var ctrl = NewController(new FakeSferaSession());
+        var (status, value) = Unwrap((await ctrl.Send(bridgeId, CancellationToken.None)).Result);
+
+        Assert.Equal(expectedStatus, status);
+        Assert.Equal(expectedCode, Assert.IsType<ErrorResponseDto>(value).Code);
+    }
+
+    [Fact]
+    public async Task Post_FakeKfsBridgeId_IsParsedAndSupported()
+    {
+        // KSeF wspiera KFS -> parser musi znac "fake_kfs_" (id 2M+n z CreateCorrectionAsync fake'a).
+        var ctrl = NewController(new FakeSferaSession());
+        var (status, value) = Unwrap((await ctrl.Send("fake_kfs_000001", CancellationToken.None)).Result);
+
+        Assert.Equal(200, status);
+        Assert.Equal("registered", Assert.IsType<KsefStatusResponseDto>(value).KsefStatus);
+    }
+
+    [Fact]
+    public async Task Get_Fresh_Returns200None()
+    {
+        var ctrl = NewController(new FakeSferaSession());
+        var (status, value) = Unwrap((await ctrl.GetStatus("sub_1000009", CancellationToken.None)).Result);
+
+        Assert.Equal(200, status);
+        Assert.Equal("none", Assert.IsType<KsefStatusResponseDto>(value).KsefStatus);
+    }
+
+    [Fact]
+    public async Task Get_NotFound_Returns404()
+    {
+        var ctrl = NewController(new FakeSferaSession());
+        var (status, value) = Unwrap((await ctrl.GetStatus("sub_-5", CancellationToken.None)).Result);
+
+        Assert.Equal(404, status);
+        Assert.Equal("INVOICE_NOT_FOUND", Assert.IsType<ErrorResponseDto>(value).Code);
     }
 }
