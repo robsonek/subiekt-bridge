@@ -23,11 +23,16 @@ REST API (główne endpointy + escape hatch):
 |---|---|
 | `POST /api/v1/invoices` | Wystaw FV sprzedaży (z `Idempotency-Key`) |
 | `POST /api/v1/invoices/{id}/corrections` | Wystaw FV korygującą (KFS) |
+| `POST /api/v1/invoices/{id}/ksef` | Wyślij e-Fakturę FS/KFS do KSeF (idempotentny „advance"; 200 zarejestrowana / 202 w toku — ponów POST; bez `Idempotency-Key`) |
+| `GET /api/v1/invoices/{id}/ksef` | Stan KSeF dokumentu (status + numer KSeF; czysty odczyt) |
+| `GET /api/v1/invoices?from&to&type&...` | Listing FS/KFS (read-only, filtry whitelist) |
+| `GET /api/v1/invoices/open-receivables?...` | Otwarte należności — kandydaci do dopasowania z wpłatą (matching robi konsument) |
+| `GET /api/v1/invoices/open-payables?...` | Otwarte zobowiązania (FZ) — kandydaci do dopasowania z wypłatą |
 | `POST /api/v1/receipts` | Wystaw PZ — przyjęcie magazynowe (dropshipping) |
 | `POST /api/v1/transfers` | Wystaw MM — przesunięcie międzymagazynowe (dokument wewnętrzny, nie KSeF) |
 | `GET /api/v1/bank-operations?from&to&direction&unsettled_only` | Lista operacji bankowych (BP/BW) z wyciągu |
 | `GET /api/v1/bank-transactions?direction&unbooked_only&from&to` | Surowy passthrough przelewów z wyciągu (read-only); matching robi konsument |
-| `POST /api/v1/bank-transactions/{hb_id}/book` | 501 — księgowanie HB niedostępne przez Sferę (księguj w module Bankowość, potem `/settlements`) |
+| `POST /api/v1/bank-transactions/{hb_id}/book` | Zaksięguj przelew z wyciągu na operację bankową (z `Idempotency-Key`; wyłączalne `Bridge:EnableHbBooking=false` → 501) |
 | `POST /api/v1/invoices/{id}/settlements` | Rozlicz fakturę (FS/FZ) z przelewem z wyciągu (z `Idempotency-Key`) |
 | `GET /api/v1/invoices/{id}/settlements` | Stan rozliczenia faktury |
 | `DELETE /api/v1/invoices/{id}/settlements/{rozliczenie_id}` | Cofnij rozliczenie |
@@ -36,7 +41,8 @@ REST API (główne endpointy + escape hatch):
 | `GET /api/v1/health` | Diagnostyka (publiczny, bez tokena) |
 | `POST /api/v1/sfera/raw` | Escape hatch z whitelistą metod |
 
-Pełen kontrakt: zobacz `src/SubiektBridge.Api/Models/InvoiceModels.cs`.
+Pełen kontrakt dla integratorów (formaty request/response, kody błędów, retry semantics):
+**[`docs/INTEGRATION-CONTRACT.md`](docs/INTEGRATION-CONTRACT.md)**. DTO: `src/SubiektBridge.Api/Models/`.
 
 ## Wymagania
 

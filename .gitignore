@@ -33,4 +33,8 @@ Thumbs.db
 InsERT/
 
 # Dokumentacja wewnetrzna - trzymana lokalnie, NIE w public repo.
-docs/
+# WYJATEK: INTEGRATION-CONTRACT.md jest PUBLICZNY (przewodnik dla integratorow;
+# decyzja wlasciciela 2026-08-12) - w tym pliku ZERO danych klienta.
+# (docs/* zamiast docs/ - negacja pliku nie dziala, gdy ignorowany jest katalog-rodzic.)
+docs/*
+!docs/INTEGRATION-CONTRACT.md

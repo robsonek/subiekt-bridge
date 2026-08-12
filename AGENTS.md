@@ -81,6 +81,9 @@ REALNA kolumna (≠ `dok_NumerPelny`, który jest computed COM — w `dok__Dokum
 
 `docs/INTEGRATION-CONTRACT.md` — kompletny przewodnik dla konsumenta API (nowego systemu
 sprzedażowego): formaty request/response, obsługa błędów, namespacing `external_reference`.
+**Plik jest PUBLICZNY** (jedyny wyjątek z gitignorowanego `docs/` — od v0.16.0, dla
+agentów-integratorów na GitHubie): przykłady tylko z fikcyjnymi danymi (NIP `1111111111`,
+EAN-y `5901...`), ZERO danych klienta. Reszta `docs/` (plany, specy, audyty) zostaje lokalna.
 Publiczne `{id}` w ścieżkach to **bridge id** w formacie `sub_<SUBIEKT_ID>` (np. `sub_142877`).
 Zmieniasz endpointy → zaktualizuj kontrakt.
 
