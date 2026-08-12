@@ -117,6 +117,8 @@ Invoke-RestMethod -Uri "https://localhost:988/api/v1/admin/update" -Method POST 
 | `GET /api/v1/invoices/open-payables?min_amount&max_amount&currency&contractor_id&from&to&search&limit` | Otwarte zobowiązania (rozrachunki zakupu nzf_Typ=40, FZ, `WartoscBiezaca>0`) w oknie kwoty — kandydaci do dopasowania z WYPŁATĄ (przelew `direction=out`). Lustro `open-receivables` (jedyna różnica: `nzf_Typ=40` zamiast `39`); ten sam request/DTO/search/scan-cap, `doc_type`=`FZ`, PLN-only. Wspólny rdzeń `QueryOpenSettlementsCore(nzfTyp, …)` |
 | `POST /api/v1/invoices` | Wystaw FS (Idempotency-Key required) |
 | `POST /api/v1/invoices/{id}/corrections` | Wystaw KFS |
+| `POST /api/v1/invoices/{id}/ksef` | Wyślij e-Fakturę FS/KFS do KSeF — idempotentny „advance" maszyny stanów `StatusKSeF` (Sprawdz→Generuj→Wyslij→PobierzNumer); sync z capem `Bridge:KsefSendTimeoutSeconds` (90 s), po capie 202 (klient ponawia POST). BEZ Idempotency-Key (stan w Subiekcie). 200 registered / 202 w toku / 422 walidacja-odrzucenie / 502 komunikacja |
+| `GET /api/v1/invoices/{id}/ksef` | Czysty odczyt stanu KSeF (`StatusKSeF`/`NumerKSeF`/`DataNumeruKSeF`) — NICZEGO nie dociąga (polling robi się POST-em) |
 | `GET /api/v1/receipts?...` | Listing PZ |
 | `GET /api/v1/receipts/{id}` / `/pdf` | Single PZ + retro PDF |
 | `POST /api/v1/receipts` | Wystaw PZ (dropshipping) |
@@ -135,6 +137,8 @@ Wszystkie wymagają nagłówka `X-Bridge-Token: <secret>`. Operacje mutujące
 (POST `/invoices`, `/corrections`, `/receipts`, `/transfers`, `/invoices/{id}/settlements`,
 `/bank-transactions/{hb_id}/book`) wymagają też `Idempotency-Key`. `DELETE .../settlements/{id}` jest idempotentny z natury
 (powtórny → `404 SETTLEMENT_NOT_FOUND`), bez `Idempotency-Key`.
+`POST .../{id}/ksef` również BEZ `Idempotency-Key` — naturalna idempotencja przez maszynę
+stanów `StatusKSeF` w Subiekcie (powtórny POST to bezpieczny advance, nic nie wysyła 2x).
 
 ## Krytyczne wzorce (każdy z nich kosztował debug session)
 
@@ -180,8 +184,8 @@ był pusty. Fix: `Path.Combine(AppContext.BaseDirectory, "logs", ...)`.
 
 `FormaDokumentuEnum`: 0 = faktura tradycyjna, **1 = faktura KSeF**, 2 = tryb awaryjny,
 3 = offline24. Bridge ustawia `fs.FormaDokumentu = 1` dla kontrahenta-firmy **świadomie**:
-w Polsce faktury B2B muszą iść do KSeF; Bridge tylko oznacza formę, samą wysyłkę do KSeF
-robi operator w Subiekcie po sprawdzeniu poprawności faktur. NIE zmieniać na 0.
+w Polsce faktury B2B muszą iść do KSeF; Bridge oznacza formę; wysyłkę do KSeF robi operator w Subiekcie LUB klient przez
+`POST /invoices/{id}/ksef` (od v0.15.0). NIE zmieniać na 0.
 
 ### Data sprzedaży FS = `DataZakonczeniaDostawy`, NIE `DataSprzedazy`
 
@@ -319,6 +323,40 @@ Spinanie zaimportowanych z wyciągu operacji bankowych z fakturami (`/invoices/{
   NIE kasuje dokumentów — potem `Zapisz` na rozrachunku.
 - **Bank-operations: filtruj po kolumnie DB `nzf_Typ`** (19=BP/20=BW) w stringu `OtworzKolekcje`,
   NIE po `FinDokument.Typ` (atrybut COM ≠ DB od v1.17).
+
+### KSeF przez Sferę (`EFakturyKSeFManager`) — pułapki
+
+Wysyłka e-Faktur (`POST /invoices/{id}/ksef`): pipeline `SprawdzPoprawnoscEFakturyKSeF` →
+`GenerujEFaktureKSeF` → `WyslijEFaktureKSeF(id, tryb=1 Czekaj)` → dla statusu 4 `PobierzNumerKSeF`.
+- **Dozwolone statusy wejściowe** (CHM): `Sprawdz` {0,1,6,7}; `Generuj` {0,1,2,6,7}; `Wyslij` wymaga
+  wygenerowanej e-Faktury (status 2; **status 8 też ją MA** — retry po błędzie komunikacji idzie
+  prosto w `Wyslij`, `Generuj` dla 8 jest NIEdozwolone).
+- **Status 4 (`PrzetwarzanaWKSeF`) NIE przejdzie sam w 5** — numer KSeF trzeba DOCIĄGNĄĆ
+  (`PobierzNumerKSeF`). Dlatego POST jest „advance" i klient polluje POST-em, nie GET-em.
+- **`Wyslij`/`PobierzNumer` zwracają `OperacjaWTle`** (`Zakonczona`/`Opis`/`Status`/`Blad`) —
+  poll KRÓTKIMI jobami STA co 500 ms (`await Task.Delay` między), NIE blokującą pętlą w jednym
+  jobie (most byłby głuchy na health/invoices przez cały czas wysyłki).
+- **Release `OperacjaWTle` DOPIERO po `Zakonczona==true`** (CHM nie potwierdza bezpieczeństwa
+  release'u niedokończonej operacji). Po capie HTTP własność RCW przejmuje task w tle
+  (`ContinueKsefPollInBackgroundAsync`) — klient dostaje 202 i ponawia POST. Wyjątek
+  last-resort (BEST-EFFORT): po ~15 min task zwalnia RCW mimo braku `Zakonczona` + log ERROR;
+  przy trwale zaklinowanym STA release się nie wykona — ale wtedy martwy jest cały most,
+  restart usługi leczy (śmierć procesu zwalnia RCW).
+- **Gate `_ksefInFlight` per dokument** — równoległe POSTy nie wchodzą w pipeline (kolejka STA
+  serializuje pojedyncze joby, NIE cały flow; synchroniczność ustawienia statusu 3 przez Sferę
+  nieweryfikowalna). Drugi POST → snapshot ze statusem `sending` → 202.
+- **Anulowanie klienta sprawdzane tylko PRZED startem pipeline** — start i poll na
+  `CancellationToken.None` (anulowany Task w `RunOnStaAsync` porzuciłby zwrócony RCW).
+- **Kontroler: mapowanie statusów WYCZERPUJĄCE** — 200 tylko dla `registered`; stan nie-końcowy
+  po zakończonej operacji → 502 `KSEF_SEND_INCOMPLETE` (nie udawać sukcesu).
+- **Po każdej operacji status czytaj z PRZEŁADOWANEGO dokumentu** (`WczytajDokument`); dokument
+  wczytuj tylko do odczytu metadanych i zwalniaj PRZED wywołaniami managera (metody biorą dokId).
+- **Wysyłka wymaga podłączenia Subiekta do Konta InsERT** + skonfigurowanego KSeF podmiotu —
+  najczęstsza przyczyna `KSEF_COMMUNICATION_ERROR` (502) na świeżej instalacji.
+- **`StatusKSeF` stosuje się tylko do dokumentów z `FormaDokumentu=1`** — inne odrzucamy 422
+  `NOT_KSEF_INVOICE` przed dotknięciem managera.
+- Wysyłka NIEODWRACALNA; środowisko KSeF (prod/test MF) to konfiguracja podmiotu w Subiekcie.
+- Dostępność API: od GT 1.77/1.80 (prod klienta 1.88 HF4 OK).
 
 ### Home banking — most = GŁUPIE prymitywy, matching robi Laravel
 
