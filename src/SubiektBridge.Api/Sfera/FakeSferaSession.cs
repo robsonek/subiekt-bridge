@@ -546,6 +546,91 @@ public sealed class FakeSferaSession : ISferaSession
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
+    // ----------------------------- KSeF (wysylka e-Faktur) -----------------------------
+    // Maszyna stanow advance jak w RealSferaSession, na statycznym slowniku (jak _settlements);
+    // testy woluja ResetKsefForTests() i uzywaja unikalnych documentSubiektId.
+    // Konwencja id: <0 nie istnieje; 1M-3M FS/KFS (wspierane); >=3M PZ/MM (unsupported).
+    // Specjalne: 1_910_001 NotKsefInvoice, 1_910_002 ValidationFailed, 1_910_003 Rejected,
+    //            1_910_004 processing na 1. POST -> registered na 2., 1_910_005 CommunicationError,
+    //            1_910_006 niedokonczona wysylka (status 'generated' -> kontroler 502 KSEF_SEND_INCOMPLETE).
+
+    private sealed class FakeKsefState
+    {
+        public string Status = KsefStatusMap.None;
+        public string? Number;
+        public string? NumberDate;
+        public int PostCount;
+    }
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, FakeKsefState> _ksefStates = new();
+
+    internal static void ResetKsefForTests() => _ksefStates.Clear();
+
+    private static KsefStatusResponseDto KsefSnapshot(long documentSubiektId, FakeKsefState st)
+        => new(
+            DocumentId: $"sub_{documentSubiektId}",
+            KsefStatus: st.Status,
+            KsefNumber: st.Number,
+            KsefNumberDate: st.NumberDate,
+            Message: null);
+
+    public Task<KsefStatusResponseDto> SendInvoiceToKsefAsync(long documentSubiektId, CancellationToken ct)
+    {
+        if (documentSubiektId < 0)
+            throw new KsefException(KsefError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje");
+        if (documentSubiektId >= 3_000_000)
+            throw new KsefException(KsefError.UnsupportedDocumentType,
+                "KSeF obsluguje FS (Typ=2) i KFS (Typ=6); dokument magazynowy (PZ/MM) - nie");
+        switch (documentSubiektId)
+        {
+            case 1_910_001:
+                throw new KsefException(KsefError.NotKsefInvoice, "FormaDokumentu=0 (tradycyjna) - nie podlega KSeF (mock)");
+            case 1_910_002:
+                throw new KsefException(KsefError.ValidationFailed, "Dokument nie spelnia wymagan schemy e-Faktury (mock)");
+            case 1_910_003:
+                throw new KsefException(KsefError.Rejected, "KSeF odrzucil dokument (mock)");
+            case 1_910_005:
+                throw new KsefException(KsefError.CommunicationError, "Blad komunikacji z KSeF (mock)");
+            case 1_910_006:
+                // Niedokonczona wysylka: operacja padla bez statusu koncowego - DTO 'generated',
+                // kontroler mapuje na 502 KSEF_SEND_INCOMPLETE (exhaustive mapping).
+                return Task.FromResult(new KsefStatusResponseDto(
+                    DocumentId: $"sub_{documentSubiektId}",
+                    KsefStatus: KsefStatusMap.Generated,
+                    KsefNumber: null,
+                    KsefNumberDate: null,
+                    Message: "Operacja zakonczona bez rejestracji w KSeF (mock)"));
+        }
+
+        var st = _ksefStates.GetOrAdd(documentSubiektId, _ => new FakeKsefState());
+        lock (st)
+        {
+            // 1_910_004: pierwszy POST konczy sie na 'processing' (symulacja capu czasowego),
+            // drugi POST dociaga numer (sciezka PobierzNumerKSeF w Real).
+            if (documentSubiektId == 1_910_004 && st.PostCount == 0)
+            {
+                st.PostCount++;
+                st.Status = KsefStatusMap.Processing;
+                return Task.FromResult(KsefSnapshot(documentSubiektId, st));
+            }
+
+            st.PostCount++;
+            st.Status = KsefStatusMap.Registered;
+            // Fake NIP 1111111111 - repo publiczne, zero realnych danych.
+            st.Number ??= $"1111111111-{DateTime.UtcNow:yyyyMMdd}-{Math.Abs(documentSubiektId):D12}-AA";
+            st.NumberDate ??= DateTime.UtcNow.ToString("yyyy-MM-dd");
+            _lastInvoiceAt = DateTimeOffset.UtcNow;
+            return Task.FromResult(KsefSnapshot(documentSubiektId, st));
+        }
+    }
+
+    public Task<KsefStatusResponseDto?> GetKsefStatusAsync(long documentSubiektId, CancellationToken ct)
+    {
+        if (documentSubiektId < 0) return Task.FromResult<KsefStatusResponseDto?>(null);
+        var st = _ksefStates.GetOrAdd(documentSubiektId, _ => new FakeKsefState());
+        lock (st) { return Task.FromResult<KsefStatusResponseDto?>(KsefSnapshot(documentSubiektId, st)); }
+    }
+
     private static int HashString(string value)
     {
         var hash = 5381;

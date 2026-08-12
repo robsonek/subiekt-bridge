@@ -131,6 +131,22 @@ public interface ISferaSession : IAsyncDisposable
     /// idempotency-replay (czy zacache'owana operacja wciąż istnieje/jest powiązana).
     /// </summary>
     Task<long?> GetBookedOperationIdAsync(long hbId, CancellationToken ct);
+
+    /// <summary>
+    /// Wyślij e-Fakturę dokumentu (FS/KFS) do KSeF - idempotentny "advance" maszyny stanów
+    /// StatusKSeF: sprawdź poprawność -> generuj -> wyślij -> (dla 'processing') dociągnij numer
+    /// przez PobierzNumerKSeF. Zwraca stan końcowy; status 'sending'/'processing' = operacja
+    /// w toku (kontroler -> 202, klient ponawia POST). Rzuca <see cref="KsefException"/>
+    /// (mapowane na 4xx/5xx). Bez Idempotency-Key - źródłem prawdy jest StatusKSeF w Subiekcie.
+    /// </summary>
+    Task<KsefStatusResponseDto> SendInvoiceToKsefAsync(long documentSubiektId, CancellationToken ct);
+
+    /// <summary>
+    /// Czysty odczyt stanu KSeF dokumentu (StatusKSeF/NumerKSeF/DataNumeruKSeF) - niczego NIE
+    /// dociąga (dokument w 'processing' aktualizuje się przez ponowny POST, nie GET).
+    /// Null = dokument nie istnieje (-> 404).
+    /// </summary>
+    Task<KsefStatusResponseDto?> GetKsefStatusAsync(long documentSubiektId, CancellationToken ct);
 }
 
 public sealed record SferaHealthDto(
