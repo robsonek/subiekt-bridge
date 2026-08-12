@@ -59,7 +59,7 @@ public sealed class KsefController : ControllerBase
         }
         catch (KsefException ex)
         {
-            _logger.LogWarning("KSeF: doc={DocId} odrzucony flow: {Reason} - {Message}", documentSubiektId, ex.Reason, ex.Message);
+            _logger.LogWarning(ex, "KSeF: doc={DocId} odrzucony flow: {Reason} - {Message}", documentSubiektId, ex.Reason, ex.Message);
             return MapKsefError(ex);
         }
         catch (Exception ex)
