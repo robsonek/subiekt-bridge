@@ -1221,12 +1221,17 @@ public sealed class RealSferaSession : ISferaSession
         // 4 processing: dokument wyslany, numer KSeF trzeba DOCIAGNAC (sam nie przyjdzie).
         if (status == 4)
         {
-            try { return new KsefStart((object)manager.PobierzNumerKSeF((int)documentSubiektId), null); }
+            object? operacjaOdbioru;
+            try { operacjaOdbioru = (object?)manager.PobierzNumerKSeF((int)documentSubiektId); }
             catch (Exception ex)
             {
                 throw new KsefException(KsefError.CommunicationError,
                     $"PobierzNumerKSeF dla dokumentu {documentSubiektId} nie powiodlo sie: {ex.Message}", ex);
             }
+            // Guard: COM moze zwrocic Nothing - bez uchwytu operacji nie ma czego pollowac,
+            // a KsefStart(null, null) skonczylby sie NRE w kontrolerze zamiast czytelnego bledu.
+            return new KsefStart(operacjaOdbioru ?? throw new KsefException(KsefError.Internal,
+                $"PobierzNumerKSeF dla dokumentu {documentSubiektId} zwrocil null (COM Nothing) - brak uchwytu operacji"), null);
         }
 
         // 0 none / 6 rejected / 7 validation_failed: walidacja od nowa (dane mogly zostac poprawione;
@@ -1268,12 +1273,16 @@ public sealed class RealSferaSession : ISferaSession
         }
 
         // gtaTrybOczekiwaniaNaNrKSeFCzekaj = 1: operacja w tle czeka na nadanie numeru KSeF.
-        try { return new KsefStart((object)manager.WyslijEFaktureKSeF((int)documentSubiektId, 1), null); }
+        object? operacjaWysylki;
+        try { operacjaWysylki = (object?)manager.WyslijEFaktureKSeF((int)documentSubiektId, 1); }
         catch (Exception ex)
         {
             throw new KsefException(KsefError.CommunicationError,
                 $"Start wysylki dokumentu {documentSubiektId} do KSeF nie powiodl sie (Konto InsERT podlaczone? KSeF skonfigurowany?): {ex.Message}", ex);
         }
+        // Guard: COM moze zwrocic Nothing - patrz galaz statusu 4.
+        return new KsefStart(operacjaWysylki ?? throw new KsefException(KsefError.Internal,
+            $"WyslijEFaktureKSeF dla dokumentu {documentSubiektId} zwrocil null (COM Nothing) - brak uchwytu operacji"), null);
     }
 
     /// <summary>
