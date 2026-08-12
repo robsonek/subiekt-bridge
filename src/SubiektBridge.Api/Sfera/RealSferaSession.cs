@@ -911,6 +911,14 @@ public sealed class RealSferaSession : ISferaSession
 
     public Task<long?> GetBookedOperationIdAsync(long hbId, CancellationToken ct) => Task.Run(() => ReadHbLink(hbId), ct);
 
+    // ----------------------------- KSeF -----------------------------
+    // Stub - realna implementacja w Task 4 (KsefStartCore + poll OperacjaWTle).
+    public Task<KsefStatusResponseDto> SendInvoiceToKsefAsync(long documentSubiektId, CancellationToken ct)
+        => throw new NotImplementedException("KSeF: implementacja w toku");
+
+    public Task<KsefStatusResponseDto?> GetKsefStatusAsync(long documentSubiektId, CancellationToken ct)
+        => throw new NotImplementedException("KSeF: implementacja w toku");
+
     private long CreateBankOperationCore(HbTxForBooking tx, long? contractorId)
     {
         // C (uznanie/wplata) -> BP (gtaDokFinTypBP=19); D (obciazenie/wyplata) -> BW (20). Kwota = magnitude, double.
