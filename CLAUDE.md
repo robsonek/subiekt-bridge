@@ -185,7 +185,7 @@ był pusty. Fix: `Path.Combine(AppContext.BaseDirectory, "logs", ...)`.
 `FormaDokumentuEnum`: 0 = faktura tradycyjna, **1 = faktura KSeF**, 2 = tryb awaryjny,
 3 = offline24. Bridge ustawia `fs.FormaDokumentu = 1` dla kontrahenta-firmy **świadomie**:
 w Polsce faktury B2B muszą iść do KSeF; Bridge oznacza formę; wysyłkę do KSeF robi operator w Subiekcie LUB klient przez
-`POST /invoices/{id}/ksef` (od v0.15.0). NIE zmieniać na 0.
+`POST /invoices/{id}/ksef` (od v0.16.0). NIE zmieniać na 0.
 
 ### Data sprzedaży FS = `DataZakonczeniaDostawy`, NIE `DataSprzedazy`
 
