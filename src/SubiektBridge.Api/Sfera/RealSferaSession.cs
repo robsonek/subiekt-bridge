@@ -32,6 +32,7 @@ namespace SubiektBridge.Api.Sfera;
 public sealed class RealSferaSession : ISferaSession
 {
     private readonly SubiektOptions _options;
+    private readonly BridgeOptions _bridgeOptions;
     private readonly ILogger<RealSferaSession> _logger;
     private readonly Thread _staThread;
     private readonly BlockingCollection<Action> _workQueue = new();
@@ -41,9 +42,10 @@ public sealed class RealSferaSession : ISferaSession
     private string? _lastError;
     private bool _disposed;
 
-    public RealSferaSession(SubiektOptions options, ILogger<RealSferaSession> logger)
+    public RealSferaSession(SubiektOptions options, BridgeOptions bridgeOptions, ILogger<RealSferaSession> logger)
     {
         _options = options;
+        _bridgeOptions = bridgeOptions;
         _logger = logger;
 
         _staThread = new Thread(WorkerLoop)
@@ -911,13 +913,429 @@ public sealed class RealSferaSession : ISferaSession
 
     public Task<long?> GetBookedOperationIdAsync(long hbId, CancellationToken ct) => Task.Run(() => ReadHbLink(hbId), ct);
 
-    // ----------------------------- KSeF -----------------------------
-    // Stub - realna implementacja w Task 4 (KsefStartCore + poll OperacjaWTle).
-    public Task<KsefStatusResponseDto> SendInvoiceToKsefAsync(long documentSubiektId, CancellationToken ct)
-        => throw new NotImplementedException("KSeF: implementacja w toku");
+    // ----------------------------- KSeF (wysylka e-Faktur) -----------------------------
+    // POST = idempotentny "advance" maszyny stanow StatusKSeF. Pipeline (CHM, GT >= 1.80):
+    //   Sprawdz (statusy 0/6/7) -> Generuj (status 1) -> Wyslij (statusy 2/8, tryb Czekaj=1)
+    //   -> poll OperacjaWTle; status 4 (processing) -> PobierzNumerKSeF (numer sam nie przyjdzie!).
+    // Poll KROTKIMI jobami STA co 500 ms - kolejka STA wolna dla innych requestow miedzy odczytami.
+    // Release OperacjaWTle DOPIERO po Zakonczona==true (CHM nie potwierdza bezpieczenstwa release'u
+    // niedokonczonej operacji) - po capie HTTP lub wyjatku przy zywym RCW wlasnosc przejmuje task
+    // w tle (wyjatek: release LAST-RESORT po ~15 min, BEST-EFFORT - patrz ContinueKsefPoll...).
+    // Gate _ksefInFlight: rownolegle POSTy na ten sam dokument NIE wchodza w pipeline (kolejka STA
+    // serializuje pojedyncze joby, nie caly flow; nie polegamy na tym, czy Sfera ustawia status 3
+    // synchronicznie przed zwroceniem OperacjaWTle).
+    // Wymog srodowiskowy: Subiekt podlaczony do Konta InsERT (inaczej wyjatek -> 502).
+
+    private sealed record KsefStart(object? Operacja, KsefStatusResponseDto? Snapshot);
+
+    // Dokumenty z wysylka w toku (gate). Wpis trzyma takze task w tle po capie HTTP.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, byte> _ksefInFlight = new();
+
+    public async Task<KsefStatusResponseDto> SendInvoiceToKsefAsync(long documentSubiektId, CancellationToken ct)
+    {
+        // Gate per dokument: rownolegly POST dostaje snapshot jako 'sending' (kontroler -> 202).
+        if (!_ksefInFlight.TryAdd(documentSubiektId, 0))
+        {
+            var busy = await RunOnStaAsync(() => ReadKsefStatusCore(documentSubiektId, lastBlad: null), ct)
+                ?? throw new KsefException(KsefError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje");
+            // Wymus 'sending', gdy status w bazie jeszcze nie nadazyl (trzymany gate = wysylka trwa).
+            return busy.KsefStatus is KsefStatusMap.Sending or KsefStatusMap.Processing
+                ? busy
+                : busy with { KsefStatus = KsefStatusMap.Sending };
+        }
+
+        bool handedOff = false;
+        try
+        {
+            // Anulowanie sprawdzamy TYLKO tutaj, PRZED sekcja nieodwracalna. Dalej wszystko idzie na
+            // CancellationToken.None: RunOnStaAsync nie przerywa wykonywanego delegata, a anulowany
+            // Task porzucilby zwrocony RCW OperacjaWTle (wyciek + zgubiony Blad).
+            ct.ThrowIfCancellationRequested();
+
+            // Krok 1 (jeden job STA): guardy + lokalne kroki pipeline (Sprawdz/Generuj sa synchroniczne
+            // i szybkie - lokalny zapis w bazie) + start operacji w tle (Wyslij/PobierzNumer).
+            var start = await RunOnStaAsync(() => KsefStartCore(documentSubiektId), CancellationToken.None);
+            if (start.Operacja is null)
+            {
+                // Stan terminalny bez czekania: registered (nic do roboty) albo sending (operacja
+                // operatora z GUI w toku) - kontroler mapuje na 200/202. Snapshot nie-null:
+                // KsefStartCore rzuca DocumentNotFound, gdy dokument zniknal.
+                return start.Snapshot!;
+            }
+
+            // Krok 2: poll do capu HTTP. Od startu operacji RCW ma ZAWSZE wlasciciela:
+            // sukces -> release ponizej (po Zakonczona); cap LUB wyjatek przy zywym RCW ->
+            // wlasnosc przejmuje task w tle (jednolita polityka, zero porzuconych RCW).
+            bool done = false;
+            string? blad = null;
+            try
+            {
+                var deadline = DateTimeOffset.UtcNow.AddSeconds(Math.Max(5, _bridgeOptions.KsefSendTimeoutSeconds));
+                while (DateTimeOffset.UtcNow < deadline)
+                {
+                    done = await RunOnStaAsync(() =>
+                    {
+                        dynamic op = start.Operacja!;
+                        return (bool)op.Zakonczona;
+                    }, CancellationToken.None);
+                    if (done) break;
+                    await Task.Delay(500, CancellationToken.None);
+                }
+                if (done)
+                {
+                    blad = await RunOnStaAsync(() => TryReadString(start.Operacja!, "Blad"), CancellationToken.None);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Wyjatek przy ZYWYM RCW (np. pad sesji przy odczycie Zakonczona/Blad) - nie wolno
+                // go porzucic: task w tle przejmuje wlasnosc (poll + release last-resort).
+                handedOff = true;
+                _ = ContinueKsefPollInBackgroundAsync(documentSubiektId, start.Operacja);
+                throw new KsefException(KsefError.CommunicationError,
+                    $"Odczyt stanu wysylki KSeF dokumentu {documentSubiektId} nie powiodl sie: {ex.Message}", ex);
+            }
+
+            if (!done)
+            {
+                // Cap minal, operacja NIEdokonczona - NIE zwalniamy RCW. Wlasnosc + gate przejmuje
+                // task w tle; klient dostaje 202 i ponawia POST.
+                handedOff = true;
+                _ = ContinueKsefPollInBackgroundAsync(documentSubiektId, start.Operacja);
+                var snap = await RunOnStaAsync(() => ReadKsefStatusCore(documentSubiektId, lastBlad: null), CancellationToken.None)
+                    ?? throw new KsefException(KsefError.Internal,
+                        $"Dokument {documentSubiektId} zniknal w trakcie wysylki do KSeF");
+                return snap.KsefStatus is KsefStatusMap.Sending or KsefStatusMap.Processing
+                    ? snap
+                    : snap with { KsefStatus = KsefStatusMap.Sending };
+            }
+
+            // Operacja zakonczona (Zakonczona==true): release RCW na STA. Wyjatki DALEJ (reload,
+            // switch) nie dotykaja juz RCW - handoff od tego miejsca bylby double-release.
+            try
+            {
+                await RunOnStaAsync<bool>(() =>
+                {
+                    // Log W DELEGACIE - inner catch polyka wyjatek, wiec outer catch by go nie zobaczyl.
+                    try { Marshal.ReleaseComObject(start.Operacja!); }
+                    catch (Exception rex) { _logger.LogWarning(rex, "KSeF: ReleaseComObject doc={DocId} padl (finalizer dokonczy)", documentSubiektId); }
+                    return true;
+                }, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                // Outer catch lapie TYLKO awarie poziomu kolejki (ObjectDisposed itp.) -
+                // release nie moze zablokowac wyniku; RCW dokonczy finalizer GC.
+                _logger.LogWarning(ex, "KSeF: job release OperacjaWTle doc={DocId} nie wykonal sie", documentSubiektId);
+            }
+
+            // Krok 3 (STA): stan koncowy z PRZELADOWANEGO dokumentu (atrybuty odswieza dopiero reload).
+            var result = await RunOnStaAsync(
+                    () => ReadKsefStatusCore(documentSubiektId, string.IsNullOrWhiteSpace(blad) ? null : blad),
+                    CancellationToken.None)
+                ?? throw new KsefException(KsefError.Internal,
+                    $"Dokument {documentSubiektId} zniknal w trakcie wysylki do KSeF");
+
+            return result.KsefStatus switch
+            {
+                KsefStatusMap.Rejected => throw new KsefException(KsefError.Rejected,
+                    $"KSeF odrzucil dokument {documentSubiektId}: {result.Message ?? "brak opisu"}"),
+                KsefStatusMap.CommunicationError => throw new KsefException(KsefError.CommunicationError,
+                    $"Blad komunikacji z KSeF dla dokumentu {documentSubiektId}: {result.Message ?? "brak opisu"}"),
+                // registered -> 200; sending/processing -> 202; inny stan nie-koncowy -> kontroler
+                // zwraca 502 KSEF_SEND_INCOMPLETE (exhaustive mapping w KsefController).
+                _ => result,
+            };
+        }
+        finally
+        {
+            // Gate zwalnia ten request, CHYBA ze wlasnosc przejal task w tle (wtedy on zwolni).
+            if (!handedOff) _ksefInFlight.TryRemove(documentSubiektId, out _);
+        }
+    }
+
+    /// <summary>
+    /// Awaituje job STA z limitem czasu OBSERWATORA. RunOnStaAsync nie umie anulowac ani przerwac
+    /// delegata (COM call nie jest anulowalny) - po timeoucie job dalej siedzi w kolejce FIFO /
+    /// wykonuje sie; dopinamy continuation logujaca ewentualny pozniejszy fault, zeby porzucony
+    /// Task nie zgubil wyjatku (unobserved). Timeout NIE jest wiec gwarancja wykonania - przy
+    /// trwale zaklinowanym STA joby nigdy nie ruszaja, ale wtedy martwy jest CALY most (health
+    /// tez wisi) i leczy go restart uslugi (smierc procesu zwalnia wszystkie RCW).
+    /// </summary>
+    private async Task<T> AwaitStaBounded<T>(Task<T> job, TimeSpan limit, long docId, string what)
+    {
+        // Filtr `when`: TimeoutException rzucony PRZEZ delegata (job ukonczony faultem) ma leciec
+        // do callera jako blad jobu, nie byc mylony z timeoutem obserwatora.
+        try { return await job.WaitAsync(limit); }
+        catch (TimeoutException) when (!job.IsCompleted)
+        {
+            _ = job.ContinueWith(
+                t =>
+                {
+                    // Logger w try/catch - wyjatek z continuation bylby NOWYM unobserved fault.
+                    try
+                    {
+                        _logger.LogWarning(t.Exception,
+                            "KSeF: porzucony job STA ({What}) doc={DocId} sfaultowal po timeoucie obserwatora", what, docId);
+                    }
+                    catch { /* nie produkuj kolejnego faultu */ }
+                },
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Przejmuje wlasnosc NIEdokonczonej OperacjaWTle (cap HTTP / wyjatek przy zywym RCW):
+    /// polluje do Zakonczona (interwal 2 s), potem release RCW na STA. Trzyma gate _ksefInFlight
+    /// do konca (rownolegle POSTy dostaja 202). Wynik laduje w StatusKSeF dokumentu - klient
+    /// odbierze go kolejnym POST-em; terminalny Blad LOGUJEMY (jedyny slad - nie ma go gdzie
+    /// persystowac). POLITYKA LAST-RESORT (BEST-EFFORT): po limicie ~15 min (sprawdzanym miedzy
+    /// odczytami - moze przekroczyc o jeden interwal/WaitAsync) release MIMO braku Zakonczona +
+    /// log ERROR - swiadomy kompromis (wieczny brak release'u i tak skonczylby sie releasem
+    /// z finalizera GC w losowym momencie, a gate nie moze byc zajety na zawsze). Przy trwale
+    /// zaklinowanym STA release sie nie wykona - wtedy martwy jest caly most, restart leczy.
+    /// Awaity jobow STA przez AwaitStaBounded (timeout obserwatora + continuation na fault).
+    /// </summary>
+    private async Task ContinueKsefPollInBackgroundAsync(long documentSubiektId, object operacja)
+    {
+        bool completed = false;
+        try
+        {
+            var hardLimit = DateTimeOffset.UtcNow.AddMinutes(15);
+            while (DateTimeOffset.UtcNow < hardLimit)
+            {
+                bool done;
+                try
+                {
+                    done = await AwaitStaBounded(RunOnStaAsync(() =>
+                    {
+                        dynamic op = operacja;
+                        return (bool)op.Zakonczona;
+                    }, CancellationToken.None), TimeSpan.FromMinutes(2), documentSubiektId, "Zakonczona");
+                }
+                catch (Exception ex)
+                {
+                    // Stan NIEODCZYTYWALNY (pad sesji / wedged STA) - to NIE jest "zakonczona":
+                    // przerywamy watch, release w finally jest last-resort (log ERROR ponizej).
+                    _logger.LogWarning(ex, "KSeF: background poll doc={DocId} - odczyt stanu padl, przerywam watch", documentSubiektId);
+                    break;
+                }
+                if (done) { completed = true; break; }
+                await Task.Delay(2_000, CancellationToken.None);
+            }
+
+            if (completed)
+            {
+                // Terminalny Blad tylko do logu (dokument nie ma pola na ten komunikat; kolejny
+                // POST na statusie 6 celowo wchodzi w retry pipeline i przyniesie swiezy Blad).
+                string? blad = null;
+                try
+                {
+                    blad = await AwaitStaBounded(
+                        RunOnStaAsync(() => TryReadString(operacja, "Blad"), CancellationToken.None),
+                        TimeSpan.FromMinutes(1), documentSubiektId, "Blad");
+                }
+                catch { /* log-only path */ }
+                if (!string.IsNullOrWhiteSpace(blad))
+                {
+                    _logger.LogError("KSeF: background wysylka doc={DocId} zakonczona bledem: {Blad}", documentSubiektId, blad);
+                }
+                else
+                {
+                    _logger.LogInformation("KSeF: background wysylka doc={DocId} zakonczona", documentSubiektId);
+                }
+            }
+            else
+            {
+                _logger.LogError(
+                    "KSeF: background poll doc={DocId} NIE osiagnal Zakonczona (limit 15 min / pad odczytu) - " +
+                    "release last-resort; dokument moze zostac w statusie sending/processing " +
+                    "(odblokowanie: operator w GUI lub ponowny POST przy statusie 4)", documentSubiektId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "KSeF: background poll doc={DocId} przerwany", documentSubiektId);
+        }
+        finally
+        {
+            try
+            {
+                await AwaitStaBounded(RunOnStaAsync<bool>(() =>
+                {
+                    try { Marshal.ReleaseComObject(operacja); }
+                    catch (Exception rex) { _logger.LogWarning(rex, "KSeF: ReleaseComObject doc={DocId} padl (finalizer dokonczy)", documentSubiektId); }
+                    return true;
+                }, CancellationToken.None), TimeSpan.FromMinutes(1), documentSubiektId, "Release");
+            }
+            catch (Exception ex)
+            {
+                // Symetrycznie do foreground: awaria poziomu kolejki (ObjectDisposed/wedged STA)
+                // tez zostawia slad w logu; restart uslugi zwalnia RCW.
+                _logger.LogWarning(ex, "KSeF: job release (tlo) doc={DocId} nie wykonal sie", documentSubiektId);
+            }
+            // Zdjecie gate bez POTWIERDZENIA release'u jest bezpieczne: kolejka STA jest FIFO,
+            // wiec zakolejkowany release wykona sie PRZED jobami ewentualnego kolejnego POSTa.
+            _ksefInFlight.TryRemove(documentSubiektId, out _);
+            _logger.LogInformation("KSeF: background poll doc={DocId} zakonczony, gate zwolniony", documentSubiektId);
+        }
+    }
 
     public Task<KsefStatusResponseDto?> GetKsefStatusAsync(long documentSubiektId, CancellationToken ct)
-        => throw new NotImplementedException("KSeF: implementacja w toku");
+        => RunOnStaAsync(() => ReadKsefStatusCore(documentSubiektId, lastBlad: null), ct);
+
+    /// <summary>
+    /// [STA] Guardy + advance pipeline do momentu startu operacji w tle. Zwraca (OperacjaWTle, null)
+    /// gdy wystartowala wysylka/odbior numeru, albo (null, snapshot) gdy stan terminalny bez czekania.
+    /// </summary>
+    private KsefStart KsefStartCore(long documentSubiektId)
+    {
+        int status = ReadDocKsefMeta(documentSubiektId, out long docType, out long formaDokumentu);
+
+        // SuDokument.Typ (= dok_Typ): 2=FS, 6=KFS - tylko te podlegaja e-Fakturze sprzedazy.
+        if (docType != 2 && docType != 6)
+        {
+            throw new KsefException(KsefError.UnsupportedDocumentType,
+                $"KSeF obsluguje FS (Typ=2) i KFS (Typ=6). Dokument {documentSubiektId} ma Typ={docType}.");
+        }
+        // FormaDokumentuEnum: 1 = gtaFormaDokumentuFakturaKSeF (most ustawia dla kontrahenta-firmy).
+        if (formaDokumentu != 1)
+        {
+            throw new KsefException(KsefError.NotKsefInvoice,
+                $"Dokument {documentSubiektId} ma FormaDokumentu={formaDokumentu} (nie-KSeF) - nie podlega wysylce do KSeF.");
+        }
+
+        // 5 registered: nic do roboty. 3 sending: operacja (nasza albo operatora z GUI) w toku.
+        if (status is 5 or 3)
+        {
+            // Null-guard: dokument mogl zniknac miedzy odczytem meta a snapshotem (anulacja w GUI).
+            var snapshot = ReadKsefStatusCore(documentSubiektId, lastBlad: null)
+                ?? throw new KsefException(KsefError.DocumentNotFound,
+                    $"Dokument {documentSubiektId} zniknal miedzy odczytem statusu a snapshotem");
+            return new KsefStart(null, snapshot);
+        }
+
+        dynamic manager = Session.EFakturyKSeFManager;
+
+        // 4 processing: dokument wyslany, numer KSeF trzeba DOCIAGNAC (sam nie przyjdzie).
+        if (status == 4)
+        {
+            try { return new KsefStart((object)manager.PobierzNumerKSeF((int)documentSubiektId), null); }
+            catch (Exception ex)
+            {
+                throw new KsefException(KsefError.CommunicationError,
+                    $"PobierzNumerKSeF dla dokumentu {documentSubiektId} nie powiodlo sie: {ex.Message}", ex);
+            }
+        }
+
+        // 0 none / 6 rejected / 7 validation_failed: walidacja od nowa (dane mogly zostac poprawione;
+        // odrzucenie NA WEJSCIU nie jest bledem - bledem jest odrzucenie WYNIKIEM biezacej wysylki).
+        if (status is 0 or 6 or 7)
+        {
+            try { manager.SprawdzPoprawnoscEFakturyKSeF((int)documentSubiektId); }
+            catch (Exception ex)
+            {
+                throw new KsefException(KsefError.ValidationFailed,
+                    $"Walidacja e-Faktury dokumentu {documentSubiektId} nie powiodla sie: {ex.Message}", ex);
+            }
+            status = ReadDocKsefMeta(documentSubiektId, out _, out _);
+            if (status == 7)
+            {
+                throw new KsefException(KsefError.ValidationFailed,
+                    $"Dokument {documentSubiektId} nie spelnia wymagan schemy e-Faktury (StatusKSeF=7).");
+            }
+        }
+
+        // 1 validated: generacja e-Faktury (lokalny zapis w bazie, bez wysylki).
+        if (status == 1)
+        {
+            try { manager.GenerujEFaktureKSeF((int)documentSubiektId); }
+            catch (Exception ex)
+            {
+                throw new KsefException(KsefError.ValidationFailed,
+                    $"Generowanie e-Faktury dokumentu {documentSubiektId} nie powiodlo sie: {ex.Message}", ex);
+            }
+            status = ReadDocKsefMeta(documentSubiektId, out _, out _);
+        }
+
+        // Oczekiwane: 2 generated (swieza generacja) lub 8 communication_error (retry - e-Faktura JUZ
+        // wygenerowana, Generuj dla 8 niedozwolone wg CHM, Wyslij wymaga tylko wygenerowanej e-Faktury).
+        if (status is not (2 or 8))
+        {
+            throw new KsefException(KsefError.Internal,
+                $"Nieoczekiwany StatusKSeF={status} dokumentu {documentSubiektId} po generacji e-Faktury.");
+        }
+
+        // gtaTrybOczekiwaniaNaNrKSeFCzekaj = 1: operacja w tle czeka na nadanie numeru KSeF.
+        try { return new KsefStart((object)manager.WyslijEFaktureKSeF((int)documentSubiektId, 1), null); }
+        catch (Exception ex)
+        {
+            throw new KsefException(KsefError.CommunicationError,
+                $"Start wysylki dokumentu {documentSubiektId} do KSeF nie powiodl sie (Konto InsERT podlaczone? KSeF skonfigurowany?): {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    /// [STA] Wczytuje dokument, czyta {StatusKSeF, Typ, FormaDokumentu} i NATYCHMIAST zwalnia COM
+    /// (metody KSeF biora dokId - trzymanie otwartego SuDokument grozi lockiem edycji).
+    /// Rzuca KsefException(DocumentNotFound) gdy dokument nie istnieje (duchy tez).
+    /// </summary>
+    private int ReadDocKsefMeta(long documentSubiektId, out long docType, out long formaDokumentu)
+    {
+        dynamic? dok = null;
+        try
+        {
+            try { dok = Session.SuDokumentyManager.WczytajDokument(documentSubiektId); }
+            catch (Exception ex)
+            {
+                throw new KsefException(KsefError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje", ex);
+            }
+            if (dok is null)
+            {
+                throw new KsefException(KsefError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje");
+            }
+            docType = TryReadInt64((object)dok, "Typ") ?? -1;
+            formaDokumentu = TryReadInt64((object)dok, "FormaDokumentu") ?? -1;
+            // StatusKSeF przychodzi jako enum COM - dynamic rzutuje na int przez TryReadInt64.
+            return (int)(TryReadInt64((object)dok, "StatusKSeF") ?? 0);
+        }
+        finally
+        {
+            // TryClose (Zamknij + release) - idiom repo dla SuDokument (por. GetSettlementsCore);
+            // helper obsluguje null.
+            TryClose(dok);
+        }
+    }
+
+    /// <summary>[STA] Snapshot stanu KSeF z przeladowanego dokumentu. Null = dokument nie istnieje.</summary>
+    private KsefStatusResponseDto? ReadKsefStatusCore(long documentSubiektId, string? lastBlad)
+    {
+        dynamic? dok = null;
+        try
+        {
+            try { dok = Session.SuDokumentyManager.WczytajDokument(documentSubiektId); }
+            catch { return null; }
+            if (dok is null) return null;
+
+            int status = (int)(TryReadInt64((object)dok, "StatusKSeF") ?? 0);
+            string? numer = TryReadString((object)dok, "NumerKSeF");
+            string? dataNumeru = TryReadDateString((object)dok, "DataNumeruKSeF");
+
+            return new KsefStatusResponseDto(
+                DocumentId: $"sub_{documentSubiektId}",
+                KsefStatus: KsefStatusMap.ToApiString(status),
+                KsefNumber: string.IsNullOrWhiteSpace(numer) ? null : numer,
+                KsefNumberDate: dataNumeru,
+                Message: lastBlad);
+        }
+        finally
+        {
+            // TryClose (Zamknij + release) - idiom repo dla SuDokument (por. GetSettlementsCore);
+            // helper obsluguje null.
+            TryClose(dok);
+        }
+    }
 
     private long CreateBankOperationCore(HbTxForBooking tx, long? contractorId)
     {
@@ -3224,6 +3642,20 @@ public sealed class RealSferaSession : ISferaSession
                 BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public,
                 null, target, Array.Empty<object>());
             return raw?.ToString();
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Czyta atrybut DateTime i formatuje YYYY-MM-DD; null gdy brak/nieustawiony (rok <= 1900).</summary>
+    private static string? TryReadDateString(object target, string propName)
+    {
+        try
+        {
+            object? val = target.GetType().InvokeMember(propName,
+                System.Reflection.BindingFlags.GetProperty, null, target, null);
+            return val is DateTime dt && dt.Year > 1900
+                ? dt.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)
+                : null;
         }
         catch { return null; }
     }

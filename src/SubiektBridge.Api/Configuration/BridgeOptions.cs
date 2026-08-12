@@ -36,6 +36,13 @@ public sealed class BridgeOptions
     /// empirycznie (brak dostepu do serwera do testu sekcja 7) - swiadome ryzyko wlasciciela.
     /// </summary>
     public bool EnableHbBooking { get; init; } = true;
+
+    /// <summary>
+    /// Cap (sekundy) na czekanie POST /invoices/{id}/ksef na wynik operacji KSeF (poll OperacjaWTle).
+    /// Po przekroczeniu endpoint zwraca 202 - wysylka dokancza sie w tle Sfery, klient ponawia POST
+    /// (idempotentny advance). Min egzekwowane w kodzie: 5 s.
+    /// </summary>
+    public int KsefSendTimeoutSeconds { get; init; } = 90;
 }
 
 public sealed class SubiektOptions
