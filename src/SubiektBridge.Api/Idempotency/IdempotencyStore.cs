@@ -130,6 +130,47 @@ public sealed class IdempotencyStore
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    // ----------------------------- Journal ksiegowania /book (write-ahead) -----------------------------
+    //
+    // Miedzy bp.Zapisz() (BP w Subiekcie) a raw UPDATE hb_Transakcja (link) nie ma zadnego sladu "BP nzf_id
+    // nalezy do hb_id X" - BP nie ma pola na ref (Opis niedostepny dla op. bankowych, Tytulem celowo surowy).
+    // Smierc procesu w tym oknie (Stop-Service przy self-update, crash) zostawiala osierocony BP, a retry
+    // klienta tworzyl DRUGI. Journal: wpis (hb_id -> nzf_id) zaraz po Zapisz; usuwany po sukcesie/rollbacku;
+    // na wejsciu /book pending wpis + istniejacy BP = dokonczenie linku zamiast nowego BP.
+
+    public async Task SavePendingBookingAsync(long hbId, long nzfId, CancellationToken ct)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT OR REPLACE INTO pending_bookings (hb_id, nzf_id, created_at) VALUES ($hb, $nzf, $created)";
+        cmd.Parameters.AddWithValue("$hb", hbId);
+        cmd.Parameters.AddWithValue("$nzf", nzfId);
+        cmd.Parameters.AddWithValue("$created", DateTimeOffset.UtcNow.ToString("O"));
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<long?> TryGetPendingBookingAsync(long hbId, CancellationToken ct)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT nzf_id FROM pending_bookings WHERE hb_id = $hb LIMIT 1";
+        cmd.Parameters.AddWithValue("$hb", hbId);
+        var v = await cmd.ExecuteScalarAsync(ct);
+        return v is null || v is DBNull ? null : Convert.ToInt64(v);
+    }
+
+    public async Task DeletePendingBookingAsync(long hbId, CancellationToken ct)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM pending_bookings WHERE hb_id = $hb";
+        cmd.Parameters.AddWithValue("$hb", hbId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     private void EnsureSchema()
     {
         using var conn = new SqliteConnection(_connectionString);
@@ -143,6 +184,11 @@ public sealed class IdempotencyStore
                 created_at  TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_idempotency_created ON idempotency(created_at);
+            CREATE TABLE IF NOT EXISTS pending_bookings (
+                hb_id       INTEGER PRIMARY KEY,
+                nzf_id      INTEGER NOT NULL,
+                created_at  TEXT NOT NULL
+            );
             """;
         cmd.ExecuteNonQuery();
     }

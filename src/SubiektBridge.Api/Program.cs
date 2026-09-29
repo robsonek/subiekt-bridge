@@ -67,7 +67,8 @@ builder.Services.AddSingleton<ISferaSession>(sp =>
 
     var subiektOptions = sp.GetRequiredService<SubiektOptions>();
     var realLogger = sp.GetRequiredService<ILogger<RealSferaSession>>();
-    return new RealSferaSession(subiektOptions, options, realLogger);
+    var journal = sp.GetRequiredService<IdempotencyStore>();
+    return new RealSferaSession(subiektOptions, options, realLogger, journal);
 });
 
 builder.Services.AddSingleton<IdempotencyStore>();

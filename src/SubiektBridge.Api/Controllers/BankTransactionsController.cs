@@ -153,6 +153,10 @@ public sealed class BankTransactionsController : ControllerBase
         {
             return UnprocessableEntity(new ErrorResponseDto("UNSUPPORTED_HB_STATUS", ex.Message));
         }
+        catch (BankBookingException ex) when (ex.Reason == BookError.InvalidAmount)
+        {
+            return UnprocessableEntity(new ErrorResponseDto("INVALID_HB_AMOUNT", ex.Message));
+        }
         catch (BankBookingException ex) when (ex.Reason == BookError.Internal)
         {
             // COM/raw UPDATE padl, ale BP zostal CZYSTO cofniety (stan spojny) -> retryowalne. Bez stacka w body.

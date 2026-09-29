@@ -539,10 +539,13 @@ public sealed class FakeSferaSession : ISferaSession
             new BankTransactionDto(13109, "2026-06-12", 371.12m, "in", "Google Commerce Limited", "PL61109010140000071219812874", "PRZELEW - payout", null, false, null, 49, "PL49 1870 0000 0000 0000 0000 0049"),
             new BankTransactionDto(13127, "2026-06-11", 3372.50m, "in", "Jan Szyszka", "PL27114020040000300201355387", "PRZELEW - zaplata", null, false, null, 1, "PL08 1140 0000 0000 0000 0000 8831"),
             new BankTransactionDto(12001, "2026-06-01", 500.00m, "out", "Dostawca XYZ", "PL11111111111111111111111111", "PRZELEW wychodzacy", null, true, 88001, 49, "PL49 1870 0000 0000 0000 0000 0049"),
+            // Bez linku, ale POMINIETA przez operatora (hb_Status=3) - NIE jest "do zaksiegowania".
+            new BankTransactionDto(13200, "2026-06-10", 12.00m, "in", "Oplata bankowa", null, "PROWIZJA", null, false, null, 49, "PL49 1870 0000 0000 0000 0000 0049", HbStatus: 3),
         };
 
         IEnumerable<BankTransactionDto> q = all;
-        if (request.UnbookedOnly) q = q.Where(t => !t.Booked);
+        // Parytet z Real: unbooked_only = bez linku I hb_Status IN (0,4).
+        if (request.UnbookedOnly) q = q.Where(t => !t.Booked && t.HbStatus is 0 or 4);
         if (string.Equals(request.Direction, "in", StringComparison.OrdinalIgnoreCase)) q = q.Where(t => t.Direction == "in");
         else if (string.Equals(request.Direction, "out", StringComparison.OrdinalIgnoreCase)) q = q.Where(t => t.Direction == "out");
         return Task.FromResult<IReadOnlyList<BankTransactionDto>>(q.Take(request.Limit > 0 ? request.Limit : 200).ToList());
@@ -560,6 +563,8 @@ public sealed class FakeSferaSession : ISferaSession
         // Sentinele do testu mapowania błędów 500: Internal (BP cofnięty/nie powstał) i Orphan (rollback padł).
         if (hbId == 55_555) throw new BankBookingException(BookError.Internal, "COM/raw UPDATE padl, BP cofniety (fake)");
         if (hbId == 44_444) throw new BankBookingException(BookError.Orphan, "ORPHAN - operacja bez linku, rollback padl (fake)");
+        // Sentinel: hb_Kwota NULL/0 -> InvalidAmount (422 INVALID_HB_AMOUNT).
+        if (hbId == 33_333) throw new BankBookingException(BookError.InvalidAmount, "hb_Transakcja ma hb_Kwota=NULL (fake)");
 
         // Wariant B: most sam ustawia link (raw UPDATE), wiec sukces zawsze linked=true. Drugie wywolanie
         // tego samego hb_id (stan) -> already_booked (jak guard ExistingOpId w RealSferaSession).

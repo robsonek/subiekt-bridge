@@ -10,7 +10,7 @@ namespace SubiektBridge.Api.Models;
 
 public sealed record BankTransactionQueryRequestDto(
     [property: JsonPropertyName("direction")] string? Direction,        // "in" (C/wpłata) / "out" (D/wypłata) / null=oba
-    [property: JsonPropertyName("unbooked_only")] bool UnbookedOnly = true,
+    [property: JsonPropertyName("unbooked_only")] bool UnbookedOnly = true,  // = bez linku I hb_Status IN (0,4) - pula "do zaksięgowania"
     [property: JsonPropertyName("from")] string? From = null,           // YYYY-MM-DD (hb_DataKsiegowania)
     [property: JsonPropertyName("to")] string? To = null,
     [property: JsonPropertyName("limit")] int Limit = 200
@@ -31,7 +31,10 @@ public sealed record BankTransactionDto(
     // Konto wyciągu, na które wpłynął przelew (przez nagłówek wyciągu hb_NaglowekIStopka). rachunek_id = rb_Id
     // (opaque, potrzebny do księgowania na właściwym koncie); rachunek_numer = IBAN wyciągu (czytelny). DANE surowe.
     [property: JsonPropertyName("rachunek_id")] long? RachunekId,
-    [property: JsonPropertyName("rachunek_numer")] string? RachunekNumer
+    [property: JsonPropertyName("rachunek_numer")] string? RachunekNumer,
+    // hb_Status: 0=NOWA, 1=WYGENEROWANA (zaksięgowana), 2=SKOJARZONA, 3=POMINIĘTA (operator), 4=WSTĘPNIE SKOJARZONA.
+    // Księgować da się tylko 0/4 (/book: 422 UNSUPPORTED_HB_STATUS dla innych); `unbooked_only` już to filtruje.
+    [property: JsonPropertyName("hb_status")] int HbStatus = 0
 );
 
 // ----------------------------- Księgowanie przelewu (hb_Transakcja → operacja bankowa BP/BW) -----------------------------

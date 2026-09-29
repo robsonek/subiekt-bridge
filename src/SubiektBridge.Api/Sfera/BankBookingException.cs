@@ -19,6 +19,8 @@ public enum BookError
     /// Nie nadpisujemy linii w nietypowym stanie (np. 2=SKOJARZONA z wyciągiem) - świadomie poza zakresem.
     /// </summary>
     UnsupportedStatus,
+    /// <summary>hb_Kwota NULL/0 (kolumna money NULL w schemacie) -> 422 INVALID_HB_AMOUNT. Nie księgujemy BP na 0.</summary>
+    InvalidAmount,
     /// <summary>
     /// COM/Sfera padło, ALBO raw UPDATE padł a BP został CZYSTO cofnięty (brak orphana) -> 500 HB_BOOKING_FAILED.
     /// Stan spójny (operacja nie istnieje) → bezpieczny retry po stronie klienta.

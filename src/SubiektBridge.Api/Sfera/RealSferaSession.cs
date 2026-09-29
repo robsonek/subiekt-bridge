@@ -42,11 +42,15 @@ public sealed class RealSferaSession : ISferaSession
     private string? _lastError;
     private bool _disposed;
 
-    public RealSferaSession(SubiektOptions options, BridgeOptions bridgeOptions, ILogger<RealSferaSession> logger)
+    // Journal ksiegowania /book (write-ahead hb_id -> nzf_id) - patrz IdempotencyStore.SavePendingBookingAsync.
+    private readonly Idempotency.IdempotencyStore _journal;
+
+    public RealSferaSession(SubiektOptions options, BridgeOptions bridgeOptions, ILogger<RealSferaSession> logger, Idempotency.IdempotencyStore journal)
     {
         _options = options;
         _bridgeOptions = bridgeOptions;
         _logger = logger;
+        _journal = journal;
 
         _staThread = new Thread(WorkerLoop)
         {
@@ -794,14 +798,16 @@ public sealed class RealSferaSession : ISferaSession
             int limit = Math.Clamp(request.Limit > 0 ? request.Limit : 200, 1, 1000);
 
             var where = new List<string>();
-            if (request.UnbookedOnly) where.Add("t.hb_idOperacjiBankowej IS NULL");
+            // "Do zaksiegowania" = bez linku I status NOWA/WSTEPNIE SKOJARZONA. Same IS NULL zwracalo tez linie
+            // POMINIETE przez operatora (hb_Status=3), ktorych /book i tak odrzuca 422.
+            if (request.UnbookedOnly) where.Add("t.hb_idOperacjiBankowej IS NULL AND t.hb_Status IN (0,4)");
             if (dirChar != null) where.Add("t.hb_Oznaczenie = @dir");
             if (IsIsoDate(request.From)) where.Add("t.hb_DataKsiegowania >= @from");
             if (IsIsoDate(request.To)) where.Add("t.hb_DataKsiegowania < DATEADD(day, 1, @to)");
 
             // Czysty passthrough surowych pol hb_Transakcja. rachunek_id/rachunek_numer = konto wyciagu przez
             // naglowek (LEFT JOIN - by NIE wyciac transakcji bez naglowka, np. recznie wprowadzonej). Surowe dane.
-            string sql = "SELECT TOP (@limit) t.hb_IdTransakcji, t.hb_DataKsiegowania, t.hb_Kwota, t.hb_Oznaczenie, "
+            string sql = "SELECT TOP (@limit) t.hb_IdTransakcji, t.hb_DataKsiegowania, t.hb_Kwota, t.hb_Oznaczenie, t.hb_Status, "
                        + "t.hb_Kontrahent, t.hb_RachKontrahent, t.hb_Tytul, t.hb_NrFaktury, t.hb_idOperacjiBankowej, "
                        + "n.hb_IdRachunku AS rachunek_id, n.hb_NumerRachunkuWyciagu AS rachunek_numer "
                        + "FROM hb_Transakcja t "
@@ -827,7 +833,7 @@ public sealed class RealSferaSession : ISferaSession
                 list.Add(new BankTransactionDto(
                     HbId: Convert.ToInt64(r["hb_IdTransakcji"]),
                     Date: r["hb_DataKsiegowania"] is DateTime d ? d.ToString("yyyy-MM-dd") : null,
-                    Amount: Convert.ToDecimal(r["hb_Kwota"]),
+                    Amount: r["hb_Kwota"] is DBNull ? 0m : Convert.ToDecimal(r["hb_Kwota"]),   // money NULL w schemacie
                     Direction: oz.Equals("C", StringComparison.OrdinalIgnoreCase) ? "in" : "out",
                     ContractorName: r["hb_Kontrahent"] as string,
                     ContractorAccount: r["hb_RachKontrahent"] as string,
@@ -836,7 +842,8 @@ public sealed class RealSferaSession : ISferaSession
                     Booked: r["hb_idOperacjiBankowej"] != DBNull.Value,
                     BankOperationSubiektId: r["hb_idOperacjiBankowej"] != DBNull.Value ? Convert.ToInt64(r["hb_idOperacjiBankowej"]) : null,
                     RachunekId: r["rachunek_id"] != DBNull.Value ? Convert.ToInt64(r["rachunek_id"]) : null,
-                    RachunekNumer: r["rachunek_numer"] == DBNull.Value ? null : r["rachunek_numer"].ToString()));
+                    RachunekNumer: r["rachunek_numer"] == DBNull.Value ? null : r["rachunek_numer"].ToString(),
+                    HbStatus: Convert.ToInt32(r["hb_Status"])));
             }
             return list;
         }, ct);
@@ -845,7 +852,8 @@ public sealed class RealSferaSession : ISferaSession
     // -------------------------- Ksiegowanie przelewu (hb_Transakcja -> operacja bankowa BP/BW) --------------------------
 
     private sealed record HbTxForBooking(
-        decimal Kwota, DateTime? Data, string Oznaczenie, string? Tytul, long? ExistingOpId,
+        decimal? Kwota, DateTime? Data,
+        DateTime? DataWaluty, string Oznaczenie, string? Tytul, long? ExistingOpId,
         long? RachunekId, long NaglowekId, int Status, string? Currency, string? NumerWyciagu);
 
     // Lock per hb_id - serializuje ksiegowanie tej samej transakcji w obrebie procesu (most jest jednoinstancyjny).
@@ -890,11 +898,38 @@ public sealed class RealSferaSession : ISferaSession
             if (tx.Status != 0 && tx.Status != 4)
                 throw new BankBookingException(BookError.UnsupportedStatus, $"hb_Transakcja {hbId} ma hb_Status={tx.Status} (oczekiwane 0/4) - nie ksieguje (linia w nietypowym stanie).");
 
+            if (tx.Kwota is null || tx.Kwota.Value == 0m)
+                throw new BankBookingException(BookError.InvalidAmount, $"hb_Transakcja {hbId} ma hb_Kwota={(tx.Kwota.HasValue ? "0" : "NULL")} - nie ksieguje operacji na 0.");
+
             // 3. SEKCJA KRYTYCZNA (NIEANULOWALNA): od DodajOperacjeBankowa/Zapisz az po link+rollback uzywamy
             //    CancellationToken.None. Inaczej timeout/cancel klienta po Zapisz() porzucilby nzfId -> orphan BP.
-            _logger.LogInformation("Book: tworze BP hb_id={HbId} kwota={Kwota} oznaczenie={Oz} rb_Id={Rb} kontrahent={Kh}",
-                hbId, tx.Kwota, oz, tx.RachunekId, contractorSubiektId);
-            long nzfId = await RunOnStaAsync(() => CreateBankOperationCore(tx, contractorSubiektId), CancellationToken.None);
+            //
+            //    Journal (write-ahead): pending wpis z poprzedniej, przerwanej proby (smierc procesu miedzy Zapisz
+            //    a UPDATE) + BP wciaz istnieje -> dokanczamy LINK zamiast tworzyc drugi BP (cichy orphan).
+            long nzfId;
+            long? pending = null;
+            try { pending = await _journal.TryGetPendingBookingAsync(hbId, CancellationToken.None); }
+            catch (Exception jex) { _logger.LogWarning(jex, "Book: odczyt journalu pending dla hb_id={HbId} padl - ide normalna sciezka", hbId); }
+            bool pendingExists = pending.HasValue
+                && await RunOnStaAsync(() => { try { return (bool)Session.FinManager.Istnieje(pending.Value); } catch { return false; } }, CancellationToken.None);
+            if (pendingExists)
+            {
+                nzfId = pending!.Value;
+                _logger.LogWarning("Book: hb_id={HbId} ma pending BP {Op} z przerwanej proby - dokanczam link zamiast tworzyc nowy BP", hbId, nzfId);
+            }
+            else
+            {
+                if (pending.HasValue)
+                {
+                    _logger.LogInformation("Book: pending BP {Op} dla hb_id={HbId} juz nie istnieje - czyszcze journal", pending, hbId);
+                    try { await _journal.DeletePendingBookingAsync(hbId, CancellationToken.None); } catch { /* best-effort */ }
+                }
+                _logger.LogInformation("Book: tworze BP hb_id={HbId} kwota={Kwota} oznaczenie={Oz} rb_Id={Rb} kontrahent={Kh}",
+                    hbId, tx.Kwota, oz, tx.RachunekId, contractorSubiektId);
+                nzfId = await RunOnStaAsync(() => CreateBankOperationCore(tx, contractorSubiektId), CancellationToken.None);
+                try { await _journal.SavePendingBookingAsync(hbId, nzfId, CancellationToken.None); }
+                catch (Exception jex) { _logger.LogError(jex, "Book: zapis journalu (hb_id={HbId} -> BP {Op}) padl - bez ochrony przed crashem w tym oknie", hbId, nzfId); }
+            }
 
             // 4. RAW UPDATE - most domyka link transakcji wyciagu -> operacja (Sfera nie wystawia API hb_).
             //    Atomowy guard IS NULL: @@ROWCOUNT==1 = ustawilismy link; ==0 = ktos juz powiazal (operator GUI/wyscig).
@@ -905,16 +940,41 @@ public sealed class RealSferaSession : ISferaSession
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Book: raw UPDATE hb_Transakcja padl po utworzeniu BP {Op} (hb_id={HbId}) - rollback", nzfId, hbId);
-                if (await TryRollbackBp(nzfId, hbId))
-                    throw new BankBookingException(BookError.Internal,
-                        $"Raw UPDATE hb_Transakcja padl po utworzeniu BP (hb_id={hbId}) - BP cofniety, mozna ponowic.", ex);
-                throw new BankBookingException(BookError.Orphan,
-                    $"Raw UPDATE padl, a rollback BP {nzfId} padl - ORPHAN (operacja bez linku, hb_id={hbId}). Usun operacje recznie w module Bankowosc.", ex);
+                // UPDATE i SELECT @@ROWCOUNT ida jednym batchem w autocommit: wyjatek przy ODBIORZE wyniku (timeout,
+                // zerwane polaczenie) NIE znaczy, ze UPDATE sie nie wykonal. Cofniecie BP przy zapisanym linku
+                // = martwy hb_idOperacjiBankowej (kolejny /book: already_booked z nieistniejaca operacja).
+                _logger.LogError(ex, "Book: raw UPDATE hb_Transakcja padl po utworzeniu BP {Op} (hb_id={HbId}) - sprawdzam stan linku", nzfId, hbId);
+                long? linkNow;
+                try { linkNow = await Task.Run(() => ReadHbLink(hbId), CancellationToken.None); }
+                catch (Exception rex)
+                {
+                    // Stan NIEZNANY - nie cofamy BP (orphan z 500 jest bezpieczniejszy niz martwy link).
+                    _logger.LogError(rex, "Book: odczyt stanu linku hb_id={HbId} padl - NIE cofam BP {Op}", hbId, nzfId);
+                    throw new BankBookingException(BookError.Orphan,
+                        $"Raw UPDATE padl i nie mozna odczytac stanu linku hb_id={hbId} - BP {nzfId} NIE cofniety (stan nieznany). Sprawdz hb_idOperacjiBankowej recznie.", ex);
+                }
+                if (linkNow == nzfId)
+                {
+                    _logger.LogWarning("Book: UPDATE wykonal sie mimo wyjatku (link hb_id={HbId} -> BP {Op}) - sukces", hbId, nzfId);
+                    rows = 1;
+                }
+                else if (linkNow is null)
+                {
+                    if (await TryRollbackBp(nzfId, hbId))
+                        throw new BankBookingException(BookError.Internal,
+                            $"Raw UPDATE hb_Transakcja padl po utworzeniu BP (hb_id={hbId}) - BP cofniety, mozna ponowic.", ex);
+                    throw new BankBookingException(BookError.Orphan,
+                        $"Raw UPDATE padl, a rollback BP {nzfId} padl - ORPHAN (operacja bez linku, hb_id={hbId}). Usun operacje recznie w module Bankowosc.", ex);
+                }
+                else
+                {
+                    rows = 0; // ktos inny zalinkowal - sciezka wyscigu ponizej (cofa nasz BP, zwraca zwyciezce)
+                }
             }
 
             if (rows == 1)
             {
+                try { await _journal.DeletePendingBookingAsync(hbId, CancellationToken.None); } catch { /* best-effort */ }
                 _logger.LogInformation("Book OK: hb_id={HbId} -> BP {Op} (powiazany raw UPDATE)", hbId, nzfId);
                 return new BookResultDto(nzfId, hbId, Linked: true, AlreadyBooked: false, null);
             }
@@ -962,6 +1022,10 @@ public sealed class RealSferaSession : ISferaSession
         finally
         {
             gate.Release();
+            // Bez tego slownik rosl bez konca (SemaphoreSlim per hb_id na czas zycia uslugi). Usuwamy TYLKO ten
+            // egzemplarz i tylko gdy nikt nie czeka; ewentualny wyscig z nowym wpisem i tak lapie guard IS NULL w UPDATE.
+            if (gate.CurrentCount == 1)
+                _bookLocks.TryRemove(new KeyValuePair<long, SemaphoreSlim>(hbId, gate));
         }
     }
 
@@ -981,6 +1045,16 @@ public sealed class RealSferaSession : ISferaSession
 
     // Rollback BP (nieanulowalny). Zwraca true gdy cofnieto; false (+log) gdy padl - wtedy orphan do recznego usuniecia.
     private async Task<bool> TryRollbackBp(long nzfId, long hbId)
+    {
+        bool ok = await TryRollbackBpCore(nzfId, hbId);
+        if (ok)
+        {
+            try { await _journal.DeletePendingBookingAsync(hbId, CancellationToken.None); } catch { /* best-effort */ }
+        }
+        return ok;
+    }
+
+    private async Task<bool> TryRollbackBpCore(long nzfId, long hbId)
     {
         try
         {
@@ -1472,8 +1546,11 @@ public sealed class RealSferaSession : ISferaSession
 
             // KWOTA przez WartoscPoczatkowaWaluta (settable). WartoscPoczatkowa jest READ-ONLY ("Aby ustawic wartosc
             // poczatkowa ... uzyj WartoscPoczatkowaWaluta" - CHM) i jej set rzucal. Dla PLN waluta dokumentu = bazowa.
-            SetLogged("WartoscPoczatkowaWaluta", (double)Math.Abs(tx.Kwota));
-            if (tx.Data.HasValue) SetLogged("Data", tx.Data.Value);
+            SetLogged("WartoscPoczatkowaWaluta", (double)Math.Abs(tx.Kwota!.Value));
+            // hb_DataKsiegowania bywa NULL -> fallback na hb_DataWaluty; bez obu Sfera da date dzisiejsza (glosno w logu).
+            var dataOperacji = tx.Data ?? tx.DataWaluty;
+            if (dataOperacji.HasValue) SetLogged("Data", dataOperacji.Value);
+            else _logger.LogWarning("Book CreateBP: hb_DataKsiegowania i hb_DataWaluty NULL - operacja dostanie date dzisiejsza");
 
             // TYTUL: chcemy SUROWY opis przelewu (hb_Tytul) jak operacja reczna w GUI. DodajOperacjeBankowa domyslnie
             // ustawia GenerujTytulemNaPodstawieRozl=true (mimo nzf_GenerujTytulem DEFAULT 0 w schemacie) - wtedy Subiekt
@@ -1536,9 +1613,9 @@ public sealed class RealSferaSession : ISferaSession
         }
         catch (COMException cex)
         {
-            var inner = Marshal.GetExceptionForHR(cex.ErrorCode);
+            // cex.Message niesie opisowy komunikat Sfery/RAISERROR triggera; GetExceptionForHR dawal generyczne "E_FAIL".
             _logger.LogError(cex, "Book CreateBP: DodajOperacjeBankowa/Zapisz padl 0x{Hr:X8} (rb_Id={Rb})", cex.ErrorCode, tx.RachunekId);
-            throw new BankBookingException(BookError.Internal, $"DodajOperacjeBankowa/Zapisz padl: 0x{cex.ErrorCode:X8} {inner?.Message ?? cex.Message}", cex);
+            throw new BankBookingException(BookError.Internal, $"DodajOperacjeBankowa/Zapisz padl: 0x{cex.ErrorCode:X8} {cex.Message}", cex);
         }
         finally
         {
@@ -1554,7 +1631,7 @@ public sealed class RealSferaSession : ISferaSession
         // hb_IdNaglowekTr + hb_Status do raw UPDATE (zlozony WHERE jak w profilerze + guard statusu);
         // rb_IdWaluty (char(3), default 'PLN') do guardu waluty (R7); hb_NumerWyciagu (numer wyciagu z PLIKU
         // banku, varchar(30) "unikalny w obrebie roku") do uzgodnienia operacji - NIE generujemy, bierzemy z pliku.
-        cmd.CommandText = "SELECT t.hb_Kwota, t.hb_DataKsiegowania, t.hb_Oznaczenie, t.hb_Tytul, t.hb_idOperacjiBankowej, "
+        cmd.CommandText = "SELECT t.hb_Kwota, t.hb_DataKsiegowania, t.hb_DataWaluty, t.hb_Oznaczenie, t.hb_Tytul, t.hb_idOperacjiBankowej, "
                         + "t.hb_IdNaglowekTr, t.hb_Status, n.hb_IdRachunku, n.hb_NumerWyciagu, rb.rb_IdWaluty "
                         + "FROM hb_Transakcja t "
                         + "LEFT JOIN hb_NaglowekIStopka n ON n.hb_IdNaglowek = t.hb_IdNaglowekTr "
@@ -1565,8 +1642,9 @@ public sealed class RealSferaSession : ISferaSession
         using var r = cmd.ExecuteReader();
         if (!r.Read()) return null;
         return new HbTxForBooking(
-            Kwota: Convert.ToDecimal(r["hb_Kwota"]),
+            Kwota: r["hb_Kwota"] is DBNull ? null : Convert.ToDecimal(r["hb_Kwota"]),   // money NULL w schemacie -> 422, nie crash
             Data: r["hb_DataKsiegowania"] is DateTime d ? d : null,
+            DataWaluty: r["hb_DataWaluty"] is DateTime dw ? dw : null,
             Oznaczenie: r["hb_Oznaczenie"]?.ToString() ?? "C",
             Tytul: r["hb_Tytul"] as string,
             ExistingOpId: r["hb_idOperacjiBankowej"] != DBNull.Value ? Convert.ToInt64(r["hb_idOperacjiBankowej"]) : null,
@@ -1985,8 +2063,7 @@ public sealed class RealSferaSession : ISferaSession
             }
             catch (COMException cex)
             {
-                var inner = Marshal.GetExceptionForHR(cex.ErrorCode);
-                throw new SettlementException(SettlementError.Internal, $"Rozlicz padl: 0x{cex.ErrorCode:X8} {inner?.Message ?? cex.Message}", cex);
+                throw new SettlementException(SettlementError.Internal, $"Rozlicz padl: 0x{cex.ErrorCode:X8} {cex.Message}", cex);
             }
             finally
             {
