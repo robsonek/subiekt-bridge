@@ -70,6 +70,11 @@ grep -rl "MagazynId" InsERT/pomoc/gta/htm/ | head
 — jeden plik per tabela, z `MS_Description` (opis kolumn), CHECK/FK/indeksami. **Zanim napiszesz raw SQL lub
 filtr `OtworzKolekcje` na surowych kolumnach — sprawdź tam nazwę i semantykę**, np.:
 
+> ⚠️ **Zrzut jest z 1.88 HF3, produkcja to 1.89 HF2** (od 2026-08). Kolumny użyte w filtrze `nip` (v0.17.0)
+> potwierdzono na prod 29.09; całego zrzutu z 1.89 nie porównywano. Dla NOWEJ kolumny w raw SQL potwierdź ją
+> na prod read-only: `POST /admin/query` z `SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+> WHERE TABLE_NAME = '<tabela>'`.
+
 ```bash
 D="InsERT/Skrypty_SQL_1_88_HF3(1)/Tables"
 grep -iE "nzf_(Wartosc|IdWaluty|IdObiektu)" "$D/dbo.nz__Finanse.sql"   # + MS_Description niżej w pliku
@@ -114,7 +119,7 @@ Invoke-RestMethod -Uri "https://localhost:988/api/v1/admin/update" -Method POST 
 | `GET /api/v1/health` | Sfera session status + Subiekt version |
 | `GET /api/v1/products?ean=` | Lookup towaru |
 | `GET /api/v1/contractors?nip=` | Lookup kontrahenta po NIP |
-| `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | Listing FS/KFS (filtry whitelist). `nip` (v0.17.0): SQL `adr__Ewid` → `kh_Id` → `dok_PlatnikId IN (...)` (`InvoiceQueryFields`; NIE `dok_OdbiorcaId` — na MM to id magazynu); brak kontrahenta = `[]`. **`dok_NabKodSlownik` NIE istnieje** (wcześniejszy filtr = SQL error) |
+| `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | Listing FS/KFS (filtry whitelist). `nip` (v0.17.0): SQL `adr__Ewid` → `kh_Id` → `dok_PlatnikId IN (...)` (`InvoiceQueryFields`; NIE `dok_OdbiorcaId` — na MM to id magazynu); brak kontrahenta = `[]`. **`dok_NabKodSlownik` NIE istnieje** (wcześniejszy filtr = SQL error). Zweryfikowane na prod 29.09 (NIP z kreskami = ten sam wynik) |
 | `GET /api/v1/invoices/{id}` | Single FV metadata |
 | `GET /api/v1/invoices/{id}/pdf` | Retro PDF generation |
 | `GET /api/v1/invoices/open-receivables?min_amount&max_amount&currency&contractor_id&from&to&search&limit` | Otwarte należności (rozrachunki sprzedaży nzf_Typ=39, `WartoscBiezaca>0`) w oknie kwoty — kandydaci do dopasowania z przelewem. Read-only, COM (FinManager.OtworzKolekcje + atrybuty FinDokument); `search` używa też raw SQL do pre-resolve kontrahentów (patrz niżej). `search` (v0.14.0) = fraza case-insensitive z **precedencją scope kontrahenta nad numerem**: SQL `LIKE` po `adr_Nazwa`/`adr_NIP` (`adr__Ewid`, TypAdresu=1) → `kh_Id` → zawężenie `OtworzKolekcje` przez `nzf_IdObiektu IN (...)`; gdy fraza NIE pasuje do żadnego kontrahenta (= numer FV) → pełny skan z tanim number-checkiem przed COM `ResolveContractor`. Perf: eliminuje COM `Kontrahenci.Wczytaj` per wiersz. `OpenReceivableFields.{MatchesSearch,EscapeLikeWildcards}`. **NIE `kh_Nazwa`** — nazwa kontrahenta jest w `adr__Ewid.adr_Nazwa`, nie w `kh__Kontrahent` |
@@ -369,7 +374,7 @@ Wysyłka e-Faktur (`POST /invoices/{id}/ksef`): pipeline `SprawdzPoprawnoscEFakt
 - **`StatusKSeF` stosuje się tylko do dokumentów z `FormaDokumentu=1`** — inne odrzucamy 422
   `NOT_KSEF_INVOICE` przed dotknięciem managera.
 - Wysyłka NIEODWRACALNA; środowisko KSeF (prod/test MF) to konfiguracja podmiotu w Subiekcie.
-- Dostępność API: od GT 1.77/1.80 (prod klienta 1.88 HF4 OK).
+- Dostępność API: od GT 1.77/1.80 (prod klienta 1.89 HF2 OK; przy pisaniu endpointu 1.88 HF4).
 
 ### Home banking — most = GŁUPIE prymitywy, matching robi Laravel
 
