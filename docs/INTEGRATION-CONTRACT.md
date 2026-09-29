@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.16.0**.
+> **Dotyczy:** SubiektBridge **v0.18.0**. Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -602,6 +602,47 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 - **Referencyjny istniejący klient** (aplikacja Laravel): klasy
   `SubiektBridgeClient`, `{InvoiceIssuer,ReceiptIssuer,InvoiceCorrectionIssuer}`,
   `{IssueInvoiceJob,IssueCorrectionJob,IssueReceiptJob}` — wzorzec retry/409/idempotency 1:1.
+
+---
+
+## 9. Historia zmian kontraktu
+
+Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
+Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 502/503 = retry).
+
+### v0.18.0 (2026-09-29)
+- **Nowe kody:** `422 NOTES_TOO_LONG` (§7.7), `422 INVALID_CORRECTION` (§7.3), `422 UNSUPPORTED_BANK_OPERATION_TYPE`,
+  `422 INVALID_HB_AMOUNT` (book), `503 SFERA_UNAVAILABLE` (retry; klucz idempotencji zostaje).
+- **Rozliczenia:** retry tego samego przelewu po pełnym rozliczeniu → `409 DUPLICATE_SETTLEMENT` z
+  `existing_rozliczenie_id` (wcześniej `422 ALREADY_SETTLED` / `BANK_OPERATION_EXHAUSTED`). `GET .../settlements`:
+  `settlements` ze **wszystkich** rozrachunków dokumentu (FS marketplace ma dwa), nagłówek z otwartego / najnowszego.
+- **`GET /bank-transactions`:** nowe pole `hb_status`; `unbooked_only` pomija linie pominięte przez operatora
+  (`hb_status`=3); `amount` = 0, gdy kwota w Subiekcie jest pusta.
+- **`GET /products`:** `vat_rate` i `unit` z kartoteki Subiekta (do v0.17.2 zawsze `23` / `"szt."`).
+- **`GET /contractors` / `contractor.email`:** `email` wypełniony i zapisywany w Subiekcie (do v0.17.2 e-mail był
+  ignorowany, `email` zawsze `null`).
+- **Anti-duplicate po `external_reference`:** dopasowanie całego tokenu — ref `sys:order:12` nie pasuje już do
+  `sys:order:123` (wcześniej możliwe `409` z **cudzym** `existing_subiekt_id`); działa niezależnie od symbolu numeracji.
+- **KSeF:** po `202` kolejny POST może zwrócić `422 KSEF_REJECTED`, gdy KSeF odrzucił dokument już po stronie mostu
+  (wcześniej taki POST wysyłał dokument ponownie).
+- **Pad sesji Sfery** przy `GET /invoices/{id}` i przy weryfikacji replay → `503 SFERA_UNAVAILABLE` zamiast `404`.
+
+### v0.17.2 (2026-09-29)
+- Dopasowanie kontrahenta po NIP przy FS/PZ porównuje NIP bez kresek i spacji (kartoteka `111-111-11-11` = `1111111111`).
+
+### v0.17.1 (2026-09-29)
+- `503 CONTRACTOR_LOOKUP_UNAVAILABLE`: gdy most nie może sprawdzić kontrahenta po NIP (baza), dokument NIE powstaje
+  (wcześniej po cichu zakładał kontrahenta po `symbol` — ryzyko duplikatu w kartotece). Retry z backoff.
+
+### v0.17.0 (2026-09-29)
+- `GET /invoices?nip=` działa (wcześniej każde użycie → `502`); porównanie bez kresek/spacji, brak kontrahenta → `[]`.
+- `GET /health`: nowe pola `sql_connection` (`ok`/`down`) i `sql_error`; `status: "degraded"` z `200`, gdy baza nie
+  odpowiada, a sesja Sfery działa.
+- `422 INVALID_CONTRACTOR_SYMBOL` zamiast `500` dla `symbol` > 20 znaków (limit to 20, nie 16 jak wcześniej w §7.2).
+- `quantity` (FS/KFS/PZ/MM) przyjmuje ułamki (`decimal`); wartości całkowite bez zmian.
+
+### v0.16.1 – v0.16.2 (2026-09-29)
+- Bez zmian API (aktualizacja zależności, dokumentacja).
 
 ---
 

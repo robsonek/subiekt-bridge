@@ -136,6 +136,11 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
+      # Checkout tylko po to, by odczytac opis (annotation) taga - to on jest changelogiem dla integratorow.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v8
         with:
@@ -149,27 +154,27 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      - name: Release notes (opis taga + szablon)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          git fetch --no-tags origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" 2>/dev/null || true
+          {
+            echo "## Zmiany"
+            echo
+            git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" | sed -e '1s/^/**/' -e '1s/$/**/'
+            echo
+            echo "Kontrakt API dla integratorów (z historią zmian): [docs/INTEGRATION-CONTRACT.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/docs/INTEGRATION-CONTRACT.md)"
+            echo
+            sed "s/__VERSION__/${VERSION}/g" .github/release-notes-template.md
+          } > release-notes.md
+          cat release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           name: SubiektBridge ${{ steps.ver.outputs.version }}
           generate_release_notes: true
-          body: |
-            ## Pliki do pobrania
-
-            Subiekt GT jest wyłącznie 32-bit (cała linia "GT" InsERT). Bridge to in-process COM
-            klient — bit-level musi pasować, dlatego tylko **win-x86**. Działa na 32- i 64-bitowym
-            Windowsie (na 64-bit przez WOW64).
-
-            | Plik | Rozmiar | Wymagania |
-            |---|---|---|
-            | `SubiektBridge-${{ steps.ver.outputs.version }}-win-x86.zip` | ~45 MB | **Nic** — runtime wbudowany (self-contained) |
-            | `SubiektBridge-${{ steps.ver.outputs.version }}-win-x86-fxdep.zip` | ~2 MB | **ASP.NET Core Runtime 10 (x86)** zainstalowany |
-
-            Niepewny? Bierz self-contained.
-
-            ASP.NET Core Runtime 10 (x86) dla Windows: https://dotnet.microsoft.com/download/dotnet/10.0
-            (przy pobieraniu wybierz "x86" — nie "x64").
+          body_path: release-notes.md
           files: |
             dist/SubiektBridge-*.zip
             dist/SubiektBridge-*.zip.sha256

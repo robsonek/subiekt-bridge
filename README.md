@@ -41,7 +41,8 @@ REST API (główne endpointy + escape hatch):
 | `POST /api/v1/sfera/raw` | Escape hatch z whitelistą metod |
 
 Pełen kontrakt dla integratorów (formaty request/response, kody błędów, retry semantics):
-**[`docs/INTEGRATION-CONTRACT.md`](docs/INTEGRATION-CONTRACT.md)**. DTO: `src/SubiektBridge.Api/Models/`.
+**[`docs/INTEGRATION-CONTRACT.md`](docs/INTEGRATION-CONTRACT.md)** (na końcu: historia zmian kontraktu per wersja).
+DTO: `src/SubiektBridge.Api/Models/`.
 
 ## Wymagania
 
