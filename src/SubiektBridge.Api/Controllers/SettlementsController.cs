@@ -110,6 +110,13 @@ public sealed class SettlementsController : ControllerBase
         {
             return MapSettlementError(ex);
         }
+        catch (SferaUnavailableException ex)
+        {
+            // Subiekt offline PRZED pierwszym zapisem (preflight sesji, spec W3) -> 503, klient ponawia tym samym
+            // kluczem. Nic nie trafia do cache idempotencji (SaveAsync tylko po sukcesie).
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ErrorResponseDto(
+                Code: "SUBIEKT_UNAVAILABLE", Message: ex.Message));
+        }
         catch (NotImplementedException ex)
         {
             _logger.LogError(ex, "Settlement operation NotImplemented: {Message}", ex.Message);

@@ -2,9 +2,10 @@
 paths:
   - "src/SubiektBridge.Api/Sfera/RealSferaSession.cs"
   - "src/SubiektBridge.Api/Sfera/BankBooking*.cs"
+  - "src/SubiektBridge.Api/Sfera/BookFailureClassifier.cs"
   - "src/SubiektBridge.Api/Controllers/{BankTransactions,Invoices}Controller.cs"
   - "src/SubiektBridge.Api/Models/{BankTransaction,OpenReceivable}Models.cs"
-  - "tests/SubiektBridge.Tests/{OpenReceivables,OpenPayables,BankReconciliation}Tests.cs"
+  - "tests/SubiektBridge.Tests/{OpenReceivables,OpenPayables,BankReconciliation,BookFailureClassifier,ErrorCodeEffectContract}Tests.cs"
 ---
 
 # Home banking i otwarte rozrachunki — most = GŁUPIE prymitywy, matching robi Laravel
@@ -44,6 +45,27 @@ której faktury" + decyzja auto/ręcznie → Laravel (jak dopasowanie `GET /invo
     wyścigu; odczyt padł → Orphan **bez** cofania BP (martwy `hb_idOperacjiBankowej` gorszy niż orphan).
   - `hb_Kwota` jest `money NULL` → listing daje 0, `/book` → `422 INVALID_HB_AMOUNT`; `hb_DataKsiegowania` NULL →
     fallback `hb_DataWaluty`. Komunikaty błędów z `cex.Message` (`GetExceptionForHR` dawał generyczne E_FAIL).
+  - **Kod błędu = dowód o skutku (od v0.19.0; spec `docs/superpowers/specs/2026-09-29-kody-bledow-a-skutek-design.md`).**
+    `HB_BOOKING_FAILED` (`BookError.Internal`; klient ponawia = NOWY BP, bo BP nie ma anti-duplicate po ref) wolno
+    zwrócić WYŁĄCZNIE, gdy nic nie zapisano albo BP czysto cofnięto. `CreateBankOperationCore` idzie przez
+    `BankOperationSave.Run(build, save, readId)` + `BookFailureClassifier.Classify(faza, wyjątek)`: **Build** → zawsze
+    `Internal`; **Save** (`Zapisz`) → `Internal` tylko dla HRESULT-ów „odrzucone przez żywy proces”
+    (`IsRejectedNothingSaved`: E_FAIL `0x80004005`, OLE DB `0x80040E00–EFF`, DISP_E_EXCEPTION, E_INVALIDARG,
+    `0x80040F60/62`) **bez komunikatu transportowego** (`LooksLikeTransportFailure`: network/sieci, communication link,
+    TCP Provider, DBNETLIB, forcibly closed, połączeni, timeout/limit czasu — dostawca SQL raportuje zerwanie W TRAKCIE
+    polecenia jako E_FAIL z takim opisem, a `0x80040E31`/`0x80040E4E` = timeout/anulowanie → zawsze `Orphan`), reszta
+    (RPC `0x8001xxxx`, RPC_S_* `0x800706xx`, E_UNEXPECTED, nieznane, wyjątki nie-COM) → `Orphan`
+    BEZ id (Subiekt to osobny proces — utrata odpowiedzi po COMMIT jest realna); **ReadId** (Zapisz wróciło) → 2 próby
+    odczytu `Identyfikator`, potem `Orphan` bez id. Sekcja po `nzfId` = `LinkCreatedBankOperationAsync` z catch-all:
+    nieprzewidziany wyjątek → odczyt linku → link nasz = sukces / brak linku + rollback OK = `Internal` / inaczej
+    `Orphan(nzfId)`. Każdy `Orphan` niesie `BankBookingException.BankOperationSubiektId` →
+    `details.bank_operation_subiekt_id` (`null` = id nieznane) + `details.hb_id`. `rows > 1` (UPDATE ma WHERE po
+    `hb_id`, więc link na nasz BP JEST ustawiony) → **NIE cofamy BP** (byłby martwy link) → `Orphan(nzfId)`, ręczna
+    diagnoza schema drift. Sonda orphana po kwocie/dacie
+    świadomie NIE wdrożona (główny scenariusz = martwa sesja, COM i tak nie odpowie).
+  - **Preflight sesji (W3):** po guardach, przed journalem/BP, `EnsureSessionForMutation()` (sonda `IsSessionAlive` +
+    jedna próba ponownego otwarcia) → `SferaUnavailableException` → `503 SUBIEKT_UNAVAILABLE` (nic nie zapisano,
+    retry tym samym kluczem, brak wpisu w cache). Po preflight ŻADNEGO mapowania błędów RPC na 503.
   - Plan + pełny audyt: `docs/PLAN-home-banking-booking-variant-b.md`. NIE pisać raw SQL
     do `hb_Transakcja` poza `LinkHbToOperation`; NIGDY do `nz__Finanse`/`nz_FinanseSplata` (te tylko przez Sferę).
 - Rozliczenie już jest (`POST /invoices/{id}/settlements`) — most nie decyduje co z czym, dostaje rozkaz

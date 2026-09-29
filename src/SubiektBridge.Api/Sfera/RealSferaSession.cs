@@ -194,6 +194,31 @@ public sealed class RealSferaSession : ISferaSession
         return session;
     }
 
+    /// <summary>
+    /// [STA] Preflight mutacji (spec W3, „kod błędu = dowód o skutku"): zanim cokolwiek zapiszemy, sesja musi ŻYĆ.
+    /// _subiekt null → OpenSession (wyjątek = SferaUnavailableException, nic nie zapisano). _subiekt ustawione →
+    /// sonda IsSessionAlive() (OtworzKolekcje dok_Id=-1, runda do SQL); martwa (sonda ją resetuje) → JEDNA próba
+    /// ponownego otwarcia w tym samym żądaniu (samonaprawa po restarcie Subiekta bez dodatkowej rundy klienta),
+    /// dopiero jej porażka = 503 SUBIEKT_UNAVAILABLE. Po preflight obowiązuje dotychczasowa semantyka - żadnego
+    /// mapowania błędów RPC na 503 po pierwszym zapisie (wynik nieznany ≠ „ponów").
+    /// </summary>
+    private void EnsureSessionForMutation()
+    {
+        if (_subiekt is not null && IsSessionAlive()) return;
+        try { _ = Session; }
+        catch (Exception ex)
+        {
+            _lastError = $"{ex.GetType().Name}: {ex.Message}";
+            _logger.LogError(ex, "Preflight mutacji: nie mozna otworzyc sesji Sfery - 503, nic nie zapisano");
+            ResetSessionOnSta();
+            throw new SferaUnavailableException($"Sesja Sfery niedostepna (nie mozna otworzyc: {ex.Message}) - nic nie zapisano, ponow pozniej.", ex);
+        }
+    }
+
+    /// <summary>Mutacja na STA z preflightem sesji (patrz EnsureSessionForMutation).</summary>
+    private Task<T> RunMutationOnStaAsync<T>(Func<T> core, CancellationToken ct)
+        => RunOnStaAsync(() => { EnsureSessionForMutation(); return core(); }, ct);
+
     // -------------------------- Health --------------------------
 
     public async Task<SferaHealthDto> HealthAsync(CancellationToken ct)
@@ -203,6 +228,10 @@ public sealed class RealSferaSession : ISferaSession
             try
             {
                 _ = Session; // trigger lazy open
+                // Sonda (jedna runda do SQL): "_subiekt ustawione" to nie "sesja zyje" - operator mogl zamknac
+                // Subiekta; bez sondy health mowil "active" az do pierwszego padnietego zadania.
+                if (!IsSessionAlive())
+                    return new SferaHealthDto("unknown", false, _lastInvoiceAt, _lastError);
                 return new SferaHealthDto(_subiektVersion ?? "unknown", true, _lastInvoiceAt, null);
             }
             catch (Exception ex)
@@ -616,7 +645,7 @@ public sealed class RealSferaSession : ISferaSession
 
     public Task<InvoiceResponseDto> CreateInvoiceAsync(InvoiceRequestDto request, CancellationToken ct)
     {
-        return RunOnStaAsync(() => CreateInvoiceCore(request), ct);
+        return RunMutationOnStaAsync(() => CreateInvoiceCore(request), ct);
     }
 
     private InvoiceResponseDto CreateInvoiceCore(InvoiceRequestDto request)
@@ -738,22 +767,22 @@ public sealed class RealSferaSession : ISferaSession
         InvoiceCorrectionRequestDto request,
         CancellationToken ct)
     {
-        return RunOnStaAsync(() => CreateCorrectionCore(sourceSubiektId, request), ct);
+        return RunMutationOnStaAsync(() => CreateCorrectionCore(sourceSubiektId, request), ct);
     }
 
     public Task<InvoiceResponseDto> CreateReceiptAsync(ReceiptIssueRequestDto request, CancellationToken ct)
     {
-        return RunOnStaAsync(() => CreateReceiptCore(request), ct);
+        return RunMutationOnStaAsync(() => CreateReceiptCore(request), ct);
     }
 
     public Task<TransferResponseDto> CreateTransferAsync(TransferRequestDto request, CancellationToken ct)
     {
-        return RunOnStaAsync(() => CreateTransferCore(request), ct);
+        return RunMutationOnStaAsync(() => CreateTransferCore(request), ct);
     }
 
     public Task<SettlementResponseDto> CreateSettlementAsync(long documentSubiektId, SettlementCreateRequestDto request, CancellationToken ct)
     {
-        return RunOnStaAsync(() => CreateSettlementCore(documentSubiektId, request), ct);
+        return RunMutationOnStaAsync(() => CreateSettlementCore(documentSubiektId, request), ct);
     }
 
     public Task<SettlementStateResponseDto?> GetSettlementsAsync(long documentSubiektId, CancellationToken ct)
@@ -906,6 +935,10 @@ public sealed class RealSferaSession : ISferaSession
             if (tx.Kwota is null || tx.Kwota.Value == 0m)
                 throw new BankBookingException(BookError.InvalidAmount, $"hb_Transakcja {hbId} ma hb_Kwota={(tx.Kwota.HasValue ? "0" : "NULL")} - nie ksieguje operacji na 0.");
 
+            // 2.5. Preflight sesji (spec W3): Subiekt offline PRZED pierwszym zapisem -> SferaUnavailableException
+            //      (503 SUBIEKT_UNAVAILABLE, klient ponawia tym samym kluczem). Anulowalne - nic jeszcze nie zapisano.
+            await RunOnStaAsync<bool>(() => { EnsureSessionForMutation(); return true; }, ct);
+
             // 3. SEKCJA KRYTYCZNA (NIEANULOWALNA): od DodajOperacjeBankowa/Zapisz az po link+rollback uzywamy
             //    CancellationToken.None. Inaczej timeout/cancel klienta po Zapisz() porzucilby nzfId -> orphan BP.
             //
@@ -946,6 +979,31 @@ public sealed class RealSferaSession : ISferaSession
                 catch (Exception jex) { _logger.LogError(jex, "Book: zapis journalu (hb_id={HbId} -> BP {Op}) padl - bez ochrony przed crashem w tym oknie", hbId, nzfId); }
             }
 
+            // 4. Link raw UPDATE + rollback/wyscig w osobnej metodzie: KAZDY wyjatek po utworzeniu BP jest tam
+            //    zlapany i sklasyfikowany (Internal po czystym rollbacku / Orphan z nzfId) - nic nie ucieka do
+            //    catch-all kontrolera jako INTERNAL_ERROR (klient: "czysty" retry = drugi BP). Spec W1 pkt 4.
+            return await LinkCreatedBankOperationAsync(hbId, tx, nzfId);
+        }
+        finally
+        {
+            gate.Release();
+            // Bez tego slownik rosl bez konca (SemaphoreSlim per hb_id na czas zycia uslugi). Usuwamy TYLKO ten
+            // egzemplarz i tylko gdy nikt nie czeka; ewentualny wyscig z nowym wpisem i tak lapie guard IS NULL w UPDATE.
+            if (gate.CurrentCount == 1)
+                _bookLocks.TryRemove(new KeyValuePair<long, SemaphoreSlim>(hbId, gate));
+        }
+    }
+
+    /// <summary>
+    /// Sekcja po utworzeniu BP (nzfId znany): raw UPDATE linku, sprawdzenie stanu, rollback, wyscig. Catch-all
+    /// na koncu: wyjatek NIEPRZEWIDZIANY (nie BankBookingException) nie moze wyjsc jako INTERNAL_ERROR - klient
+    /// traktuje go jak "czysty" blad i ponawia (= drugi BP). Niezmiennik: nigdy nie kasujemy BP, na ktory
+    /// wskazuje hb_Transakcja - przed rollbackiem czytamy link.
+    /// </summary>
+    private async Task<BookResultDto> LinkCreatedBankOperationAsync(long hbId, HbTxForBooking tx, long nzfId)
+    {
+        try
+        {
             // 4. RAW UPDATE - most domyka link transakcji wyciagu -> operacja (Sfera nie wystawia API hb_).
             //    Atomowy guard IS NULL: @@ROWCOUNT==1 = ustawilismy link; ==0 = ktos juz powiazal (operator GUI/wyscig).
             int rows;
@@ -966,7 +1024,7 @@ public sealed class RealSferaSession : ISferaSession
                     // Stan NIEZNANY - nie cofamy BP (orphan z 500 jest bezpieczniejszy niz martwy link).
                     _logger.LogError(rex, "Book: odczyt stanu linku hb_id={HbId} padl - NIE cofam BP {Op}", hbId, nzfId);
                     throw new BankBookingException(BookError.Orphan,
-                        $"Raw UPDATE padl i nie mozna odczytac stanu linku hb_id={hbId} - BP {nzfId} NIE cofniety (stan nieznany). Sprawdz hb_idOperacjiBankowej recznie.", ex);
+                        $"Raw UPDATE padl i nie mozna odczytac stanu linku hb_id={hbId} - BP {nzfId} NIE cofniety (stan nieznany). Sprawdz hb_idOperacjiBankowej recznie.", ex, bankOperationSubiektId: nzfId);
                 }
                 if (linkNow == nzfId)
                 {
@@ -979,7 +1037,7 @@ public sealed class RealSferaSession : ISferaSession
                         throw new BankBookingException(BookError.Internal,
                             $"Raw UPDATE hb_Transakcja padl po utworzeniu BP (hb_id={hbId}) - BP cofniety, mozna ponowic.", ex);
                     throw new BankBookingException(BookError.Orphan,
-                        $"Raw UPDATE padl, a rollback BP {nzfId} padl - ORPHAN (operacja bez linku, hb_id={hbId}). Usun operacje recznie w module Bankowosc.", ex);
+                        $"Raw UPDATE padl, a rollback BP {nzfId} padl - ORPHAN (operacja bez linku, hb_id={hbId}). Usun operacje recznie w module Bankowosc.", ex, bankOperationSubiektId: nzfId);
                 }
                 else
                 {
@@ -994,14 +1052,16 @@ public sealed class RealSferaSession : ISferaSession
                 return new BookResultDto(nzfId, hbId, Linked: true, AlreadyBooked: false, null);
             }
 
-            // @@ROWCOUNT > 1 jest NIEMOZLIWE (hb_IdTransakcji = PK CLUSTERED), ale defensywnie NIE traktujemy go jak
-            //   wyscig (rows==0) - cofamy nasz BP i zglaszamy blad krytyczny (nie 2xx). Sygnal ewentualnego schema drift.
+            // @@ROWCOUNT > 1 jest NIEMOZLIWE (hb_IdTransakcji = PK CLUSTERED). Gdyby jednak: UPDATE ma WHERE po hb_id,
+            //   wiec link na NASZ nzfId JEST ustawiony (na >1 wierszach = schema drift). NIE cofamy BP - kasacja BP,
+            //   na ktory wskazuje hb_idOperacjiBankowej, dawalaby martwy link (kolejny /book: already_booked z
+            //   nieistniejaca operacja). Orphan z id -> reczna diagnoza (przeglad F2, 2026-09-29).
             if (rows > 1)
             {
-                _logger.LogError("Book: hb_id={HbId} raw UPDATE @@ROWCOUNT={Rows} (>1, niemozliwe przy PK!) - cofam BP {Op}", hbId, rows, nzfId);
-                bool rbMulti = await TryRollbackBp(nzfId, hbId);
-                throw new BankBookingException(rbMulti ? BookError.Internal : BookError.Orphan,
-                    $"Raw UPDATE @@ROWCOUNT={rows} (>1 - nieoczekiwane przy PK, mozliwy schema drift, hb_id={hbId}) - {(rbMulti ? "BP cofniety, NIE ponawiaj bez diagnozy" : "rollback BP padl, ORPHAN - usun recznie")}.");
+                _logger.LogError("Book: hb_id={HbId} raw UPDATE @@ROWCOUNT={Rows} (>1, niemozliwe przy PK!) - link ustawiony, NIE cofam BP {Op}", hbId, rows, nzfId);
+                throw new BankBookingException(BookError.Orphan,
+                    $"Raw UPDATE @@ROWCOUNT={rows} (>1 - nieoczekiwane przy PK, mozliwy schema drift, hb_id={hbId}) - link na BP {nzfId} ustawiony, BP NIE cofniety. Sprawdz recznie hb_Transakcja i operacje w module Bankowosc.",
+                    bankOperationSubiektId: nzfId);
             }
 
             // rows == 0: linia powiazana LUB status zmieniony (operator w module Bankowosc / wyscig) miedzy naszym
@@ -1018,7 +1078,7 @@ public sealed class RealSferaSession : ISferaSession
             catch (Exception ex)
             {
                 throw new BankBookingException(BookError.Orphan,
-                    $"Wyscig @@ROWCOUNT=0 i nie mozna odczytac stanu linku hb_id={hbId} - BP {nzfId} NIE cofniety (stan nieznany). Sprawdz hb_idOperacjiBankowej recznie.", ex);
+                    $"Wyscig @@ROWCOUNT=0 i nie mozna odczytac stanu linku hb_id={hbId} - BP {nzfId} NIE cofniety (stan nieznany). Sprawdz hb_idOperacjiBankowej recznie.", ex, bankOperationSubiektId: nzfId);
             }
 
             if (winner == nzfId)
@@ -1031,7 +1091,7 @@ public sealed class RealSferaSession : ISferaSession
             bool rbRace = await TryRollbackBp(nzfId, hbId);
             if (!rbRace)
                 throw new BankBookingException(BookError.Orphan,
-                    $"Linia zaksiegowana rownolegle; rollback naszego BP {nzfId} padl - ORPHAN (hb_id={hbId}). Usun operacje recznie w module Bankowosc.");
+                    $"Linia zaksiegowana rownolegle; rollback naszego BP {nzfId} padl - ORPHAN (hb_id={hbId}). Usun operacje recznie w module Bankowosc.", bankOperationSubiektId: nzfId);
 
             if (!winner.HasValue)
                 // Anomalia: @@ROWCOUNT=0, ale linia NIE jest powiazana (WHERE/status nie trafil mimo ze odczyt znalazl wiersz).
@@ -1043,13 +1103,26 @@ public sealed class RealSferaSession : ISferaSession
             return new BookResultDto(winner, hbId, Linked: true, AlreadyBooked: true,
                 "Transakcja zaksiegowana rownolegle (operator/inny request) - zwrocono istniejaca operacje, nasz BP cofniety.");
         }
-        finally
+        catch (BankBookingException) { throw; }
+        catch (Exception ex)
         {
-            gate.Release();
-            // Bez tego slownik rosl bez konca (SemaphoreSlim per hb_id na czas zycia uslugi). Usuwamy TYLKO ten
-            // egzemplarz i tylko gdy nikt nie czeka; ewentualny wyscig z nowym wpisem i tak lapie guard IS NULL w UPDATE.
-            if (gate.CurrentCount == 1)
-                _bookLocks.TryRemove(new KeyValuePair<long, SemaphoreSlim>(hbId, gate));
+            _logger.LogError(ex, "Book: NIEPRZEWIDZIANY wyjatek po utworzeniu BP {Op} (hb_id={HbId}) - sprawdzam link przed rollbackiem", nzfId, hbId);
+            long? linkNow = null;
+            bool linkKnown;
+            try { linkNow = await Task.Run(() => ReadHbLink(hbId), CancellationToken.None); linkKnown = true; }
+            catch (Exception rex) { linkKnown = false; _logger.LogError(rex, "Book: odczyt linku hb_id={HbId} padl po nieprzewidzianym wyjatku - NIE cofam BP {Op}", hbId, nzfId); }
+            if (linkKnown && linkNow == nzfId)
+            {
+                // Link juz domkniety na NASZ BP - sukces mimo wyjatku po drodze (np. w sprzataniu).
+                try { await _journal.DeletePendingBookingAsync(hbId, CancellationToken.None); } catch { /* best-effort */ }
+                _logger.LogWarning("Book OK mimo wyjatku: hb_id={HbId} -> BP {Op} (link zastany)", hbId, nzfId);
+                return new BookResultDto(nzfId, hbId, Linked: true, AlreadyBooked: false, null);
+            }
+            if (linkKnown && await TryRollbackBp(nzfId, hbId))
+                throw new BankBookingException(BookError.Internal,
+                    $"Nieprzewidziany blad po utworzeniu BP (hb_id={hbId}) - BP cofniety, mozna ponowic: {ex.GetType().Name}: {ex.Message}", ex);
+            throw new BankBookingException(BookError.Orphan,
+                $"Nieprzewidziany blad po utworzeniu BP {nzfId} (hb_id={hbId}), {(linkKnown ? "rollback padl" : "stan linku nieznany, BP NIE cofniety")} - ORPHAN. Usun/sprawdz recznie w module Bankowosc: {ex.GetType().Name}: {ex.Message}", ex, bankOperationSubiektId: nzfId);
         }
     }
 
@@ -1582,116 +1655,129 @@ public sealed class RealSferaSession : ISferaSession
         dynamic? bp = null;
         try
         {
-            bp = Session.FinManager.DodajOperacjeBankowa(typ, tx.RachunekId!.Value);
-            var bpObj = (object)bp;
-
-            // SetCom (reflection InvokeMember) opakowuje bledy COM w TargetInvocationException - rozpakowujemy,
-            // logujemy property + HRESULT i rzucamy czytelny blad (zamiast golego TargetInvocationException).
-            void SetLogged(string prop, object val)
-            {
-                try { SetCom(bpObj, prop, val); }
-                catch (Exception ex)
+            // Fazy Build / Save / ReadId przez BankOperationSave (klasyfikacja: BookFailureClassifier, spec W1):
+            // wyjatek Z lub PO Zapisz daje Internal (HB_BOOKING_FAILED = klient ponawia = DRUGI BP) TYLKO dla
+            // HRESULT-ow "odrzucone przez zywy proces"; reszta = Orphan bez id. Wyjatki nie-COM (binder, konwersja)
+            // tez ida przez klasyfikator - wczesniej wychodzily z RunOnStaAsync do catch-all jako INTERNAL_ERROR.
+            return BankOperationSave.Run(
+                build: () =>
                 {
-                    var com = ex is System.Reflection.TargetInvocationException tie && tie.InnerException is not null ? tie.InnerException : ex;
-                    int hr = com is COMException ce ? ce.ErrorCode : Marshal.GetHRForException(com);
-                    _logger.LogError(com, "Book CreateBP: SetCom({Prop}={Val}) padl 0x{Hr:X8}", prop, val, hr);
-                    throw new BankBookingException(BookError.Internal, $"Ustawienie {prop}={val} na operacji bankowej padlo: 0x{hr:X8} {com.Message}", ex);
-                }
-            }
-
-            // Kolejnosc jak w przykladzie CHM DodajOperacjeBankowa: kontrahent/brak-danych-kh PRZED kwota.
-            if (contractorId.HasValue)
-            {
-                try { bp.ObiektPowiazanyWstaw(1, contractorId.Value); } // 1 = gtaDokFinObiektKontrahent
-                catch (Exception ex)
-                {
-                    var com = ex is System.Reflection.TargetInvocationException tie && tie.InnerException is not null ? tie.InnerException : ex;
-                    int hr = com is COMException ce ? ce.ErrorCode : Marshal.GetHRForException(com);
-                    _logger.LogError(com, "Book CreateBP: ObiektPowiazanyWstaw(kontrahent={Kh}) padl 0x{Hr:X8}", contractorId.Value, hr);
-                    throw new BankBookingException(BookError.Internal, $"Powiazanie kontrahenta {contractorId.Value} z operacja bankowa padlo: 0x{hr:X8} {com.Message}", ex);
-                }
-            }
-            else
-            {
-                TrySet(bpObj, "OperacjaBezDanychKh", true);
-            }
-
-            // KWOTA przez WartoscPoczatkowaWaluta (settable). WartoscPoczatkowa jest READ-ONLY ("Aby ustawic wartosc
-            // poczatkowa ... uzyj WartoscPoczatkowaWaluta" - CHM) i jej set rzucal. Dla PLN waluta dokumentu = bazowa.
-            SetLogged("WartoscPoczatkowaWaluta", (double)Math.Abs(tx.Kwota!.Value));
-            // hb_DataKsiegowania bywa NULL -> fallback na hb_DataWaluty; bez obu Sfera da date dzisiejsza (glosno w logu).
-            var dataOperacji = tx.Data ?? tx.DataWaluty;
-            if (dataOperacji.HasValue) SetLogged("Data", dataOperacji.Value);
-            else _logger.LogWarning("Book CreateBP: hb_DataKsiegowania i hb_DataWaluty NULL - operacja dostanie date dzisiejsza");
-
-            // TYTUL: chcemy SUROWY opis przelewu (hb_Tytul) jak operacja reczna w GUI. DodajOperacjeBankowa domyslnie
-            // ustawia GenerujTytulemNaPodstawieRozl=true (mimo nzf_GenerujTytulem DEFAULT 0 w schemacie) - wtedy Subiekt
-            // po rozliczeniu REGENERUJE "Tytulem" z numerow rozrachunkow ("FS 573/05(3372.50)"), nadpisujac nasz surowy
-            // tytul (stad wczesniej Tytulem "nie dzialal"). GUI ma ten checkbox ODZNACZONY. Wylaczamy autogeneracje
-            // (atrybut FinDokument od GT 1.32 -> nzf_GenerujTytulem) PRZED ustawieniem Tytulem. Bezwarunkowo, by byc 1:1
-            // z reczna operacja (idempotentne; przy OperacjaBezDanychKh=true Sfera i tak sama daje false - CHM).
-            TrySet(bpObj, "GenerujTytulemNaPodstawieRozl", false);
-            // nzf_Tytulem to TTytulem = varchar(144). hb_Tytul bywa dluzszy (np. hb_id=13128: 180 znakow) -> set
-            // rzucalby "wartosc za dluga", a TrySet polykal wyjatek -> pole zostawalo NULL. Przycinamy do 144 jak GUI.
-            // Glosny, ale NIE-fatalny set (Warning, nie throw): tytul to pole opisowe - nie wywala ksiegowania,
-            // ale ewentualny blad NIE ginie po cichu (lekcja z TrySet).
-            if (!string.IsNullOrEmpty(tx.Tytul))
-            {
-                var tytul = tx.Tytul.Length > 144 ? tx.Tytul[..144] : tx.Tytul;
-                try { SetCom(bpObj, "Tytulem", tytul); }
-                catch (Exception ex)
-                {
-                    var com = ex is System.Reflection.TargetInvocationException tie && tie.InnerException is not null ? tie.InnerException : ex;
-                    _logger.LogWarning(com, "Book CreateBP: ustawienie Tytulem (len={Len}) padlo - operacja bez tytulu", tytul.Length);
-                }
-            }
-
-            // UZGODNIENIE operacji z wyciagiem (przez Sfere, w tym samym Zapisz - nie raw UPDATE nz__Finanse!).
-            // FinDokument ma 3 settable atrybuty (CHM, od GT 1.13): NrWyciagu->nzf_NumerWyciagu,
-            // UzgodnienieData->nzf_DataUzgodnienia, UzgodnienieTyp->nzf_Status (enum: 2=gtaOperBankZgodna).
-            // Bez tego operacja jest "luzna ?" w gridzie (nzf_Status=1 do uzgodnienia) - rozjazd vs reczne GUI.
-            // LAGODNA DEGRADACJA: uzgodnienie to UX/operacyjny gap, NIE integralnosc - blad set NIE wywala
-            // ksiegowania (operacja i tak powstanie + zlinkuje sie), tylko log ostrzezenia (NIE po cichu).
-            // Uzgadniamy TYLKO gdy mamy numer wyciagu z pliku banku (hb_NumerWyciagu) - bez numeru nie ma sie
-            // z czym uzgadniac, wiec zostawiamy "do uzgodnienia" (uczciwie) zamiast falszywie oznaczac "zgodna".
-            string? numerWyciagu = tx.NumerWyciagu?.Trim();
-            if (!string.IsNullOrEmpty(numerWyciagu))
-            {
-                bool TryReconcile(string prop, object val)
-                {
-                    try { SetCom(bpObj, prop, val); return true; }
-                    catch (Exception ex)
-                    {
-                        var com = ex is System.Reflection.TargetInvocationException tie && tie.InnerException is not null ? tie.InnerException : ex;
-                        _logger.LogWarning(com, "Book CreateBP: uzgodnienie {Prop}={Val} padlo hb_NumerWyciagu={Nr}", prop, val, numerWyciagu);
-                        return false;
-                    }
-                }
-                // ALL-OR-NOTHING: oznaczamy "zgodna" (UzgodnienieTyp=2) TYLKO gdy OBA pola danych weszly. Inaczej
-                // powstalby nzf_Status=2 z niekompletnym uzgodnieniem (np. pusty numer/data) = falszywa zgodnosc.
-                // '&' (nie '&&') - oba zawsze probowane, oba ewentualne bledy zalogowane.
-                if (TryReconcile("NrWyciagu", numerWyciagu) & TryReconcile("UzgodnienieData", DateTime.Today))
-                    TryReconcile("UzgodnienieTyp", 2);           // nzf_Status=2 gtaOperBankZgodna (znika "?" z gridu)
-                else
-                    _logger.LogWarning("Book CreateBP: uzgodnienie niekompletne - operacja zostaje NIEuzgodniona (nzf_Status=1)");
-            }
-            else
-            {
-                _logger.LogInformation("Book CreateBP: brak hb_NumerWyciagu - operacja zostaje NIEuzgodniona (nzf_Status=1)");
-            }
-
-            bp.Zapisz();
-            return ToInt64(bp.Identyfikator);
+                    bp = Session.FinManager.DodajOperacjeBankowa(typ, tx.RachunekId!.Value);
+                    BuildBankOperation((object)bp, tx, contractorId);
+                },
+                save: () => bp!.Zapisz(),
+                readId: () => ToInt64(bp!.Identyfikator));
         }
-        catch (COMException cex)
+        catch (BankBookingException ex)
         {
-            // cex.Message niesie opisowy komunikat Sfery/RAISERROR triggera; GetExceptionForHR dawal generyczne "E_FAIL".
-            _logger.LogError(cex, "Book CreateBP: DodajOperacjeBankowa/Zapisz padl 0x{Hr:X8} (rb_Id={Rb})", cex.ErrorCode, tx.RachunekId);
-            throw new BankBookingException(BookError.Internal, $"DodajOperacjeBankowa/Zapisz padl: 0x{cex.ErrorCode:X8} {cex.Message}", cex);
+            _logger.LogError(ex, "Book CreateBP: {Reason} (rb_Id={Rb}): {Msg}", ex.Reason, tx.RachunekId, ex.Message);
+            throw;
         }
         finally
         {
             if (bp is not null) TryClose(bp);
+        }
+    }
+
+    /// <summary>[STA] Faza Build: atrybuty BP/BW PRZED Zapisz (kolejnosc jak w przykladzie CHM DodajOperacjeBankowa).
+    /// Parametr jako object (nie dynamic) - wywolanie prywatnej metody z argumentem dynamic szloby przez runtime binder.</summary>
+    private void BuildBankOperation(object bpObj, HbTxForBooking tx, long? contractorId)
+    {
+        dynamic bp = bpObj;
+
+        // SetCom (reflection InvokeMember) opakowuje bledy COM w TargetInvocationException - rozpakowujemy,
+        // logujemy property + HRESULT i rzucamy czytelny blad (zamiast golego TargetInvocationException).
+        void SetLogged(string prop, object val)
+        {
+            try { SetCom(bpObj, prop, val); }
+            catch (Exception ex)
+            {
+                var com = ex is System.Reflection.TargetInvocationException tie && tie.InnerException is not null ? tie.InnerException : ex;
+                int hr = com is COMException ce ? ce.ErrorCode : Marshal.GetHRForException(com);
+                _logger.LogError(com, "Book CreateBP: SetCom({Prop}={Val}) padl 0x{Hr:X8}", prop, val, hr);
+                throw new BankBookingException(BookError.Internal, $"Ustawienie {prop}={val} na operacji bankowej padlo: 0x{hr:X8} {com.Message}", ex);
+            }
+        }
+
+        // Kolejnosc jak w przykladzie CHM DodajOperacjeBankowa: kontrahent/brak-danych-kh PRZED kwota.
+        if (contractorId.HasValue)
+        {
+            try { bp.ObiektPowiazanyWstaw(1, contractorId.Value); } // 1 = gtaDokFinObiektKontrahent
+            catch (Exception ex)
+            {
+                var com = ex is System.Reflection.TargetInvocationException tie && tie.InnerException is not null ? tie.InnerException : ex;
+                int hr = com is COMException ce ? ce.ErrorCode : Marshal.GetHRForException(com);
+                _logger.LogError(com, "Book CreateBP: ObiektPowiazanyWstaw(kontrahent={Kh}) padl 0x{Hr:X8}", contractorId.Value, hr);
+                throw new BankBookingException(BookError.Internal, $"Powiazanie kontrahenta {contractorId.Value} z operacja bankowa padlo: 0x{hr:X8} {com.Message}", ex);
+            }
+        }
+        else
+        {
+            TrySet(bpObj, "OperacjaBezDanychKh", true);
+        }
+
+        // KWOTA przez WartoscPoczatkowaWaluta (settable). WartoscPoczatkowa jest READ-ONLY ("Aby ustawic wartosc
+        // poczatkowa ... uzyj WartoscPoczatkowaWaluta" - CHM) i jej set rzucal. Dla PLN waluta dokumentu = bazowa.
+        SetLogged("WartoscPoczatkowaWaluta", (double)Math.Abs(tx.Kwota!.Value));
+        // hb_DataKsiegowania bywa NULL -> fallback na hb_DataWaluty; bez obu Sfera da date dzisiejsza (glosno w logu).
+        var dataOperacji = tx.Data ?? tx.DataWaluty;
+        if (dataOperacji.HasValue) SetLogged("Data", dataOperacji.Value);
+        else _logger.LogWarning("Book CreateBP: hb_DataKsiegowania i hb_DataWaluty NULL - operacja dostanie date dzisiejsza");
+
+        // TYTUL: chcemy SUROWY opis przelewu (hb_Tytul) jak operacja reczna w GUI. DodajOperacjeBankowa domyslnie
+        // ustawia GenerujTytulemNaPodstawieRozl=true (mimo nzf_GenerujTytulem DEFAULT 0 w schemacie) - wtedy Subiekt
+        // po rozliczeniu REGENERUJE "Tytulem" z numerow rozrachunkow ("FS 573/05(3372.50)"), nadpisujac nasz surowy
+        // tytul (stad wczesniej Tytulem "nie dzialal"). GUI ma ten checkbox ODZNACZONY. Wylaczamy autogeneracje
+        // (atrybut FinDokument od GT 1.32 -> nzf_GenerujTytulem) PRZED ustawieniem Tytulem. Bezwarunkowo, by byc 1:1
+        // z reczna operacja (idempotentne; przy OperacjaBezDanychKh=true Sfera i tak sama daje false - CHM).
+        TrySet(bpObj, "GenerujTytulemNaPodstawieRozl", false);
+        // nzf_Tytulem to TTytulem = varchar(144). hb_Tytul bywa dluzszy (np. hb_id=13128: 180 znakow) -> set
+        // rzucalby "wartosc za dluga", a TrySet polykal wyjatek -> pole zostawalo NULL. Przycinamy do 144 jak GUI.
+        // Glosny, ale NIE-fatalny set (Warning, nie throw): tytul to pole opisowe - nie wywala ksiegowania,
+        // ale ewentualny blad NIE ginie po cichu (lekcja z TrySet).
+        if (!string.IsNullOrEmpty(tx.Tytul))
+        {
+            var tytul = tx.Tytul.Length > 144 ? tx.Tytul[..144] : tx.Tytul;
+            try { SetCom(bpObj, "Tytulem", tytul); }
+            catch (Exception ex)
+            {
+                var com = ex is System.Reflection.TargetInvocationException tie && tie.InnerException is not null ? tie.InnerException : ex;
+                _logger.LogWarning(com, "Book CreateBP: ustawienie Tytulem (len={Len}) padlo - operacja bez tytulu", tytul.Length);
+            }
+        }
+
+        // UZGODNIENIE operacji z wyciagiem (przez Sfere, w tym samym Zapisz - nie raw UPDATE nz__Finanse!).
+        // FinDokument ma 3 settable atrybuty (CHM, od GT 1.13): NrWyciagu->nzf_NumerWyciagu,
+        // UzgodnienieData->nzf_DataUzgodnienia, UzgodnienieTyp->nzf_Status (enum: 2=gtaOperBankZgodna).
+        // Bez tego operacja jest "luzna ?" w gridzie (nzf_Status=1 do uzgodnienia) - rozjazd vs reczne GUI.
+        // LAGODNA DEGRADACJA: uzgodnienie to UX/operacyjny gap, NIE integralnosc - blad set NIE wywala
+        // ksiegowania (operacja i tak powstanie + zlinkuje sie), tylko log ostrzezenia (NIE po cichu).
+        // Uzgadniamy TYLKO gdy mamy numer wyciagu z pliku banku (hb_NumerWyciagu) - bez numeru nie ma sie
+        // z czym uzgadniac, wiec zostawiamy "do uzgodnienia" (uczciwie) zamiast falszywie oznaczac "zgodna".
+        string? numerWyciagu = tx.NumerWyciagu?.Trim();
+        if (!string.IsNullOrEmpty(numerWyciagu))
+        {
+            bool TryReconcile(string prop, object val)
+            {
+                try { SetCom(bpObj, prop, val); return true; }
+                catch (Exception ex)
+                {
+                    var com = ex is System.Reflection.TargetInvocationException tie && tie.InnerException is not null ? tie.InnerException : ex;
+                    _logger.LogWarning(com, "Book CreateBP: uzgodnienie {Prop}={Val} padlo hb_NumerWyciagu={Nr}", prop, val, numerWyciagu);
+                    return false;
+                }
+            }
+            // ALL-OR-NOTHING: oznaczamy "zgodna" (UzgodnienieTyp=2) TYLKO gdy OBA pola danych weszly. Inaczej
+            // powstalby nzf_Status=2 z niekompletnym uzgodnieniem (np. pusty numer/data) = falszywa zgodnosc.
+            // '&' (nie '&&') - oba zawsze probowane, oba ewentualne bledy zalogowane.
+            if (TryReconcile("NrWyciagu", numerWyciagu) & TryReconcile("UzgodnienieData", DateTime.Today))
+                TryReconcile("UzgodnienieTyp", 2);           // nzf_Status=2 gtaOperBankZgodna (znika "?" z gridu)
+            else
+                _logger.LogWarning("Book CreateBP: uzgodnienie niekompletne - operacja zostaje NIEuzgodniona (nzf_Status=1)");
+        }
+        else
+        {
+            _logger.LogInformation("Book CreateBP: brak hb_NumerWyciagu - operacja zostaje NIEuzgodniona (nzf_Status=1)");
         }
     }
 
@@ -2224,7 +2310,8 @@ public sealed class RealSferaSession : ISferaSession
                     long? splataId = ReadInt64OrNull((object)roz, "SplataId");
                     if (splataId == bankOperationId)
                     {
-                        long existingRozId = ReadInt64OrNull((object)roz, "RozliczenieId") ?? -1;
+                        // null (nie -1) gdy RozliczenieId nieodczytany: kontrakt `existing_rozliczenie_id: int | null` (spec W5).
+                        long? existingRozId = ReadInt64OrNull((object)roz, "RozliczenieId");
                         throw new DuplicateSettlementException(existingRozId, rozrachunekId, bankOperationId);
                     }
                 }
@@ -2839,12 +2926,24 @@ public sealed class RealSferaSession : ISferaSession
                 ApplyCorrectionPayment(kfs, request.Payment);
             }
 
+            // Kontrahent KFS = kontrahent (płatnik, dok_PlatnikId; CHM SuDokument_KontrahentId) FS źródłowej,
+            // odziedziczony przez NaPodstawie. Odczyt PRZED Zapisz (zero ryzyka "zapisany + 500"), best-effort:
+            // TryGetLong połyka; fallback po Zapisz tym samym helperem; nieodczytane -> 0 (sentinel "nieznany").
+            // Do v0.18.0 zwracaliśmy zawsze 0, a klient zapisywał to jako kontrahenta dokumentu (spec W4).
+            long? contractorId = TryGetLong(kfs, "KontrahentId");
+
             kfs.Zapisz();
 
             long subiektId = ToInt64(kfs.Identyfikator);
             string number = (string)kfs.NumerPelny;
             var issuedAt = DateTimeOffset.UtcNow;
             _lastInvoiceAt = issuedAt;
+
+            // Fallback po Zapisz takze gdy przed zapisem bylo 0 (nie tylko null) - Sfera moze wypelniac platnika
+            // dopiero przy zapisie (na COM niezweryfikowane). TryGetLong polyka - nic tu nie rzuca.
+            if (contractorId is null or 0) contractorId = TryGetLong(kfs, "KontrahentId");
+            if (contractorId is null or 0)
+                _logger.LogWarning("KFS {Number} (id={Id}): KontrahentId nieodczytany przed i po Zapisz - contractor_subiekt_id=0 (nieznany)", number, subiektId);
 
             string? pdfBase64 = TryGeneratePdf(kfs, subiektId);
 
@@ -2856,7 +2955,7 @@ public sealed class RealSferaSession : ISferaSession
                 SubiektId: subiektId,
                 Number: number,
                 IssuedAt: issuedAt,
-                ContractorSubiektId: 0,
+                ContractorSubiektId: contractorId ?? 0,
                 Totals: totals,
                 PdfUrl: null,
                 PdfBase64: pdfBase64);

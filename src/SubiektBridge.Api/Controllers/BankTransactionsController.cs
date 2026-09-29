@@ -167,8 +167,17 @@ public sealed class BankTransactionsController : ControllerBase
         {
             // ORPHAN: operacja bankowa powstala bez linku i rollback padl - stan NIESPOJNY, interwencja reczna.
             // 500 (NIE 2xx) by klient NIE potraktowal tego jako sukces i NIE retry'owal na slepo (kolejny BP).
-            _logger.LogError(ex, "Book ORPHAN - operacja bez linku, rollback padl (hb_id={HbId})", hbId);
-            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponseDto("HB_BOOKING_ORPHAN", ex.Message));
+            // details.bank_operation_subiekt_id = nzf_Id do ręcznego usunięcia (null = BP mógł powstać, id nieodczytane).
+            _logger.LogError(ex, "Book ORPHAN - operacja bez linku (hb_id={HbId}, bp={Op})", hbId, ex.BankOperationSubiektId);
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponseDto("HB_BOOKING_ORPHAN", ex.Message,
+                Details: new { bank_operation_subiekt_id = ex.BankOperationSubiektId, hb_id = hbId }));
+        }
+        catch (SferaUnavailableException ex)
+        {
+            // Subiekt offline PRZED pierwszym zapisem (preflight sesji, spec W3) -> 503, klient ponawia tym samym
+            // kluczem. Nic nie trafia do cache idempotencji (SaveAsync tylko po sukcesie).
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ErrorResponseDto(
+                Code: "SUBIEKT_UNAVAILABLE", Message: ex.Message));
         }
         catch (NotImplementedException ex)
         {

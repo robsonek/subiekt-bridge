@@ -56,7 +56,7 @@ public class ReviewFixesSessionTests
         var (status, value) = Unwrap((await controller.Create(Invoice(), key, CancellationToken.None)).Result);
 
         Assert.Equal(503, status);
-        Assert.Equal("SFERA_UNAVAILABLE", Assert.IsType<ErrorResponseDto>(value).Code);
+        Assert.Equal("SUBIEKT_UNAVAILABLE", Assert.IsType<ErrorResponseDto>(value).Code);
         // Klucz przetrwał: po powrocie sesji replay zwróci pierwotny dokument, nie wystawi drugiego.
         Assert.NotNull(await store.TryGetAsync<InvoiceResponseDto>(key, CancellationToken.None));
 
@@ -75,6 +75,6 @@ public class ReviewFixesSessionTests
         var (status, value) = Unwrap((await controller.Get("sub_1", CancellationToken.None)).Result);
 
         Assert.Equal(503, status);
-        Assert.Equal("SFERA_UNAVAILABLE", Assert.IsType<ErrorResponseDto>(value).Code);
+        Assert.Equal("SUBIEKT_UNAVAILABLE", Assert.IsType<ErrorResponseDto>(value).Code);
     }
 }

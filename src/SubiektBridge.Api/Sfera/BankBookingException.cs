@@ -41,9 +41,16 @@ public sealed class BankBookingException : Exception
 {
     public BookError Reason { get; }
 
-    public BankBookingException(BookError reason, string message, Exception? inner = null)
+    /// <summary>
+    /// nzf_Id operacji bankowej, gdy jest znane (Orphan po nieudanym linku/rollbacku). null = BP mógł powstać,
+    /// ale id nie odczytano (wyjątek z/po Zapisz). Kontroler oddaje w `details.bank_operation_subiekt_id`.
+    /// </summary>
+    public long? BankOperationSubiektId { get; }
+
+    public BankBookingException(BookError reason, string message, Exception? inner = null, long? bankOperationSubiektId = null)
         : base(message, inner)
     {
         Reason = reason;
+        BankOperationSubiektId = bankOperationSubiektId;
     }
 }

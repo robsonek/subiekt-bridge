@@ -16,6 +16,7 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<InvoiceResponseDto> CreateInvoiceAsync(InvoiceRequestDto request, CancellationToken ct)
     {
+        if (SferaUnavailableForTests) throw new SferaUnavailableException("Sesja Sfery niedostepna (fake) - nic nie zapisano");
         ThrowIfContractorLookupFails(request.Contractor);
         ThrowIfSymbolInvalidWithoutNip(request.Contractor);
         var counter = Interlocked.Increment(ref _invoiceCounter);
@@ -41,6 +42,7 @@ public sealed class FakeSferaSession : ISferaSession
         InvoiceCorrectionRequestDto request,
         CancellationToken ct)
     {
+        if (SferaUnavailableForTests) throw new SferaUnavailableException("Sesja Sfery niedostepna (fake) - nic nie zapisano");
         var counter = Interlocked.Increment(ref _invoiceCounter);
         var year = DateTimeOffset.UtcNow.Year;
         _lastInvoiceAt = DateTimeOffset.UtcNow;
@@ -58,7 +60,9 @@ public sealed class FakeSferaSession : ISferaSession
             SubiektId: 2_000_000 + counter,
             Number: $"KFS {counter}/{year}",
             IssuedAt: _lastInvoiceAt.Value,
-            ContractorSubiektId: 0,
+            // Kontrahent KFS = kontrahent (płatnik) FS źródłowej - Real czyta KontrahentId po NaPodstawie.
+            // Deterministycznie z id źródła (fake nie zna symbolu kontrahenta FS); 0 = "nieznany" (sentinel).
+            ContractorSubiektId: 1_000 + sourceSubiektId % 100_000,
             Totals: new InvoiceTotalsDto(Net: net, Vat: vat, Gross: grossSum),
             PdfUrl: $"/api/v1/invoices/fake_kfs_{counter:D6}/pdf",
             PdfBase64: null));
@@ -84,6 +88,7 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<InvoiceResponseDto> CreateReceiptAsync(ReceiptIssueRequestDto request, CancellationToken ct)
     {
+        if (SferaUnavailableForTests) throw new SferaUnavailableException("Sesja Sfery niedostepna (fake) - nic nie zapisano");
         ThrowIfContractorLookupFails(request.Supplier);
         ThrowIfSymbolInvalidWithoutNip(request.Supplier);
         var counter = Interlocked.Increment(ref _invoiceCounter);
@@ -114,6 +119,7 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<TransferResponseDto> CreateTransferAsync(TransferRequestDto request, CancellationToken ct)
     {
+        if (SferaUnavailableForTests) throw new SferaUnavailableException("Sesja Sfery niedostepna (fake) - nic nie zapisano");
         var counter = Interlocked.Increment(ref _invoiceCounter);
         var year = DateTimeOffset.UtcNow.Year;
         _lastInvoiceAt = DateTimeOffset.UtcNow;
@@ -260,7 +266,8 @@ public sealed class FakeSferaSession : ISferaSession
     // Test-only: symuluje padniety lookup po NIP (RealSferaSession.FindContractorIdByNip -> SQL error).
     internal bool FailContractorLookupForTests { get; set; }
 
-    // Test-only: symuluje martwa sesje Sfery przy FindInvoiceByIdAsync (Real: sonda sesji pada).
+    // Test-only: symuluje martwa sesje Sfery - przy odczycie (FindInvoiceByIdAsync: sonda po wyjatku), na wejsciu
+    // KAZDEJ mutacji (Real: preflight EnsureSessionForMutation, nic nie zapisano -> 503 SUBIEKT_UNAVAILABLE) i w health.
     internal bool SferaUnavailableForTests { get; set; }
 
     // Real pyta SQL tylko dla kontrahenta z NIP-em - tak samo tu.
@@ -344,6 +351,9 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<SferaHealthDto> HealthAsync(CancellationToken ct)
     {
+        // Real sonduje sesje (IsSessionAlive) - martwa daje SessionActive=false (503 z /health), nie "active".
+        if (SferaUnavailableForTests)
+            return Task.FromResult(new SferaHealthDto("unknown", false, _lastInvoiceAt, "SferaUnavailableException: sesja martwa (fake)", true));
         return Task.FromResult(new SferaHealthDto(
             SubiektVersion: "FAKE-1.78.0",
             SessionActive: true,
@@ -373,6 +383,7 @@ public sealed class FakeSferaSession : ISferaSession
     //   >= 3_000_000     -> dokument bez rozrachunku (PZ magazynowy) -> NoRozrachunek
     //   2_000_000..2_999_999 -> typ nieobsługiwany (np. korekta KFS/KFZ) -> UnsupportedDocumentType
     //   == 1_900_001     -> rozrachunek już rozliczony (Remaining=0) -> AlreadySettled (w zakresie FS, <2M)
+    //   == 1_900_002     -> DuplicateSettlement z existing_rozliczenie_id = null (numer nieodczytany, W5)
     // Sentinele bank_operation_subiekt_id:
     //   < 0  -> BankOperationNotFound
     //   == 0 -> BankOperationExhausted
@@ -420,12 +431,15 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<SettlementResponseDto> CreateSettlementAsync(long documentSubiektId, SettlementCreateRequestDto request, CancellationToken ct)
     {
+        if (SferaUnavailableForTests) throw new SferaUnavailableException("Sesja Sfery niedostepna (fake) - nic nie zapisano");
         if (request.Amount <= 0m) throw new SettlementException(SettlementError.InvalidAmount, "amount musi byc > 0");
         decimal amount = Math.Round(request.Amount, 2, MidpointRounding.AwayFromZero);
 
         if (documentSubiektId < 0) throw new SettlementException(SettlementError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje");
         if (documentSubiektId >= 3_000_000) throw new SettlementException(SettlementError.NoRozrachunek, "Dokument bez rozrachunku (PZ magazynowy)");
         if (documentSubiektId is >= 2_000_000 and < 3_000_000) throw new SettlementException(SettlementError.UnsupportedDocumentType, "Typ nieobslugiwany (np. korekta)");
+        // 1_900_002: duplikat wykryty po SplataId, ale RozliczenieId linii nieodczytany -> existing_rozliczenie_id = null (W5).
+        if (documentSubiektId == 1_900_002) throw new DuplicateSettlementException(null, documentSubiektId, request.BankOperationSubiektId);
         if (request.BankOperationSubiektId < 0) throw new SettlementException(SettlementError.BankOperationNotFound, $"Operacja bankowa {request.BankOperationSubiektId} nie istnieje");
         // Parytet z Real (guard nzf_Typ IN (19,20)): id >= 9_000_000 = wiersz nz__Finanse, ktory nie jest BP/BW.
         if (request.BankOperationSubiektId >= 9_000_000) throw new SettlementException(SettlementError.UnsupportedBankOperationType, $"nz__Finanse {request.BankOperationSubiektId} nie jest operacja bankowa BP/BW");
@@ -561,13 +575,17 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<BookResultDto> BookBankTransactionAsync(long hbId, long? contractorSubiektId, CancellationToken ct)
     {
+        if (SferaUnavailableForTests) throw new SferaUnavailableException("Sesja Sfery niedostepna (fake) - nic nie zapisano");
         if (hbId < 0) throw new BankBookingException(BookError.TransactionNotFound, $"hb_Transakcja {hbId} nie istnieje");
         if (hbId == 77_777) throw new BankBookingException(BookError.NoAccount, "hb_Transakcja bez konta wyciagu (fake)");
         // Sentinel: rachunek walutowy (rb_IdWaluty != 'PLN') -> ForeignAccount (R7), zanim utworzymy BP.
         if (hbId == 66_666) throw new BankBookingException(BookError.ForeignAccount, "hb_Transakcja na rachunku walutowym (fake)");
         // Sentinele do testu mapowania błędów 500: Internal (BP cofnięty/nie powstał) i Orphan (rollback padł).
         if (hbId == 55_555) throw new BankBookingException(BookError.Internal, "COM/raw UPDATE padl, BP cofniety (fake)");
-        if (hbId == 44_444) throw new BankBookingException(BookError.Orphan, "ORPHAN - operacja bez linku, rollback padl (fake)");
+        // 44_444: link padł, rollback padł -> nzfId ZNANY (details.bank_operation_subiekt_id = 90_000 + hb_id).
+        if (hbId == 44_444) throw new BankBookingException(BookError.Orphan, "ORPHAN - operacja bez linku, rollback padl (fake)", bankOperationSubiektId: 90_000 + hbId);
+        // 44_445: wyjątek PO Zapisz (odczyt Identyfikator padł) -> BP mógł powstać, id NIEZNANE (W1: nigdy Internal).
+        if (hbId == 44_445) throw new BankBookingException(BookError.Orphan, "ORPHAN - Zapisz przeszlo, id nieodczytane (fake)");
         // Sentinel: hb_Kwota NULL/0 -> InvalidAmount (422 INVALID_HB_AMOUNT).
         if (hbId == 33_333) throw new BankBookingException(BookError.InvalidAmount, "hb_Transakcja ma hb_Kwota=NULL (fake)");
 

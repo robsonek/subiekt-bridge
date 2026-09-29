@@ -107,10 +107,17 @@ JOIN adr__Ewid a ON a.adr_IdObiektu = k.kh_Id AND a.adr_TypAdresu = 1
 WHERE a.adr_NIP = @nip
 ```
 
-- **Sonda sesji po wyjątku `WczytajDokument`/`Istnieje`** (`IsSessionAlive`, od v0.18.0): wyjątek przy
-  odczycie znaczy „nie istnieje” TYLKO gdy `Session.Aplikacja.Wersja` działa; martwa sesja → reset +
-  `SferaUnavailableException` (503) / `KsefError.CommunicationError` (502) / `SettlementError.ScanFailed` (502).
-  Replay idempotencji przy padniętej sesji NIE kasuje klucza (kasacja + nowy request = duplikat).
+- **Sonda sesji** (`IsSessionAlive`, od v0.18.0) = `SuDokumentyManager.OtworzKolekcje("dok_Id=-1")` + `Liczba`
+  (runda do SQL; `Aplikacja.Wersja` jest in-proc i NIE wykrywa padu MSSQL). Po wyjątku `WczytajDokument`/`Istnieje`
+  odczyt znaczy „nie istnieje” TYLKO gdy sonda żyje; martwa → reset + `SferaUnavailableException`
+  (503 `SUBIEKT_UNAVAILABLE`; do v0.18.0 `SFERA_UNAVAILABLE`) / `KsefError.CommunicationError` (502) /
+  `SettlementError.ScanFailed` (502). **Preflight mutacji** (od v0.19.0): `EnsureSessionForMutation` w
+  `RunMutationOnStaAsync` (FS/KFS/PZ/MM/settlements) i w `/book` = sonda + jedna próba ponownego otwarcia PRZED
+  pierwszym zapisem → 503 tylko, gdy nic nie zapisano; health też sonduje. Replay idempotencji przy padniętej sesji
+  NIE kasuje klucza (kasacja + nowy request = duplikat).
+- **KFS `contractor_subiekt_id`** (od v0.19.0) = `TryGetLong(kfs, "KontrahentId")` PO `NaPodstawie`, PRZED `Zapisz`
+  (CHM: `KontrahentId` = płatnik = `dok_PlatnikId`, dziedziczony z FS); fallback po `Zapisz`, nieodczytane → `0` +
+  warning. Nic po `Zapisz` nie może rzucić z powodu tego odczytu (zapisany KFS + 500 = ponowienie).
 - **KAŻDE porównanie po NIP normalizuje obie strony** (`ContractorFields.NormalizeNip` = bez `-`/spacji,
   + `REPLACE(REPLACE(adr_NIP,'-',''),' ','')` w SQL) — dopasowanie przy FS/PZ i filtr `?nip=` tak samo.
   Starsze/ręczne kartoteki mają NIP z kreskami; dosłowne `=` dawało chybienie → duplikat po Symbolu.

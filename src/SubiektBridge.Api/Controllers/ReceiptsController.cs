@@ -81,7 +81,7 @@ public sealed class ReceiptsController : ControllerBase
         catch (SferaUnavailableException ex)
         {
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new ErrorResponseDto(
-                Code: "SFERA_UNAVAILABLE", Message: ex.Message));
+                Code: "SUBIEKT_UNAVAILABLE", Message: ex.Message));
         }
         if (item == null)
         {
@@ -150,7 +150,7 @@ public sealed class ReceiptsController : ControllerBase
             {
                 // Sesja Sfery padla - NIE kasujemy klucza idempotencji (kasacja + nowy request = duplikat).
                 return StatusCode(StatusCodes.Status503ServiceUnavailable, new ErrorResponseDto(
-                    Code: "SFERA_UNAVAILABLE", Message: ex.Message));
+                    Code: "SUBIEKT_UNAVAILABLE", Message: ex.Message));
             }
             if (stillExists is not null)
             {
@@ -226,6 +226,13 @@ public sealed class ReceiptsController : ControllerBase
                     existing_bridge_id = $"sub_{ex.ExistingSubiektId}",
                     external_reference = ex.ExternalReference,
                 }));
+        }
+        catch (SferaUnavailableException ex)
+        {
+            // Subiekt offline PRZED pierwszym zapisem (preflight sesji, spec W3) -> 503, klient ponawia tym samym
+            // kluczem. Nic nie trafia do cache idempotencji (SaveAsync tylko po sukcesie).
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ErrorResponseDto(
+                Code: "SUBIEKT_UNAVAILABLE", Message: ex.Message));
         }
         catch (NotImplementedException ex)
         {

@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.18.0**. Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
+> **Dotyczy:** SubiektBridge **v0.19.0**. Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -124,7 +124,8 @@ Zapisz u siebie `subiekt_id` / `id` jako wskaźnik na dokument w Subiekcie.
 
 `{id}` = bridge id korygowanej FS (`sub_142877`). `CorrectionLineDto` ma **ten sam shape co linia FS**,
 ale `quantity` to **zmiana ilości** — **ujemna** dla zwrotu. ⚠️ Klucz musi się nazywać `quantity`
-(nie `quantity_change`), inaczej korekta zaksięguje 0 szt. Response: `201` z `InvoiceResponseDto`.
+(nie `quantity_change`), inaczej korekta zaksięguje 0 szt. Response: `201` z `InvoiceResponseDto`;
+`contractor_subiekt_id` = kontrahent (płatnik) korygowanej FS (od v0.19.0; do v0.18.0 zawsze `0`). `0` = nieznany.
 
 ### 3.3 Linia (`LineDto`)
 
@@ -315,9 +316,12 @@ wtedy księgowanie robi operator w module Bankowość). Działanie:
   144 znaków). Most odtwarza pełne ręczne „Zaksięguj" — nie zostawia „luźnych/nieuzgodnionych" operacji. To zachowanie
   wewnętrzne (Sfera) — **nie zmienia request/response**, ale dzięki temu operacja wygląda kompletnie w Subiekcie.
 - Błędy: `404 BANK_TRANSACTION_NOT_FOUND`; `422 NO_BANK_ACCOUNT` / `INVALID_DIRECTION` / `UNSUPPORTED_FOREIGN_ACCOUNT`
-  (rachunek nie-PLN) / `UNSUPPORTED_HB_STATUS`; `500 HB_BOOKING_FAILED` (czyste niepowodzenie — **bezpieczny retry**);
-  `500 HB_BOOKING_ORPHAN` (operacja powstała bez linku, rollback padł — **NIE retry'uj na ślepo**, zgłoś do ręcznego
-  usunięcia operacji w Subiekcie); `501 HB_BOOKING_NOT_SUPPORTED` (flaga wyłączona).
+  (rachunek nie-PLN) / `UNSUPPORTED_HB_STATUS` / `INVALID_HB_AMOUNT`; `503 SUBIEKT_UNAVAILABLE` (Subiekt offline
+  **przed** utworzeniem operacji — nic nie zapisano, **retry tym samym kluczem**); `500 HB_BOOKING_FAILED` (**wyłącznie**
+  gdy nic nie zapisano albo operacja została czysto cofnięta — **bezpieczny retry**); `500 HB_BOOKING_ORPHAN` (operacja
+  powstała lub mogła powstać bez linku — **NIE retry'uj na ślepo**, zgłoś do ręcznego usunięcia; id w
+  `details.bank_operation_subiekt_id`, `null` gdy nieodczytane); `501 HB_BOOKING_NOT_SUPPORTED` (flaga wyłączona).
+  Gwarancja: **każdy wyjątek po zapisie operacji kończy się `HB_BOOKING_ORPHAN`**, nigdy kodem „ponów”.
 - Po `201/200` → rozlicz `POST /invoices/{id}/settlements` z `bank_operation_subiekt_id`.
 
 ### 3.11 Otwarte należności — kandydaci do dopasowania z przychodzącym przelewem
@@ -430,15 +434,26 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 
 - **2xx** → sukces.
 - **4xx** → błąd danych po Twojej stronie → **NIE retry'uj**, popraw request / zgłoś operatorowi.
-- **5xx / 502 / 503** → most lub Subiekt offline → **retry z backoffem**.
+- **5xx / 502 / 503** → ponawiaj (z backoffem, **tym samym `Idempotency-Key`**) **wyłącznie kody z listy retry**:
+  - **„nic nie zapisano”**: `SUBIEKT_UNAVAILABLE`, `SUBIEKT_QUERY_FAILED`, `BRIDGE_DEGRADED`,
+    `CONTRACTOR_LOOKUP_UNAVAILABLE`, `HB_BOOKING_FAILED` — gwarancja mostu: **w tym żądaniu nic nie zostało zapisane
+    w Subiekcie** (albo zapis został czysto cofnięty);
+  - **KSeF**: `KSEF_COMMUNICATION_ERROR`, `KSEF_SEND_INCOMPLETE` — stan dokumentu w Subiekcie **mógł** się zmienić
+    (np. e-Faktura wygenerowana, wysyłka bez stanu końcowego), ale ponowny `POST .../ksef` jest bezpieczny, bo to
+    idempotentny „advance” maszyny stanów (§3.12), nie dlatego, że nic nie zapisano.
+
+  Kody spoza listy
+  (`HB_BOOKING_ORPHAN`, `INTERNAL_ERROR`) = wynik nieznany albo twardy błąd → **nie ponawiaj automatycznie**,
+  eskaluj do operatora (na FS/KFS/PZ/MM ręczne ponowienie jest bezpieczne — chroni anti-duplicate `409`).
 - **202 (tylko KSeF)** → wysyłka w toku — ponów `POST .../ksef` po 30–60 s. To NIE jest błąd.
 - **409 `DUPLICATE_INVOICE` / `DUPLICATE_RECEIPT` / `DUPLICATE_TRANSFER`** → dokument z tym
   `external_reference` już istnieje → **auto-recovery**: pobierz `details.existing_subiekt_id` /
   `existing_bridge_id` i podbij swój rekord na „wystawione" (zamiast tworzyć nowy).
   To **nie** jest błąd do retry.
 - **409 `DUPLICATE_SETTLEMENT`** (settlements) → ta operacja bankowa jest już rozliczona z tym
-  rozrachunkiem → **auto-recovery**: pobierz `details.existing_rozliczenie_id` i oznacz płatność jako
-  rozliczoną. To **nie** jest błąd do retry.
+  rozrachunkiem → **auto-recovery**: pobierz `details.existing_rozliczenie_id` (`int | null`; `null` =
+  rozliczenie istnieje, ale mostowi nie udało się odczytać jego numeru — do v0.18.0 `-1`) i oznacz płatność
+  jako rozliczoną. To **nie** jest błąd do retry.
 
 | HTTP | `code` | Co robisz |
 |---|---|---|
@@ -459,8 +474,8 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 422 | `UNSUPPORTED_FOREIGN_ACCOUNT` / `UNSUPPORTED_HB_STATUS` | (book) rachunek wyciągu nie-PLN lub linia w nietypowym `hb_Status` — nie retry |
 | 404 | `BANK_TRANSACTION_NOT_FOUND` | (book) zły `hb_id` |
 | 422 | `NO_BANK_ACCOUNT` / `INVALID_DIRECTION` | (book) linia bez konta wyciągu lub `hb_Oznaczenie` ∉ {C,D} — nie retry |
-| 500 | `HB_BOOKING_FAILED` | (book) czyste niepowodzenie, operacja cofnięta — **bezpieczny retry** |
-| 500 | `HB_BOOKING_ORPHAN` | (book) operacja powstała bez linku, rollback padł — **NIE retry**, zgłoś do ręcznego usunięcia w Subiekcie |
+| 500 | `HB_BOOKING_FAILED` | (book) **wyłącznie** gdy nic nie zapisano albo operacja została czysto cofnięta (odrzucenie przez Sferę przed/na zapisie, nieudany link z udanym rollbackiem) — **bezpieczny retry** tym samym kluczem |
+| 500 | `HB_BOOKING_ORPHAN` | (book) stan niespójny: operacja powstała (lub mogła powstać) bez linku — **NIE retry** (drugi BP), zgłoś do ręcznego usunięcia w Subiekcie; `details.bank_operation_subiekt_id` (`int \| null`, `null` = wyjątek z/po zapisie, id nieodczytane) + `details.hb_id` |
 | 422 | `INVALID_BRIDGE_ID` | `{id}` nie w formacie `sub_<n>` |
 | 422 | `SETTLEMENT_NOT_SUPPORTED` | dokument bez rozrachunku (goły PZ/MM) lub rozrachunek na centrum kart/rat — nie retry |
 | 422 | `UNSUPPORTED_DOCUMENT_TYPE` | settlements obsługują tylko FS/FZ; korekty (KFS/KFZ) i inne typy odrzucane — nie retry |
@@ -479,8 +494,8 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 502 | `SUBIEKT_QUERY_FAILED` / `BRIDGE_DEGRADED` | Subiekt nie odpowiada — **retry** |
 | 503 | (health) | sesja Sfery martwa — **retry / circuit-breaker** |
 | 503 | `CONTRACTOR_LOOKUP_UNAVAILABLE` | (FS/PZ z NIP-em) most nie mógł sprawdzić kontrahenta po NIP w bazie — dokument NIE powstał, **retry z backoff** (`details.nip`) |
-| 503 | `SFERA_UNAVAILABLE` | sesja Sfery padła w trakcie odczytu dokumentu (np. `GET /invoices/{id}`, weryfikacja replay) — **retry z backoff**; klucz idempotencji zostaje |
-| 500 | `INTERNAL_ERROR` | nieoczekiwany błąd (`details.stack`) — retry ograniczony + alert |
+| 503 | `SUBIEKT_UNAVAILABLE` | Subiekt/Sfera offline: przy odczycie (`GET /invoices/{id}`, weryfikacja replay) albo **przed pierwszym zapisem** mutacji (FS/KFS/PZ/MM, settlements, book — most sonduje sesję na starcie) — **nic nie zapisano, retry z backoff tym samym kluczem**; klucz idempotencji zostaje. Do v0.18.0 kod nazywał się `SFERA_UNAVAILABLE` i dotyczył tylko odczytów |
+| 500 | `INTERNAL_ERROR` | nieoczekiwany błąd (`details.stack`) — **nie ponawiaj automatycznie** (kod spoza listy retry) + alert. FS/KFS/PZ/MM: ręczne ponowienie bezpieczne (anti-duplicate `409`). book: od v0.19.0 nigdy nie oznacza niepowiązanej operacji — pojawia się tylko **przed** utworzeniem BP albo po **domkniętym** linku (np. błąd zapisu cache idempotencji; ponowienie zwraca `already_booked`), błędy po zapisie BP idą jako `HB_BOOKING_ORPHAN` |
 
 `DUPLICATE_INVOICE.details`:
 ```json
@@ -491,6 +506,13 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
   "external_reference": "nowysystem:order:ABC123"
 }
 ```
+
+`HB_BOOKING_ORPHAN.details` (book):
+```json
+{ "bank_operation_subiekt_id": 73291, "hb_id": 13128 }
+```
+`bank_operation_subiekt_id` = `null`, gdy operacja mogła powstać, ale mostowi nie udało się odczytać jej id
+(wyjątek z/po zapisie) — sprawdź ręcznie w module Bankowość po kwocie/dacie/tytule linii `hb_id`.
 
 ---
 
@@ -590,7 +612,9 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 ## 8. Diagnostyka i pliki referencyjne
 
 - **Health przed kampanią requestów:** `GET /api/v1/health` → `200` + `sfera_session: "active"`.
-  `503` = Subiekt/Sfera offline, wstrzymaj wysyłkę (circuit-breaker).
+  `503` = Subiekt/Sfera offline, wstrzymaj wysyłkę (circuit-breaker). Od v0.19.0 health **sonduje** sesję
+  zapytaniem do bazy (nie tylko sprawdza, czy obiekt sesji istnieje) — zamknięty przez operatora Subiekt daje `503`
+  od razu, nie dopiero przy pierwszym padniętym żądaniu.
   `sql_connection` (`"ok"`/`"down"`) = osobne połączenie mostu do bazy (`/bank-transactions`, `/book`,
   filtr `nip`, `search` w open-receivables/payables, dopasowanie kontrahenta po NIP przy wystawianiu FS).
   `200` + `status: "degraded"` + `sql_connection: "down"` = sesja Sfery działa, ale zapytania SQL mostu
@@ -608,11 +632,25 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 ## 9. Historia zmian kontraktu
 
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
-Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 502/503 = retry).
+Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
+
+### v0.19.0 (2026-09-29)
+- **Zasada „kod = dowód o skutku”** (§4): kody z listy retry (`SUBIEKT_UNAVAILABLE`, `SUBIEKT_QUERY_FAILED`,
+  `HB_BOOKING_FAILED`, …) most zwraca **wyłącznie**, gdy w tym żądaniu nic nie zapisano (albo zapis czysto cofnięto).
+- **`503 SUBIEKT_UNAVAILABLE`** (zmiana nazwy z `SFERA_UNAVAILABLE` z v0.18.0) — teraz także na **każdej mutacji**
+  (FS/KFS/PZ/MM, settlements, book), gdy Subiekt jest offline przed pierwszym zapisem; klucz idempotencji zostaje,
+  retry tym samym kluczem → `201`.
+- **book:** wyjątek z/po zapisie operacji → zawsze `500 HB_BOOKING_ORPHAN` (wcześniej mógł wyjść `HB_BOOKING_FAILED`
+  lub `INTERNAL_ERROR` = klient ponawiał = drugi BP). `HB_BOOKING_ORPHAN` ma `details.bank_operation_subiekt_id`
+  (`int | null`) i `details.hb_id`. `INTERNAL_ERROR` na book nigdy nie oznacza niepowiązanej operacji (tylko przed
+  utworzeniem BP albo po domkniętym linku — wtedy ponowienie daje `already_booked`).
+- **KFS:** `contractor_subiekt_id` = kontrahent FS źródłowej (wcześniej zawsze `0`; `0` nadal = nieznany).
+- **`409 DUPLICATE_SETTLEMENT`:** `existing_rozliczenie_id` = `null` zamiast `-1`, gdy numeru nie odczytano.
+- **health:** sesja Sfery sondowana zapytaniem do bazy — `503` natychmiast po zamknięciu Subiekta.
 
 ### v0.18.0 (2026-09-29)
 - **Nowe kody:** `422 NOTES_TOO_LONG` (§7.7), `422 INVALID_CORRECTION` (§7.3), `422 UNSUPPORTED_BANK_OPERATION_TYPE`,
-  `422 INVALID_HB_AMOUNT` (book), `503 SFERA_UNAVAILABLE` (retry; klucz idempotencji zostaje).
+  `422 INVALID_HB_AMOUNT` (book), `503 SFERA_UNAVAILABLE` (od v0.19.0 `SUBIEKT_UNAVAILABLE`) (retry; klucz idempotencji zostaje).
 - **Rozliczenia:** retry tego samego przelewu po pełnym rozliczeniu → `409 DUPLICATE_SETTLEMENT` z
   `existing_rozliczenie_id` (wcześniej `422 ALREADY_SETTLED` / `BANK_OPERATION_EXHAUSTED`). `GET .../settlements`:
   `settlements` ze **wszystkich** rozrachunków dokumentu (FS marketplace ma dwa), nagłówek z otwartego / najnowszego.
@@ -625,7 +663,7 @@ Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx =
   `sys:order:123` (wcześniej możliwe `409` z **cudzym** `existing_subiekt_id`); działa niezależnie od symbolu numeracji.
 - **KSeF:** po `202` kolejny POST może zwrócić `422 KSEF_REJECTED`, gdy KSeF odrzucił dokument już po stronie mostu
   (wcześniej taki POST wysyłał dokument ponownie).
-- **Pad sesji Sfery** przy `GET /invoices/{id}` i przy weryfikacji replay → `503 SFERA_UNAVAILABLE` zamiast `404`.
+- **Pad sesji Sfery** przy `GET /invoices/{id}` i przy weryfikacji replay → `503 SFERA_UNAVAILABLE` (od v0.19.0 `SUBIEKT_UNAVAILABLE`) zamiast `404`.
 
 ### v0.17.2 (2026-09-29)
 - Dopasowanie kontrahenta po NIP przy FS/PZ porównuje NIP bez kresek i spacji (kartoteka `111-111-11-11` = `1111111111`).
@@ -650,5 +688,5 @@ Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx =
 1. Budujesz **klienta**, nie most. Most i Subiekt już działają.
 2. Na każdy request `X-Bridge-Token`; na każdy POST **stabilny `Idempotency-Key`** (powtarzany przy retry).
 3. **Prefiksuj `external_reference`** identyfikatorem nowego systemu — to jedyne, co chroni przed kolizją w współdzielonym Subiekcie.
-4. Obsłuż statusy wg §4: 4xx=nie retry, 5xx/502/503=retry, **409=auto-recovery (nie błąd)**.
+4. Obsłuż statusy wg §4: 4xx=nie retry, 5xx=retry **tylko kody z listy retry** (tym samym kluczem), **409=auto-recovery (nie błąd)**.
 5. Pre-waliduj u siebie: totals (§7.1), limit symbolu/numeru (§7.2), ujemne `quantity` w korekcie (§7.3), `is_settled` przy odroczonych (§7.4).

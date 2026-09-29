@@ -10,12 +10,16 @@ namespace SubiektBridge.Api.Sfera;
 /// </summary>
 public sealed class DuplicateSettlementException : Exception
 {
-    public long ExistingRozliczenieId { get; }
+    /// <summary>
+    /// RozliczenieId istniejącej linii; null = istnieje, ale numeru nie odczytano (kontrakt: `int | null`,
+    /// do v0.18.0 sentinel -1 - klient i tak przyjmował tylko wartości > 0).
+    /// </summary>
+    public long? ExistingRozliczenieId { get; }
     public long RozrachunekSubiektId { get; }
     public long BankOperationSubiektId { get; }
 
-    public DuplicateSettlementException(long existingRozliczenieId, long rozrachunekSubiektId, long bankOperationSubiektId)
-        : base($"Operacja bankowa {bankOperationSubiektId} jest juz rozliczona z rozrachunkiem {rozrachunekSubiektId} (rozliczenie_id={existingRozliczenieId}).")
+    public DuplicateSettlementException(long? existingRozliczenieId, long rozrachunekSubiektId, long bankOperationSubiektId)
+        : base($"Operacja bankowa {bankOperationSubiektId} jest juz rozliczona z rozrachunkiem {rozrachunekSubiektId} (rozliczenie_id={(existingRozliczenieId?.ToString() ?? "nieznane")}).")
     {
         ExistingRozliczenieId = existingRozliczenieId;
         RozrachunekSubiektId = rozrachunekSubiektId;

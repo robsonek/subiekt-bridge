@@ -57,5 +57,6 @@ Skan czyta `SplataId` akcesorem **rzucającym** (`ReadInt64OrNull`) — `TryRead
 Rozliczenie NIE ma pola Uwagi → anti-duplicate czyta STAN (`FinDokument.Rozliczenia` po
 `SplataId == bank_operation_subiekt_id`), **FAIL-CLOSED** (każdy wyjątek skanu przerywa flow — podwójne
 rozliczenie tej samej kwoty to błąd księgowy, inaczej niż fail-open dla FS). Match → 409 `DUPLICATE_SETTLEMENT`
-z `existing_rozliczenie_id`. Replay-with-verify weryfikuje po `RozliczenieId` (nie po istnieniu dokumentu —
+z `existing_rozliczenie_id` (`long?`: `null`, gdy `RozliczenieId` linii nieodczytany — od v0.19.0, wcześniej `-1`).
+Replay-with-verify weryfikuje po `RozliczenieId` (nie po istnieniu dokumentu —
 ten zawsze istnieje). `DELETE .../settlements/{id}` idempotentny z natury (powtórny → `404 SETTLEMENT_NOT_FOUND`).
