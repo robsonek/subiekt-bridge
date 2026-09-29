@@ -427,7 +427,6 @@ public sealed class FakeSferaSession : ISferaSession
         if (documentSubiektId >= 3_000_000) throw new SettlementException(SettlementError.NoRozrachunek, "Dokument bez rozrachunku (PZ magazynowy)");
         if (documentSubiektId is >= 2_000_000 and < 3_000_000) throw new SettlementException(SettlementError.UnsupportedDocumentType, "Typ nieobslugiwany (np. korekta)");
         if (request.BankOperationSubiektId < 0) throw new SettlementException(SettlementError.BankOperationNotFound, $"Operacja bankowa {request.BankOperationSubiektId} nie istnieje");
-        if (request.BankOperationSubiektId == 0) throw new SettlementException(SettlementError.BankOperationExhausted, "Operacja bankowa skonsumowana");
         // Parytet z Real (guard nzf_Typ IN (19,20)): id >= 9_000_000 = wiersz nz__Finanse, ktory nie jest BP/BW.
         if (request.BankOperationSubiektId >= 9_000_000) throw new SettlementException(SettlementError.UnsupportedBankOperationType, $"nz__Finanse {request.BankOperationSubiektId} nie jest operacja bankowa BP/BW");
 
@@ -447,6 +446,8 @@ public sealed class FakeSferaSession : ISferaSession
                 throw new DuplicateSettlementException(dup.RozliczenieId, documentSubiektId, request.BankOperationSubiektId);
             }
 
+            // Parytet z Real: saldo BP sprawdzane PO skanie duplikatow (po pelnym rozliczeniu 1:1 saldo BP = 0).
+            if (request.BankOperationSubiektId == 0) throw new SettlementException(SettlementError.BankOperationExhausted, "Operacja bankowa skonsumowana");
             if (r.Remaining <= 0.005m) throw new SettlementException(SettlementError.AlreadySettled, "Rozrachunek juz rozliczony");
 
             if (amount - r.Remaining > 0.005m)

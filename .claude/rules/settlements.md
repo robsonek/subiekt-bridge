@@ -40,12 +40,15 @@ Spinanie zaimportowanych z wyciągu operacji bankowych z fakturami (`/invoices/{
   → inaczej `422 UNSUPPORTED_BANK_OPERATION_TYPE`. Bez tego KP/KW albo inny rozrachunek tego samego kontrahenta
   przechodził wszystkie guardy i `Rozlicz` je spinał.
 - **`GET settlements` agreguje `settlements` ze WSZYSTKICH wierszy** rozrachunku; nagłówek z otwartego (max
-  pozostało) lub najświeżej rozliczonego. Wcześniej po pełnym rozliczeniu wiersza płatnika nagłówek+lista mogły
+  pozostało), a gdy wszystkie zamknięte — z wiersza o największym `RozliczenieId` (NIE po `DataOstatniejSplaty`:
+  wg CHM to późniejsza z dat POWSTANIA rozrachunku/spłaty, oba wiersze FS mają ją równą). Wcześniej po pełnym rozliczeniu wiersza płatnika nagłówek+lista mogły
   pochodzić z wiersza kupującego (kolejność DB) → replay idempotencji nie znajdował świeżego `RozliczenieId`.
 
 ## Idempotencja rozliczeń
 
-**Kolejność guardów: duplikat PRZED `AlreadySettled`/`ContractorMismatch`, skan po WSZYSTKICH wierszach.**
+**Kolejność guardów: duplikat PRZED `BankOperationExhausted`/`AlreadySettled`/`ContractorMismatch`, skan po
+WSZYSTKICH wierszach.** (`Exhausted` też musi być za skanem: po pełnym rozliczeniu przelewu 1:1 `WartoscBiezaca`
+BP = 0.) Wyjątek przy weryfikacji replay w kontrolerze → 502 BEZ kasowania klucza (jak FS/PZ/MM).
 Po pełnym rozliczeniu (typowy przypadek) retry trafiał w „brak otwartej kwoty” → `422 ALREADY_SETTLED` (Laravel:
 koniec, płatność błędna) zamiast `409 DUPLICATE_SETTLEMENT` z `existing_rozliczenie_id` (auto-recovery).
 Skan czyta `SplataId` akcesorem **rzucającym** (`ReadInt64OrNull`) — `TryReadInt64` połykał wyjątek → null →

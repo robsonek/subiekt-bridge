@@ -915,8 +915,18 @@ public sealed class RealSferaSession : ISferaSession
             long? pending = null;
             try { pending = await _journal.TryGetPendingBookingAsync(hbId, CancellationToken.None); }
             catch (Exception jex) { _logger.LogWarning(jex, "Book: odczyt journalu pending dla hb_id={HbId} padl - ide normalna sciezka", hbId); }
-            bool pendingExists = pending.HasValue
-                && await RunOnStaAsync(() => { try { return (bool)Session.FinManager.Istnieje(pending.Value); } catch { return false; } }, CancellationToken.None);
+            bool pendingExists = false;
+            if (pending.HasValue)
+            {
+                // Wyjatek z Istnieje (sesja Sfery jeszcze nie wstala po restarcie - DOKLADNIE okno po crashu) to NIE
+                // "BP nie istnieje": wpis zostaje, klient ponawia (500 Internal = retry wg kontraktu).
+                try { pendingExists = await RunOnStaAsync(() => (bool)Session.FinManager.Istnieje(pending.Value), CancellationToken.None); }
+                catch (Exception ex)
+                {
+                    throw new BankBookingException(BookError.Internal,
+                        $"Journal: nie mozna sprawdzic pending BP {pending} dla hb_id={hbId} (sesja Sfery?) - wpis zostaje, ponow pozniej.", ex);
+                }
+            }
             if (pendingExists)
             {
                 nzfId = pending!.Value;
@@ -999,20 +1009,29 @@ public sealed class RealSferaSession : ISferaSession
             //   Cofamy NASZ swiezy BP. (Replay tym samym kluczem po ORPHANie jest BENIGNY: guard IS NULL gwarantuje
             //   brak podwojnego LINKU - co najwyzej powstaje 2. NIEpowiazany BP, ktory i tak wymaga recznej kasacji
             //   jak pierwotny orphan; ZERO podwojnego rozliczenia. Szczegoly w planie sekcja 8/R1.)
-            _logger.LogWarning("Book: hb_id={HbId} raw UPDATE @@ROWCOUNT=0 (linia juz powiazana/status zmieniony rownolegle) - cofam swoj BP {Op}", hbId, nzfId);
-            bool rbRace = await TryRollbackBp(nzfId, hbId);
-            if (!rbRace)
-                throw new BankBookingException(BookError.Orphan,
-                    $"Linia zaksiegowana rownolegle; rollback naszego BP {nzfId} padl - ORPHAN (hb_id={hbId}). Usun operacje recznie w module Bankowosc.");
+            _logger.LogWarning("Book: hb_id={HbId} raw UPDATE @@ROWCOUNT=0 (linia juz powiazana/status zmieniony rownolegle) - sprawdzam zwyciezce", hbId);
 
+            // NIEZMIENNIK: nigdy nie kasujemy BP, na ktory wskazuje hb_Transakcja. Zwyciezce czytamy PRZED
+            // rollbackiem - przy BP adoptowanym z journalu rownolegly request mogl wlasnie zalinkowac TEN SAM nzfId.
             long? winner;
             try { winner = await Task.Run(() => ReadHbLink(hbId), CancellationToken.None); }
             catch (Exception ex)
             {
-                // BP juz CZYSTO cofniety (stan spojny) - czytelny retryowalny blad zamiast catch-all INTERNAL_ERROR ze stackiem.
-                throw new BankBookingException(BookError.Internal,
-                    $"Wyscig @@ROWCOUNT=0; odczyt zwyciezcy (ReadHbLink) padl po cofnieciu BP (hb_id={hbId}) - mozna ponowic.", ex);
+                throw new BankBookingException(BookError.Orphan,
+                    $"Wyscig @@ROWCOUNT=0 i nie mozna odczytac stanu linku hb_id={hbId} - BP {nzfId} NIE cofniety (stan nieznany). Sprawdz hb_idOperacjiBankowej recznie.", ex);
             }
+
+            if (winner == nzfId)
+            {
+                try { await _journal.DeletePendingBookingAsync(hbId, CancellationToken.None); } catch { /* best-effort */ }
+                _logger.LogInformation("Book OK: hb_id={HbId} -> BP {Op} (link domkniety rownolegle dla tego samego BP)", hbId, nzfId);
+                return new BookResultDto(nzfId, hbId, Linked: true, AlreadyBooked: false, null);
+            }
+
+            bool rbRace = await TryRollbackBp(nzfId, hbId);
+            if (!rbRace)
+                throw new BankBookingException(BookError.Orphan,
+                    $"Linia zaksiegowana rownolegle; rollback naszego BP {nzfId} padl - ORPHAN (hb_id={hbId}). Usun operacje recznie w module Bankowosc.");
 
             if (!winner.HasValue)
                 // Anomalia: @@ROWCOUNT=0, ale linia NIE jest powiazana (WHERE/status nie trafil mimo ze odczyt znalazl wiersz).
@@ -1123,7 +1142,13 @@ public sealed class RealSferaSession : ISferaSession
             // po cichu wysylac dokument ponownie. Tylko gdy dokument NADAL jest w statusie 6.
             if (_ksefBackgroundRejection.TryRemove(documentSubiektId, out var bgBlad))
             {
-                var current = await RunOnStaAsync(() => ReadKsefStatusCore(documentSubiektId, bgBlad), CancellationToken.None);
+                KsefStatusResponseDto? current;
+                try { current = await RunOnStaAsync(() => ReadKsefStatusCore(documentSubiektId, bgBlad), CancellationToken.None); }
+                catch
+                {
+                    _ksefBackgroundRejection.TryAdd(documentSubiektId, bgBlad); // odczyt padl - odrzucenie nie moze zginac
+                    throw;
+                }
                 if (current?.KsefStatus == KsefStatusMap.Rejected)
                 {
                     throw new KsefException(KsefError.Rejected,
@@ -2031,11 +2056,8 @@ public sealed class RealSferaSession : ISferaSession
             }
             long? bankKontrahent = TryReadInt64((object)bankOp, "ObiektPowiazanyId");
             decimal bankRemaining = TryReadDecimal((object)bankOp, "WartoscBiezaca") ?? 0m;
-            if (amount - bankRemaining > 0.005m)
-            {
-                throw new SettlementException(SettlementError.BankOperationExhausted,
-                    $"Operacja bankowa {req.BankOperationSubiektId} ma dostepne saldo {bankRemaining:F2} < amount {amount:F2} (operacja czesciowo/calkowicie skonsumowana).");
-            }
+            // (guard BankOperationExhausted jest PO skanie duplikatow - patrz nizej: po pelnym rozliczeniu
+            //  przelewu 1:1 WartoscBiezaca BP = 0 i retry trafialby w 422 zamiast 409)
 
             // 3. Wybor wlasciwego rozrachunku. FS marketplace ma zwykle DWA rozrachunki (typ=39): wyzerowany na
             //    kupujacym + OTWARTY na platniku (Allegro Pay). NIE polegamy na PodajRozrachunek ani na indeksie
@@ -2070,6 +2092,14 @@ public sealed class RealSferaSession : ISferaSession
                 {
                     if (existingRozr is not null) TryClose(existingRozr);
                 }
+            }
+
+            // Dopiero teraz saldo operacji: po pelnym rozliczeniu przelewu 1:1 (BP = FS) WartoscBiezaca BP = 0,
+            // wiec ten guard PRZED skanem duplikatow dawal retry'owi 422 BANK_OPERATION_EXHAUSTED zamiast 409.
+            if (amount - bankRemaining > 0.005m)
+            {
+                throw new SettlementException(SettlementError.BankOperationExhausted,
+                    $"Operacja bankowa {req.BankOperationSubiektId} ma dostepne saldo {bankRemaining:F2} < amount {amount:F2} (operacja czesciowo/calkowicie skonsumowana).");
             }
 
             var openRozr = rozrachunki.Where(r => r.Remaining > 0.005m).ToList();
@@ -2301,7 +2331,9 @@ public sealed class RealSferaSession : ISferaSession
         }
 
         var lines = new List<SettlementLineDto>();
-        (long Id, decimal Original, decimal Remaining, DateTimeOffset? LastSettlement)? header = null;
+        // DataOstatniejSplaty to NIE data rozliczenia (CHM: pozniejsza z dat powstania rozrachunku/splaty - oba
+        // wiersze FS maja ja rowna), wiec "najswiezszy" wiersz wybieramy po max RozliczenieId jego linii.
+        (long Id, decimal Original, decimal Remaining, DateTimeOffset? LastSettlement, long MaxRozId)? header = null;
         foreach (var row in rozrachunki)
         {
             dynamic? rozrachunek = null;
@@ -2314,13 +2346,16 @@ public sealed class RealSferaSession : ISferaSession
                 decimal remaining = TryReadDecimal((object)rozrachunek, "WartoscBiezaca") ?? 0m;
                 DateTimeOffset? lastSettlement = TryReadDate((object)rozrachunek, "DataOstatniejSplaty");
 
+                long rowMaxRozId = -1;
                 col = rozrachunek.Rozliczenia;
                 foreach (dynamic roz in (System.Collections.IEnumerable)col)
                 {
                     try
                     {
+                        long rozId = TryReadInt64((object)roz, "RozliczenieId") ?? -1;
+                        if (rozId > rowMaxRozId) rowMaxRozId = rozId;
                         lines.Add(new SettlementLineDto(
-                            RozliczenieId: TryReadInt64((object)roz, "RozliczenieId") ?? -1,
+                            RozliczenieId: rozId,
                             Amount: TryReadDecimal((object)roz, "Kwota") ?? 0m,
                             SettledAt: TryReadDate((object)roz, "Data"),
                             SplataSubiektId: TryReadInt64((object)roz, "SplataId"),
@@ -2334,8 +2369,8 @@ public sealed class RealSferaSession : ISferaSession
                 bool headerIsOpen = header is { Remaining: > 0.005m };
                 bool better = header is null
                     || (isOpen && (!headerIsOpen || remaining > header.Value.Remaining))
-                    || (!isOpen && !headerIsOpen && lastSettlement > header.Value.LastSettlement);
-                if (better) header = (rozrachunekId, original, remaining, lastSettlement);
+                    || (!isOpen && !headerIsOpen && rowMaxRozId > header.Value.MaxRozId);
+                if (better) header = (rozrachunekId, original, remaining, lastSettlement, rowMaxRozId);
             }
             finally
             {
@@ -3708,8 +3743,9 @@ public sealed class RealSferaSession : ISferaSession
 
             bool isUsluga = false;
             try { isUsluga = (bool)poz.UslugaJednorazowa; } catch { /* atrybut moze brakowac */ }
-            if (!isUsluga)
+            if (!isUsluga || usedPositions.Contains(i))
             {
+                // Zuzyta przez wczesniejsza linie korekty (dwie uslugi o tej samej nazwie - dwie pozycje).
                 try { Marshal.ReleaseComObject((object)poz); } catch { /* ignore */ }
                 continue;
             }
@@ -4146,9 +4182,16 @@ public sealed class RealSferaSession : ISferaSession
     /// </summary>
     private bool IsSessionAlive()
     {
+        // Sonda NIGDY nie otwiera sesji: gdy _subiekt jest null, to OpenSession() padlo w wolajacym -
+        // druga proba "Uruchom" moglaby przejsc i zamaskowac pad jako "dokument nie istnieje".
+        if (_subiekt is null) return false;
+        dynamic? probe = null;
         try
         {
-            _ = (string?)Session.Aplikacja?.Wersja;
+            // Aplikacja.Wersja to in-proc COM bez rundy do SQL - przy padnietym MSSQL mowilaby "zyje".
+            // Pusta kolekcja po dok_Id=-1 wymaga zapytania do bazy: wyjatek = sesja/baza martwa.
+            probe = _subiekt.SuDokumentyManager.OtworzKolekcje("dok_Id=-1", "");
+            _ = Convert.ToInt32(probe.Liczba);
             return true;
         }
         catch (Exception ex)
@@ -4157,6 +4200,10 @@ public sealed class RealSferaSession : ISferaSession
             _lastError = $"{ex.GetType().Name}: {ex.Message}";
             ResetSessionOnSta();
             return false;
+        }
+        finally
+        {
+            if (probe is not null) { try { Marshal.ReleaseComObject(probe); } catch { /* cleanup */ } }
         }
     }
 

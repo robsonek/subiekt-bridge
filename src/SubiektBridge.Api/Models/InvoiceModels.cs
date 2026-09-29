@@ -142,16 +142,20 @@ public static class UwagiFields
         if (baseNotes.Length == 0) return suffix.Length > MaxLength ? suffix[..MaxLength] : suffix;
 
         int room = MaxLength - suffix.Length - 3; // " | "
-        if (room < 0) return suffix[..MaxLength];
+        if (room < 0) return suffix.Length > MaxLength ? suffix[..MaxLength] : suffix;
         if (baseNotes.Length > room) baseNotes = baseNotes[..room];
         return $"{baseNotes} | {suffix}";
     }
+
+    /// <summary>Ile znaków notatek zmieści się obok doklejanego " | ref: X" (do details.max_length w 422).</summary>
+    public static int MaxNotesLength(string externalReference)
+        => MaxLength - (string.IsNullOrWhiteSpace(externalReference) ? 0 : ReferenceSuffix(externalReference).Length + 3);
 
     /// <summary>Null gdy notatki zmieszczą się razem z ref w 500 znakach, inaczej komunikat dla klienta (422).</summary>
     public static string? ValidateNotes(string? notes, string externalReference, string fieldName = "notes")
     {
         if (string.IsNullOrEmpty(notes)) return null;
-        int suffixLen = string.IsNullOrWhiteSpace(externalReference) ? 0 : ReferenceSuffix(externalReference).Length + 3;
+        int suffixLen = MaxLength - MaxNotesLength(externalReference);
         int max = MaxLength - suffixLen;
         return notes.Length > max
             ? $"{fieldName} ma {notes.Length} znaków - Subiekt mieści {UwagiFields.MaxLength} w Uwagach, z czego {suffixLen} zajmuje 'ref: {externalReference}'. Maks. {max}."

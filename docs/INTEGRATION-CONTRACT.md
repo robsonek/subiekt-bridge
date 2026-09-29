@@ -260,7 +260,7 @@ Response `201`:
 **`GET /api/v1/invoices/{id}/settlements`** → stan. `settlements` to rozliczenia ze **wszystkich** rozrachunków
 dokumentu (FS marketplace ma zwykle dwa: wyzerowany na kupującym + na płatniku); nagłówek (`rozrachunek_subiekt_id`,
 `original_amount`, `remaining_amount`) dotyczy rozrachunku otwartego (największe pozostało), a gdy wszystkie są
-zamknięte — tego z najświeższym rozliczeniem. `is_fully_settled` = wszystkie rozrachunki zamknięte.
+zamknięte — tego z najnowszym rozliczeniem (największy `rozliczenie_id`). `is_fully_settled` = wszystkie rozrachunki zamknięte.
 ```jsonc
 {
   "document_id": "sub_142877", "document_subiekt_id": 142877, "rozrachunek_subiekt_id": 90011,

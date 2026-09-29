@@ -381,7 +381,7 @@ public sealed class InvoicesController : ControllerBase
             return UnprocessableEntity(new ErrorResponseDto(
                 Code: "NOTES_TOO_LONG",
                 Message: reasonError,
-                Details: new { max_length = UwagiFields.MaxLength }));
+                Details: new { max_length = UwagiFields.MaxNotesLength(request.ExternalReference) - "Korekta: ".Length, subiekt_limit = UwagiFields.MaxLength }));
         }
 
         try
@@ -469,7 +469,7 @@ public sealed class InvoicesController : ControllerBase
             return new ErrorResponseDto(
                 Code: "NOTES_TOO_LONG",
                 Message: notesError,
-                Details: new { max_length = UwagiFields.MaxLength });
+                Details: new { max_length = UwagiFields.MaxNotesLength(request.ExternalReference), subiekt_limit = UwagiFields.MaxLength });
         }
 
         const decimal supportedServiceVat = 23m;

@@ -88,7 +88,7 @@ public sealed class TransfersController : ControllerBase
             return UnprocessableEntity(new ErrorResponseDto(
                 Code: "NOTES_TOO_LONG",
                 Message: notesError,
-                Details: new { max_length = UwagiFields.MaxLength }));
+                Details: new { max_length = UwagiFields.MaxNotesLength(request.ExternalReference), subiekt_limit = UwagiFields.MaxLength }));
         }
 
         try

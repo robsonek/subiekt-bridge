@@ -69,9 +69,12 @@ public sealed class SettlementsController : ControllerBase
             }
             catch (Exception ex)
             {
-                // Nie udalo sie zweryfikowac - schodzimy do pelnego flow (anti-duplicate FAIL-CLOSED
-                // i tak zlapie ewentualny duplikat). Nie maskujemy bledem zapisu.
-                _logger.LogWarning(ex, "Settlement replay verify failed for key {Key}; fallthrough do pelnego flow", idempotencyKey);
+                // Nie udalo sie zweryfikowac (sesja Sfery / baza) - NIE kasujemy klucza i NIE schodzimy do pelnego
+                // flow (jak FS/PZ/MM): klient ponawia z tym samym kluczem, gdy Subiekt wroci.
+                _logger.LogWarning(ex, "Settlement replay verify failed for key {Key} - 502 bez kasowania klucza", idempotencyKey);
+                return StatusCode(StatusCodes.Status502BadGateway, new ErrorResponseDto(
+                    Code: "SUBIEKT_QUERY_FAILED",
+                    Message: $"Nie mozna zweryfikowac wczesniejszego rozliczenia (klucz zachowany, ponow pozniej): {ex.Message}"));
             }
 
             if (stillExists)
