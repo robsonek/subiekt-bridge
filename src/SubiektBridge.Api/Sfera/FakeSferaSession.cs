@@ -424,6 +424,8 @@ public sealed class FakeSferaSession : ISferaSession
         if (documentSubiektId is >= 2_000_000 and < 3_000_000) throw new SettlementException(SettlementError.UnsupportedDocumentType, "Typ nieobslugiwany (np. korekta)");
         if (request.BankOperationSubiektId < 0) throw new SettlementException(SettlementError.BankOperationNotFound, $"Operacja bankowa {request.BankOperationSubiektId} nie istnieje");
         if (request.BankOperationSubiektId == 0) throw new SettlementException(SettlementError.BankOperationExhausted, "Operacja bankowa skonsumowana");
+        // Parytet z Real (guard nzf_Typ IN (19,20)): id >= 9_000_000 = wiersz nz__Finanse, ktory nie jest BP/BW.
+        if (request.BankOperationSubiektId >= 9_000_000) throw new SettlementException(SettlementError.UnsupportedBankOperationType, $"nz__Finanse {request.BankOperationSubiektId} nie jest operacja bankowa BP/BW");
 
         var r = _settlements.GetOrAdd(documentSubiektId, id => new FakeRozrachunek
         {
@@ -433,13 +435,15 @@ public sealed class FakeSferaSession : ISferaSession
 
         lock (r)
         {
-            if (r.Remaining <= 0.005m) throw new SettlementException(SettlementError.AlreadySettled, "Rozrachunek juz rozliczony");
-
+            // Parytet z Real: duplikat ma pierwszenstwo nad AlreadySettled - retry PELNEGO rozliczenia musi dac
+            // 409 z existing_rozliczenie_id (auto-recovery), nie 422.
             var dup = r.Lines.FirstOrDefault(l => l.BankOpId == request.BankOperationSubiektId);
             if (dup is not null)
             {
                 throw new DuplicateSettlementException(dup.RozliczenieId, documentSubiektId, request.BankOperationSubiektId);
             }
+
+            if (r.Remaining <= 0.005m) throw new SettlementException(SettlementError.AlreadySettled, "Rozrachunek juz rozliczony");
 
             if (amount - r.Remaining > 0.005m)
             {

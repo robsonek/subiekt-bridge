@@ -200,6 +200,7 @@ public sealed class SettlementsController : ControllerBase
         SettlementError.UnsupportedCurrency => UnprocessableEntity(new ErrorResponseDto("UNSUPPORTED_CURRENCY", ex.Message)),
         SettlementError.BankOperationNotFound => UnprocessableEntity(new ErrorResponseDto("BANK_OPERATION_NOT_FOUND", ex.Message)),
         SettlementError.BankOperationExhausted => UnprocessableEntity(new ErrorResponseDto("BANK_OPERATION_EXHAUSTED", ex.Message)),
+        SettlementError.UnsupportedBankOperationType => UnprocessableEntity(new ErrorResponseDto("UNSUPPORTED_BANK_OPERATION_TYPE", ex.Message)),
         SettlementError.BankOperationContractorMismatch => UnprocessableEntity(new ErrorResponseDto("BANK_OPERATION_CONTRACTOR_MISMATCH", ex.Message)),
         SettlementError.ScanFailed => StatusCode(StatusCodes.Status502BadGateway, new ErrorResponseDto("SUBIEKT_QUERY_FAILED", ex.Message)),
         _ => StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponseDto("INTERNAL_ERROR", ex.Message)),

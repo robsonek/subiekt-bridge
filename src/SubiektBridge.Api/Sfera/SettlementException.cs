@@ -20,6 +20,8 @@ public enum SettlementError
     BankOperationNotFound,
     /// <summary>Operacja bankowa skonsumowana (dostępne saldo &lt; amount) -> 422 BANK_OPERATION_EXHAUSTED.</summary>
     BankOperationExhausted,
+    /// <summary>bank_operation_subiekt_id wskazuje wiersz nz__Finanse, który nie jest BP/BW (KP/KW, spłata, rozrachunek) -> 422 UNSUPPORTED_BANK_OPERATION_TYPE.</summary>
+    UnsupportedBankOperationType,
     /// <summary>Kontrahent operacji bankowej != kontrahent rozrachunku -> 422 BANK_OPERATION_CONTRACTOR_MISMATCH.</summary>
     BankOperationContractorMismatch,
     /// <summary>amount > pozostało do zapłaty -> 422 AMOUNT_EXCEEDS_REMAINING.</summary>
