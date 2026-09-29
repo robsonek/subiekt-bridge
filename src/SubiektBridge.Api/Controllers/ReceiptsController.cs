@@ -164,6 +164,14 @@ public sealed class ReceiptsController : ControllerBase
                 Message: "issue_date musi być w formacie YYYY-MM-DD."));
         }
 
+        if (UwagiFields.ValidateNotes(request.Notes, request.ExternalReference) is { } notesError)
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "NOTES_TOO_LONG",
+                Message: notesError,
+                Details: new { max_length = UwagiFields.MaxLength }));
+        }
+
         try
         {
             var response = await _sfera.CreateReceiptAsync(request, ct);

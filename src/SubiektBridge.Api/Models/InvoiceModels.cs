@@ -90,6 +90,75 @@ public static class ContractorFields
     }
 }
 
+/// <summary>
+/// Uwagi dokumentu (dok_Uwagi = TUwagi = varchar(500)) i doklejany do nich external_reference.
+/// Czysta logika string - testowalna cross-platform, dzielona przez RealSferaSession i kontrolery.
+/// </summary>
+public static class UwagiFields
+{
+    /// <summary>dok_Uwagi = TUwagi = varchar(500) (zrzut schematu 1.88).</summary>
+    public const int MaxLength = 500;
+
+    /// <summary>Sufiks doklejany do notatek klienta (anti-duplicate szuka go w dok_Uwagi).</summary>
+    public static string ReferenceSuffix(string externalReference) => $"ref: {externalReference}";
+
+    /// <summary>
+    /// Czy <paramref name="uwagi"/> zawiera <paramref name="reference"/> jako CAŁY token (nie podciąg):
+    /// znak przed i po nie może być znakiem identyfikatora. Bez tego ref "order:12" pasował do
+    /// "order:123" → fałszywe 409 z CUDZYM existing_subiekt_id. Case-insensitive - tak jak SQL LIKE
+    /// pod polskim collation, którym Sfera wstępnie filtruje kolekcję.
+    /// </summary>
+    public static bool ContainsReferenceToken(string? uwagi, string? reference)
+    {
+        if (string.IsNullOrEmpty(uwagi) || string.IsNullOrEmpty(reference)) return false;
+        int idx = 0;
+        while ((idx = uwagi.IndexOf(reference, idx, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            int end = idx + reference.Length;
+            bool startOk = idx == 0 || !IsReferenceChar(uwagi[idx - 1]);
+            bool endOk = end == uwagi.Length || !IsReferenceChar(uwagi[end]);
+            if (startOk && endOk) return true;
+            idx++;
+        }
+        return false;
+
+        static bool IsReferenceChar(char c) => char.IsLetterOrDigit(c) || c is '_' or '-' or ':' or '.' or '/';
+    }
+
+    /// <summary>
+    /// Notatki + " | ref: X". Ref jest ZAWSZE zachowany w całości (to na nim stoi anti-duplicate);
+    /// gdyby całość przekroczyła 500 znaków, obcinane są notatki (kontrolery i tak odrzucają to 422
+    /// przez <see cref="ValidateNotes"/> - obcięcie to zabezpieczenie ścieżek bez walidacji).
+    /// </summary>
+    public static string Build(string? notes, string externalReference)
+    {
+        string baseNotes = notes ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(externalReference) || ContainsReferenceToken(baseNotes, externalReference))
+        {
+            return baseNotes.Length > MaxLength ? baseNotes[..MaxLength] : baseNotes;
+        }
+
+        string suffix = ReferenceSuffix(externalReference);
+        if (baseNotes.Length == 0) return suffix.Length > MaxLength ? suffix[..MaxLength] : suffix;
+
+        int room = MaxLength - suffix.Length - 3; // " | "
+        if (room < 0) return suffix[..MaxLength];
+        if (baseNotes.Length > room) baseNotes = baseNotes[..room];
+        return $"{baseNotes} | {suffix}";
+    }
+
+    /// <summary>Null gdy notatki zmieszczą się razem z ref w 500 znakach, inaczej komunikat dla klienta (422).</summary>
+    public static string? ValidateNotes(string? notes, string externalReference, string fieldName = "notes")
+    {
+        if (string.IsNullOrEmpty(notes)) return null;
+        int suffixLen = string.IsNullOrWhiteSpace(externalReference) ? 0 : ReferenceSuffix(externalReference).Length + 3;
+        int max = MaxLength - suffixLen;
+        return notes.Length > max
+            ? $"{fieldName} ma {notes.Length} znaków - Subiekt mieści {UwagiFields.MaxLength} w Uwagach, z czego {suffixLen} zajmuje 'ref: {externalReference}'. Maks. {max}."
+            : null;
+    }
+}
+
 public sealed record AddressDto(
     [property: JsonPropertyName("street")] string Street,
     [property: JsonPropertyName("post_code")] string PostCode,

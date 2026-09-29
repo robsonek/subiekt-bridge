@@ -355,11 +355,27 @@ public sealed class InvoicesController : ControllerBase
                 Message: "issue_date i source_invoice_date muszą być w formacie YYYY-MM-DD."));
         }
 
+        // Uwagi KFS = "Korekta: {reason} | ref: X" - ten sam limit varchar(500).
+        if (UwagiFields.ValidateNotes($"Korekta: {request.Reason}", request.ExternalReference, "reason") is { } reasonError)
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "NOTES_TOO_LONG",
+                Message: reasonError,
+                Details: new { max_length = UwagiFields.MaxLength }));
+        }
+
         try
         {
             var response = await _sfera.CreateCorrectionAsync(sourceSubiektId, request, ct);
             await _idempotency.SaveAsync(idempotencyKey, response, ct);
             return StatusCode(StatusCodes.Status201Created, response);
+        }
+        catch (InvalidCorrectionException ex)
+        {
+            // Linia bez pasujacej pozycji FS / zwrot wiekszy niz ilosc na pozycji - blad danych, nie retry.
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "INVALID_CORRECTION",
+                Message: ex.Message));
         }
         catch (MissingProductException ex)
         {
@@ -424,6 +440,16 @@ public sealed class InvoicesController : ControllerBase
             return new ErrorResponseDto(
                 Code: "INVALID_DATE",
                 Message: "issue_date i sale_date muszą być w formacie YYYY-MM-DD.");
+        }
+
+        // dok_Uwagi = varchar(500); za dlugie notes wypychaly doklejany ref (martwy anti-duplicate)
+        // albo konczyly sie 0x80040E21 -> 500 -> retry w nieskonczonosc.
+        if (UwagiFields.ValidateNotes(request.Notes, request.ExternalReference) is { } notesError)
+        {
+            return new ErrorResponseDto(
+                Code: "NOTES_TOO_LONG",
+                Message: notesError,
+                Details: new { max_length = UwagiFields.MaxLength });
         }
 
         const decimal supportedServiceVat = 23m;

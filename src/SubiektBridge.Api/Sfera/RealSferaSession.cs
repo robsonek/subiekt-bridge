@@ -65,21 +65,32 @@ public sealed class RealSferaSession : ISferaSession
         _logger.LogInformation("Sfera STA worker started, ApartmentState={State}",
             Thread.CurrentThread.GetApartmentState());
 
-        foreach (var work in _workQueue.GetConsumingEnumerable())
+        try
         {
-            try
+            foreach (var work in _workQueue.GetConsumingEnumerable())
             {
-                work();
-            }
-            catch (Exception ex)
-            {
-                // Wyjątki delegowane do TaskCompletionSource w wywołaniu.
-                _logger.LogDebug(ex, "STA worker action threw (delegated to caller)");
+                try
+                {
+                    work();
+                }
+                catch (Exception ex)
+                {
+                    // Wyjątki delegowane do TaskCompletionSource w wywołaniu.
+                    _logger.LogDebug(ex, "STA worker action threw (delegated to caller)");
+                }
             }
         }
-
-        // Sesję zamykamy na tym samym STA threadzie.
-        ResetSessionOnSta();
+        catch (ObjectDisposedException)
+        {
+            // DisposeAsync zdazyl zwolnic kolejke (Join >5 s przy dlugim jobie) - bez tego catch
+            // wyjatek na watku STA wywalilby proces i pominal Zakoncz() sesji.
+            _logger.LogWarning("STA worker: kolejka zwolniona w trakcie pracy - zamykam sesje");
+        }
+        finally
+        {
+            // Sesję zamykamy na tym samym STA threadzie.
+            ResetSessionOnSta();
+        }
     }
 
     /// <summary>
@@ -321,15 +332,18 @@ public sealed class RealSferaSession : ISferaSession
                 }
             }
         }
-        catch (InvalidCastException)
+        catch (InvalidCastException) when (items.Count == 0)
         {
+            // Fallback tylko gdy enumeracja nie ruszyla (inaczej dublowalby juz zebrane wiersze).
+            // Kolekcje Sfery sa 1-indeksowane (CHM _Kolekcja_Element: 1..Liczba).
             _logger.LogInformation("QueryInvoices: IEnumerable nie dostepne - fallback na Element(i)");
             int take = Math.Min(total, fetchCap);
-            for (int i = 0; i < take && items.Count < limit; i++)
+            for (int i = 1; i <= take && items.Count < limit; i++)
             {
-                dynamic dok = kolekcja.Element(i);
+                dynamic? dok = null;
                 try
                 {
+                    dok = kolekcja.Element(i);
                     var mapped = MapDokumentToQueryItem(dok);
                     if (typeFilter == null || mapped.Type == typeFilter)
                     {
@@ -342,7 +356,7 @@ public sealed class RealSferaSession : ISferaSession
                 }
                 finally
                 {
-                    try { dok.Zamknij(); } catch { /* best-effort */ }
+                    try { dok?.Zamknij(); } catch { /* best-effort */ }
                 }
             }
         }
@@ -602,7 +616,7 @@ public sealed class RealSferaSession : ISferaSession
         // odmow wystawienia. Idempotency-Key cache w Bridge zalapie powtorzony request z tym
         // samym kluczem, ale jak klient wyśle ten sam payload pod innym kluczem (np. retry
         // z innym job ID, debug curl) - bez tej kontroli powstanie duplikat w ksiegowosci.
-        var existingId = FindExistingInvoiceByReference(request.ExternalReference, "FS");
+        var existingId = FindExistingInvoiceByReference(request.ExternalReference, DokTypFS);
         if (existingId.HasValue)
         {
             dynamic existing = Session.SuDokumentyManager.WczytajDokument(existingId.Value);
@@ -1615,7 +1629,7 @@ public sealed class RealSferaSession : ISferaSession
         // Anti-duplicate po external_reference w Uwagach (jak FS/MM) - retry z innym
         // Idempotency-Key nie może dublować PZ (zawyżony stan magazynowy + podwójny
         // koszt zakupu). Dodane w audycie 2026-06-10 - wcześniej PZ nie miał tej warstwy.
-        var existingReceiptId = FindExistingInvoiceByReference(request.ExternalReference, "PZ");
+        var existingReceiptId = FindExistingInvoiceByReference(request.ExternalReference, DokTypPZ);
         if (existingReceiptId.HasValue)
         {
             dynamic existingPz = Session.SuDokumentyManager.WczytajDokument(existingReceiptId.Value);
@@ -1770,7 +1784,7 @@ public sealed class RealSferaSession : ISferaSession
         // Anti-duplicate po external_reference w Uwagach (jak FS) - ochrona przed podwójnym MM
         // przy retry/timeout. Fail-open (FindExistingInvoiceByReference loguje i zwraca null
         // przy błędzie) - idempotency-key cache w kontrolerze to główna warstwa ochrony.
-        var existingId = FindExistingInvoiceByReference(request.ExternalReference, "MM");
+        var existingId = FindExistingInvoiceByReference(request.ExternalReference, DokTypMM);
         if (existingId.HasValue)
         {
             dynamic existingDok = Session.SuDokumentyManager.WczytajDokument(existingId.Value);
@@ -2475,7 +2489,7 @@ public sealed class RealSferaSession : ISferaSession
         // Anti-duplicate po external_reference w Uwagach (jak FS/PZ/MM) - Uwagi KFS
         // zawsze zawierają "ref: <external_reference>" (niżej), więc pre-check chroni
         // przed podwójną korektą przy retry z innym Idempotency-Key (audyt 2026-06-10).
-        var existingCorrectionId = FindExistingInvoiceByReference(request.ExternalReference, "KFS");
+        var existingCorrectionId = FindExistingInvoiceByReference(request.ExternalReference, DokTypKFS);
         if (existingCorrectionId.HasValue)
         {
             dynamic existingKfs = Session.SuDokumentyManager.WczytajDokument(existingCorrectionId.Value);
@@ -2499,11 +2513,15 @@ public sealed class RealSferaSession : ISferaSession
             prevWarehouse = SetSessionWarehouse(sourceWarehouse);
         }
 
-        dynamic kfs = request.SourceIsExternal
-            ? Session.SuDokumentyManager.DodajKFSn()
-            : Session.SuDokumentyManager.DodajKFS();
+        // DodajKFS W try (jak FS/PZ): gdy rzuci po SetSessionWarehouse, finally musi przywrocic
+        // magazyn sesji - inaczej kolejne FS/PZ bez warehouse_subiekt_id laduja na magazynie tej FS.
+        dynamic? kfs = null;
         try
         {
+            kfs = request.SourceIsExternal
+                ? Session.SuDokumentyManager.DodajKFSn()
+                : Session.SuDokumentyManager.DodajKFS();
+
             if (!request.SourceIsExternal)
             {
                 // Powiązanie ze źródłowym FS: NaPodstawie(int) - DispId 166. DoDokumentuId
@@ -2544,6 +2562,9 @@ public sealed class RealSferaSession : ISferaSession
             // Pozycje bez matchu = blad walidacji - lepiej fail-fast niz wystawic KFS bez
             // prawidlowych korekt.
             var unmatched = new List<string>();
+            // Pozycje juz skorygowane - dwie linie na ten sam towar (FS z powtorzonym EAN) MUSZA trafic
+            // w dwie rozne pozycje; wczesniej obie nadpisywaly pierwsza (KFS zanizal zwrot bez bledu).
+            var usedPositions = new HashSet<int>();
             foreach (var line in request.Lines)
             {
                 if (request.SourceIsExternal)
@@ -2555,11 +2576,11 @@ public sealed class RealSferaSession : ISferaSession
                 bool matched;
                 if (string.IsNullOrEmpty(line.Ean))
                 {
-                    matched = TryAdjustServicePosition(kfs, line.NameFallback, line.QuantityChange);
+                    matched = TryAdjustServicePosition(kfs, line.NameFallback, line.QuantityChange, usedPositions);
                 }
                 else
                 {
-                    matched = TryAdjustExistingPosition(kfs, line.Ean, line.QuantityChange);
+                    matched = TryAdjustExistingPosition(kfs, line.Ean, line.QuantityChange, usedPositions);
                 }
 
                 if (!matched)
@@ -2570,14 +2591,14 @@ public sealed class RealSferaSession : ISferaSession
 
             if (unmatched.Count > 0)
             {
-                throw new InvalidOperationException(
+                throw new InvalidCorrectionException(
                     "KFS: nie udalo sie zmapowac " + unmatched.Count + " linii na pozycje skopiowane z FS. " +
                     "KFS po NaPodstawie() nie pozwala dodawac nowych pozycji - kazda linia musi pasowac " +
                     "do istniejacej pozycji FS po Towar.Identyfikator. Niezmapowane: " +
                     string.Join("; ", unmatched));
             }
 
-            kfs.Uwagi = $"Korekta: {request.Reason} | ref: {request.ExternalReference}";
+            kfs.Uwagi = BuildUwagiWithReference($"Korekta: {request.Reason}", request.ExternalReference);
 
             // issue_date korekty - wcześniej cicho ignorowane (audyt pkt 4). Set tylko gdy
             // data inna niż dzisiejsza; po NaPodstawie(), żeby nic jej nie nadpisało.
@@ -2735,8 +2756,10 @@ public sealed class RealSferaSession : ISferaSession
                     Symbol: (string)towar.Symbol,
                     Ean: ean,
                     Name: (string)towar.Nazwa,
-                    VatRate: TryReadDecimal(towar, "VatStawka") ?? 23m,
-                    Unit: TryReadString(towar, "JmZakupu") ?? TryReadString(towar, "JmSprzedazy") ?? "szt.",
+                    // Atrybuty wg CHM: SprzedazVatId (id/symbol z sl_StawkaVAT) i SprzedazJm/ZakupJm.
+                    // Wczesniejsze "VatStawka"/"JmZakupu" nie istnialy -> zawsze 23 / "szt.".
+                    VatRate: ReadTowarVatRate(towar) ?? 23m,
+                    Unit: TryReadString(towar, "SprzedazJm") ?? TryReadString(towar, "ZakupJm") ?? "szt.",
                     IsActive: true);
             }
             finally
@@ -2744,6 +2767,44 @@ public sealed class RealSferaSession : ISferaSession
                 TryClose(towar);
             }
         }, ct);
+    }
+
+    /// <summary>
+    /// Stawka VAT sprzedazy towaru w procentach. Towar.SprzedazVatId to id (Long) LUB symbol (String)
+    /// z sl_StawkaVAT; procent jest w kolumnie vat_Stawka (money, "Procent stawki" - wg widoku
+    /// vwStawkaVAT mapowany 1:1 na ob_VatProc). Null gdy nie da sie ustalic (wolajacy da domyslne 23).
+    /// </summary>
+    private decimal? ReadTowarVatRate(dynamic towar)
+    {
+        object? raw;
+        try { raw = (object?)towar.SprzedazVatId; }
+        catch (Exception ex) { _logger.LogWarning(ex, "Towar.SprzedazVatId nieodczytany"); return null; }
+        if (raw is null) return null;
+
+        try
+        {
+            using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            if (raw is string symbol)
+            {
+                cmd.CommandText = "SELECT TOP 1 vat_Stawka FROM sl_StawkaVAT WHERE vat_Symbol = @s";
+                cmd.Parameters.AddWithValue("@s", symbol);
+            }
+            else
+            {
+                cmd.CommandText = "SELECT TOP 1 vat_Stawka FROM sl_StawkaVAT WHERE vat_Id = @id";
+                cmd.Parameters.AddWithValue("@id", Convert.ToInt32(raw));
+            }
+            cmd.CommandTimeout = 10;
+            var result = cmd.ExecuteScalar();
+            return result is null || result == DBNull.Value ? null : Convert.ToDecimal(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "sl_StawkaVAT lookup dla SprzedazVatId={Raw} padl", raw);
+            return null;
+        }
     }
 
     public Task<ContractorDto?> FindContractorByNipAsync(string nip, CancellationToken ct)
@@ -2767,7 +2828,7 @@ public sealed class RealSferaSession : ISferaSession
                     FullName: TryReadString(kh, "NazwaPelna"),
                     FirstName: null,
                     LastName: null,
-                    Email: TryReadString(kh, "AdresEMail"),
+                    Email: TryReadString(kh, "Email"),
                     Address: new AddressDto(
                         Street: TryReadString(kh, "Ulica") ?? "",
                         PostCode: TryReadString(kh, "KodPocztowy") ?? "",
@@ -2795,12 +2856,38 @@ public sealed class RealSferaSession : ISferaSession
                     null, current, Array.Empty<object>())!;
             }
 
+            // Argumenty z JSON przychodza jako JsonElement (System.Text.Json) - nie marshaluja sie do
+            // VARIANT. Mapujemy na prymitywy wg ValueKind.
+            object?[] comArgs = args.Select(ToComArgument).ToArray();
             string lastPart = parts[^1];
-            return current.GetType().InvokeMember(lastPart,
+            object? result = current.GetType().InvokeMember(lastPart,
                 BindingFlags.InvokeMethod | BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public,
-                null, current, args.ToArray());
+                null, current, comArgs);
+
+            // Wynik-RCW nie serializuje sie do JSON ({}), a bez release cieknie na STA.
+            if (result is not null && Marshal.IsComObject(result))
+            {
+                string? ident = TryReadString(result, "Identyfikator") ?? TryReadString(result, "Nazwa");
+                try { Marshal.ReleaseComObject(result); } catch { /* cleanup */ }
+                return $"<COM object{(ident is null ? "" : $" {ident}")}>";
+            }
+            return result;
         }, ct);
     }
+
+    private static object? ToComArgument(object? arg) => arg switch
+    {
+        System.Text.Json.JsonElement je => je.ValueKind switch
+        {
+            System.Text.Json.JsonValueKind.Number => je.TryGetInt64(out long l) ? l : je.GetDouble(),
+            System.Text.Json.JsonValueKind.String => je.GetString(),
+            System.Text.Json.JsonValueKind.True => true,
+            System.Text.Json.JsonValueKind.False => false,
+            System.Text.Json.JsonValueKind.Null or System.Text.Json.JsonValueKind.Undefined => null,
+            _ => je.GetRawText(),
+        },
+        _ => arg,
+    };
 
     // -------------------------- Building blocks --------------------------
 
@@ -2880,7 +2967,7 @@ public sealed class RealSferaSession : ISferaSession
         changed |= TryUpdate(existing, "Ulica", c.Address.Street);
         if (!string.IsNullOrEmpty(c.Email))
         {
-            changed |= TryUpdate(existing, "AdresEMail", c.Email);
+            changed |= TryUpdate(existing, "Email", c.Email);
         }
         if (!string.IsNullOrEmpty(c.Nip))
         {
@@ -3021,7 +3108,8 @@ public sealed class RealSferaSession : ISferaSession
 
         if (!string.IsNullOrEmpty(c.Email))
         {
-            TrySet(kh, "AdresEMail", c.Email);
+            // Atrybut Sfery to "Email" (Kontrahent_Email.htm); "AdresEMail" nie istnial - TrySet polykal.
+            TrySet(kh, "Email", c.Email);
         }
     }
 
@@ -3065,19 +3153,9 @@ public sealed class RealSferaSession : ISferaSession
     /// do notes (kontrakt §5 obiecuje tę warstwę bezwarunkowo); doklejamy ją, jeśli
     /// jeszcze jej tam nie ma.
     /// </summary>
+    // Logika w UwagiFields (testowalna; limit varchar(500) z zachowaniem ref).
     private static string BuildUwagiWithReference(string? notes, string externalReference)
-    {
-        string baseNotes = notes ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(externalReference)
-            || baseNotes.Contains(externalReference, StringComparison.Ordinal))
-        {
-            return baseNotes;
-        }
-
-        return baseNotes.Length == 0
-            ? $"ref: {externalReference}"
-            : $"{baseNotes} | ref: {externalReference}";
-    }
+        => UwagiFields.Build(notes, externalReference);
 
     /// <summary>
     /// Ustawia datę na dokumencie, ale TYLKO gdy klient podał datę inną niż dzisiejsza.
@@ -3117,15 +3195,20 @@ public sealed class RealSferaSession : ISferaSession
     /// (kilkadziesiat tysiecy FS) szybkie. Sfera dodatkowo filtruje po magazynie
     /// operatora.
     /// </summary>
-    private long? FindExistingInvoiceByReference(string externalReference, string typePrefix)
+    // dok_Typ (zrzut schematu dok__Dokument, MS_Description): 2=FS, 6=KFS, 9=MM, 10=PZ.
+    private const int DokTypFS = 2, DokTypKFS = 6, DokTypMM = 9, DokTypPZ = 10;
+
+    private long? FindExistingInvoiceByReference(string externalReference, int dokTyp)
     {
         if (string.IsNullOrWhiteSpace(externalReference))
         {
             return null;
         }
 
+        // Typ po kolumnie dok_Typ, NIE po prefiksie numeru: symbol numeracji bywa niestandardowy
+        // ("FH" zamiast "FS") i wtedy porownanie prefiksu nigdy nie trafialo = anti-duplicate martwy.
         var escaped = EscapeLikePattern(externalReference);
-        var filter = $"dok_Uwagi LIKE '%{escaped}%'";
+        var filter = $"dok_Typ={dokTyp} AND dok_Uwagi LIKE '%{escaped}%'";
 
         dynamic? kolekcja = null;
         try
@@ -3141,8 +3224,10 @@ public sealed class RealSferaSession : ISferaSession
             {
                 try
                 {
-                    string number = (string)dok.NumerPelny ?? "";
-                    if (!number.StartsWith(typePrefix + " ", StringComparison.OrdinalIgnoreCase))
+                    // LIKE to tylko pre-filtr podciagu: ref "order:12" pasuje do "order:123".
+                    // Duplikat = ref jako CALY token w Uwagach (inaczej 409 z CUDZYM existing_subiekt_id).
+                    string uwagi = TryReadString((object)dok, "Uwagi") ?? "";
+                    if (!UwagiFields.ContainsReferenceToken(uwagi, externalReference))
                     {
                         continue;
                     }
@@ -3273,7 +3358,7 @@ public sealed class RealSferaSession : ISferaSession
     /// 2. Sequential: jeśli pozCount == 1 i to jedyny call dla tego KFS - bierz pozycję 1
     ///    (1:1 mapping w przypadkach single-item refund)
     /// </summary>
-    private bool TryAdjustExistingPosition(dynamic document, string ean, decimal deltaQuantity)
+    private bool TryAdjustExistingPosition(dynamic document, string ean, decimal deltaQuantity, HashSet<int> usedPositions)
     {
         int pozCount;
         try { pozCount = (int)document.Pozycje.Liczba; }
@@ -3316,6 +3401,7 @@ public sealed class RealSferaSession : ISferaSession
                     continue;
                 }
                 if (poz == null) continue;
+                if (usedPositions.Contains(i)) continue;
 
                 // Diagnostyka: jakie property faktycznie sa dostepne na pozycji KFS po NaPodstawie.
                 long? posTowarId = TryReadInt64(poz, "TowarId");
@@ -3364,12 +3450,18 @@ public sealed class RealSferaSession : ISferaSession
                 if (!match) continue;
 
                 decimal newQty = posIloscJm >= 0 ? posIloscJm + deltaQuantity : 0m;
-                if (newQty < 0) newQty = 0m;
+                if (newQty < 0)
+                {
+                    // Zwrot wiekszy niz ilosc na pozycji - wczesniej cicho zerowane (KFS zanizony).
+                    throw new InvalidCorrectionException(
+                        $"Korekta ean={ean}: quantity={deltaQuantity} przekracza ilosc na pozycji FS ({posIloscJm}).");
+                }
 
                 try
                 {
                     SetComProperty(poz, "IloscJmPoKorekcie", ToComQuantity(newQty));
                     _logger.LogInformation("  poz[{I}]: IloscJmPoKorekcie ustawione na {NewQty}", i, newQty);
+                    usedPositions.Add(i);
                     return true;
                 }
                 catch (Exception ex)
@@ -3400,7 +3492,7 @@ public sealed class RealSferaSession : ISferaSession
     /// QuantityChange jest ujemne (np. -1 zwraca 1 szt). Wynikowe IloscJmPoKorekcie =
     /// max(currentQty + change, 0).
     /// </summary>
-    private bool TryAdjustServicePosition(dynamic document, string? nameHint, decimal quantityChange)
+    private bool TryAdjustServicePosition(dynamic document, string? nameHint, decimal quantityChange, HashSet<int> usedPositions)
     {
         int pozCount;
         try { pozCount = (int)document.Pozycje.Liczba; }
@@ -3497,7 +3589,11 @@ public sealed class RealSferaSession : ISferaSession
 
             var target = chosen.Value;
             decimal newQty = target.IloscJm >= 0 ? target.IloscJm + quantityChange : 0m;
-            if (newQty < 0) newQty = 0m;
+            if (newQty < 0)
+            {
+                throw new InvalidCorrectionException(
+                    $"Korekta uslugi '{target.UslJednNazwa}': quantity={quantityChange} przekracza ilosc na pozycji FS ({target.IloscJm}).");
+            }
 
             try
             {
@@ -3505,6 +3601,7 @@ public sealed class RealSferaSession : ISferaSession
                 _logger.LogInformation(
                     "  poz[{I}] (usluga '{Name}'): IloscJmPoKorekcie ustawione na {NewQty}",
                     target.Index, target.UslJednNazwa ?? "<null>", newQty);
+                usedPositions.Add(target.Index);
                 return true;
             }
             catch (Exception ex)
@@ -3848,10 +3945,13 @@ public sealed class RealSferaSession : ISferaSession
         // ResetSessionOnSta() wykona się jako ostatnia akcja w workerze.
         _workQueue.CompleteAdding();
 
-        // Czekamy max 5 sekund na zamknięcie sesji Sfery.
+        // Czekamy max 5 sekund na zamknięcie sesji Sfery. Gdy worker wciaz pracuje (dlugi job:
+        // PDF/KSeF), NIE zwalniamy kolejki - watek jest background, a Dispose pod pracujacym
+        // GetConsumingEnumerable konczyl sie ObjectDisposedException na STA.
         if (!_staThread.Join(TimeSpan.FromSeconds(5)))
         {
-            _logger.LogWarning("Sfera STA worker did not exit cleanly within 5s");
+            _logger.LogWarning("Sfera STA worker did not exit cleanly within 5s - kolejka pozostawiona workerowi");
+            return ValueTask.CompletedTask;
         }
 
         _workQueue.Dispose();

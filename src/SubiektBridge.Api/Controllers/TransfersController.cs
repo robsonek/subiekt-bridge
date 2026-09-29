@@ -76,6 +76,14 @@ public sealed class TransfersController : ControllerBase
                 Message: "Magazyn źródłowy i docelowy są identyczne - MM bezcelowe."));
         }
 
+        if (UwagiFields.ValidateNotes(request.Notes, request.ExternalReference) is { } notesError)
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "NOTES_TOO_LONG",
+                Message: notesError,
+                Details: new { max_length = UwagiFields.MaxLength }));
+        }
+
         try
         {
             var response = await _sfera.CreateTransferAsync(request, ct);
