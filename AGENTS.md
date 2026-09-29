@@ -27,9 +27,6 @@ Windows Service via `Microsoft.Extensions.Hosting.WindowsServices` (zero NSSM).
 **Bezpieczeństwo:** HTTPS auto-generated self-signed cert (`data/cert.pfx`),
 statyczny `X-Bridge-Token` w nagłówku, opcjonalny IP whitelist w Windows Firewall.
 
-> **AGENTS.md jest kopią tego pliku.** Po każdej edycji CLAUDE.md zsynchronizuj:
-> `cp CLAUDE.md AGENTS.md`.
-
 ## Build / Test / Run
 
 ```bash
