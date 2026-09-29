@@ -2936,7 +2936,9 @@ public sealed class RealSferaSession : ISferaSession
     /// <summary>
     /// Wszystkie kh_Id z danym NIP (adr__Ewid, TypAdresu=1) - filtr GET /invoices?nip=. NIP porownywany po
     /// normalizacji (bez '-' i spacji po obu stronach), bo Subiekt trzyma go tak, jak wpisal operator.
-    /// Blad SQL RZUCA (nie pusty zbior): cichy fallback zwrocilby listing bez filtra albo falszywe "brak FV".
+    /// Porownanie dokladne (=, nie LIKE) i BEZ TOP - duplikaty NIP-u sie zdarzaja, a obciety zbior dalby
+    /// po cichu niepelna liste FV. Blad SQL RZUCA (nie pusty zbior, inaczej niz FindOpenReceivableContractorIds):
+    /// cichy fallback zwrocilby falszywe "brak FV".
     /// </summary>
     private IReadOnlyCollection<long> FindContractorIdsByNip(string nip)
     {
@@ -2948,7 +2950,7 @@ public sealed class RealSferaSession : ISferaSession
         conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
-            SELECT DISTINCT TOP 200 k.kh_Id
+            SELECT DISTINCT k.kh_Id
             FROM kh__Kontrahent k
             JOIN adr__Ewid a ON a.adr_IdObiektu = k.kh_Id AND a.adr_TypAdresu = 1
             WHERE REPLACE(REPLACE(a.adr_NIP, '-', ''), ' ', '') = @nip";
