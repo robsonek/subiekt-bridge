@@ -35,7 +35,8 @@ statyczny `X-Bridge-Token` w nagłówku, opcjonalny IP whitelist w Windows Firew
 ```bash
 # Lokalnie (macOS/Linux z .NET 10 SDK)
 dotnet build SubiektBridge.sln
-dotnet test SubiektBridge.sln    # xUnit (na razie placeholder, realne testy: faza 2.7+)
+dotnet test SubiektBridge.sln    # xUnit v3 na Microsoft Testing Platform (opt-in w global.json;
+                                 # bez tego .NET 10 SDK odrzuca xunit.v3 4.x w trybie VSTest)
 
 # Dev run na macOS/Linux — FakeSferaSession zamiast COM
 # (appsettings.Development.json: Bridge:UseFakeSfera=true, token "dev-token",
