@@ -186,6 +186,7 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<InvoiceQueryItemDto?> FindInvoiceByIdAsync(long subiektId, CancellationToken ct)
     {
+        if (SferaUnavailableForTests) throw new SferaUnavailableException("Sesja Sfery niedostepna (fake)");
         return Task.FromResult<InvoiceQueryItemDto?>(new InvoiceQueryItemDto(
             SubiektId: subiektId,
             Number: $"FS {subiektId}/2026",
@@ -258,6 +259,9 @@ public sealed class FakeSferaSession : ISferaSession
 
     // Test-only: symuluje padniety lookup po NIP (RealSferaSession.FindContractorIdByNip -> SQL error).
     internal bool FailContractorLookupForTests { get; set; }
+
+    // Test-only: symuluje martwa sesje Sfery przy FindInvoiceByIdAsync (Real: sonda sesji pada).
+    internal bool SferaUnavailableForTests { get; set; }
 
     // Real pyta SQL tylko dla kontrahenta z NIP-em - tak samo tu.
     private void ThrowIfContractorLookupFails(ContractorDto contractor)

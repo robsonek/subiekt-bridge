@@ -50,7 +50,14 @@ public sealed class TransfersController : ControllerBase
         var cached = await _idempotency.TryGetAsync<TransferResponseDto>(idempotencyKey, ct);
         if (cached is not null)
         {
-            var stillExists = await _sfera.FindInvoiceByIdAsync(cached.SubiektId, ct);
+            InvoiceQueryItemDto? stillExists;
+            try { stillExists = await _sfera.FindInvoiceByIdAsync(cached.SubiektId, ct); }
+            catch (SferaUnavailableException ex)
+            {
+                // Sesja Sfery padla - NIE kasujemy klucza idempotencji (kasacja + nowy request = duplikat).
+                return StatusCode(StatusCodes.Status503ServiceUnavailable, new ErrorResponseDto(
+                    Code: "SFERA_UNAVAILABLE", Message: ex.Message));
+            }
             if (stillExists is not null)
             {
                 _logger.LogInformation("Idempotent replay for key {Key} -> MM {Number}",

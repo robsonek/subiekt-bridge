@@ -178,7 +178,13 @@ public sealed class InvoicesController : ControllerBase
                 Message: $"Bridge ID '{id}' ma nieznany format. Oczekiwane: 'sub_<id>'."));
         }
 
-        var item = await _sfera.FindInvoiceByIdAsync(subiektId, ct);
+        InvoiceQueryItemDto? item;
+        try { item = await _sfera.FindInvoiceByIdAsync(subiektId, ct); }
+        catch (SferaUnavailableException ex)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ErrorResponseDto(
+                Code: "SFERA_UNAVAILABLE", Message: ex.Message));
+        }
         if (item == null)
         {
             return NotFound(new ErrorResponseDto(
@@ -229,7 +235,14 @@ public sealed class InvoicesController : ControllerBase
         var cached = await _idempotency.TryGetAsync<InvoiceResponseDto>(idempotencyKey, ct);
         if (cached is not null)
         {
-            var stillExists = await _sfera.FindInvoiceByIdAsync(cached.SubiektId, ct);
+            InvoiceQueryItemDto? stillExists;
+            try { stillExists = await _sfera.FindInvoiceByIdAsync(cached.SubiektId, ct); }
+            catch (SferaUnavailableException ex)
+            {
+                // Sesja Sfery padla - NIE kasujemy klucza idempotencji (kasacja + nowy request = duplikat).
+                return StatusCode(StatusCodes.Status503ServiceUnavailable, new ErrorResponseDto(
+                    Code: "SFERA_UNAVAILABLE", Message: ex.Message));
+            }
             if (stillExists is not null)
             {
                 _logger.LogInformation("Idempotent replay for key {Key} -> invoice {Number}",
@@ -329,7 +342,14 @@ public sealed class InvoicesController : ControllerBase
         var cached = await _idempotency.TryGetAsync<InvoiceResponseDto>(idempotencyKey, ct);
         if (cached is not null)
         {
-            var stillExists = await _sfera.FindInvoiceByIdAsync(cached.SubiektId, ct);
+            InvoiceQueryItemDto? stillExists;
+            try { stillExists = await _sfera.FindInvoiceByIdAsync(cached.SubiektId, ct); }
+            catch (SferaUnavailableException ex)
+            {
+                // Sesja Sfery padla - NIE kasujemy klucza idempotencji (kasacja + nowy request = duplikat).
+                return StatusCode(StatusCodes.Status503ServiceUnavailable, new ErrorResponseDto(
+                    Code: "SFERA_UNAVAILABLE", Message: ex.Message));
+            }
             if (stillExists is not null)
             {
                 _logger.LogInformation("Idempotent replay for key {Key} -> correction {Number}",

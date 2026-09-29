@@ -574,8 +574,13 @@ public sealed class RealSferaSession : ISferaSession
             }
             catch (Exception ex)
             {
-                // Sfera rzuca COMException dla nieistniejącego ID. Logujemy info bo
-                // użytkownik może świadomie zapytać o zły ID; nie traktujemy jako błąd serwera.
+                // Sfera rzuca COMException dla nieistniejącego ID - ale tak samo przy padnietej sesji.
+                // Sonda rozstrzyga: sesja martwa -> SferaUnavailableException (503, klucz idempotencji
+                // NIE jest kasowany); sesja OK -> null (404 / replay: dokument usuniety).
+                if (!IsSessionAlive())
+                {
+                    throw new SferaUnavailableException($"Sesja Sfery niedostepna przy odczycie dokumentu {subiektId} - ponow pozniej.", ex);
+                }
                 _logger.LogInformation(ex, "FindInvoiceById: dokument {Id} nie znaleziony", subiektId);
                 return null;
             }
@@ -1087,6 +1092,11 @@ public sealed class RealSferaSession : ISferaSession
 
     // Dokumenty z wysylka w toku (gate). Wpis trzyma takze task w tle po capie HTTP.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, byte> _ksefInFlight = new();
+    // Odrzucenie przez KSeF osiagniete W TLE (po capie HTTP): dokument ma status 6, ale klient dostal 202
+    // i wg kontraktu ponawia POST - a status 6 na wejsciu = "walidacja od nowa" = PONOWNA WYSYLKA (pętla,
+    // klient nigdy nie widzi 422). Tło zapisuje tu Blad; najblizszy POST zwraca go JEDNORAZOWO jako Rejected.
+    // Po tym kolejny POST (dane poprawione w Subiekcie) wchodzi w retry pipeline jak dotad.
+    private readonly ConcurrentDictionary<long, string> _ksefBackgroundRejection = new();
 
     public async Task<KsefStatusResponseDto> SendInvoiceToKsefAsync(long documentSubiektId, CancellationToken ct)
     {
@@ -1108,6 +1118,18 @@ public sealed class RealSferaSession : ISferaSession
             // CancellationToken.None: RunOnStaAsync nie przerywa wykonywanego delegata, a anulowany
             // Task porzucilby zwrocony RCW OperacjaWTle (wyciek + zgubiony Blad).
             ct.ThrowIfCancellationRequested();
+
+            // Odrzucenie z poprzedniej wysylki zakonczonej W TLE: oddajemy je klientowi (422), zamiast
+            // po cichu wysylac dokument ponownie. Tylko gdy dokument NADAL jest w statusie 6.
+            if (_ksefBackgroundRejection.TryRemove(documentSubiektId, out var bgBlad))
+            {
+                var current = await RunOnStaAsync(() => ReadKsefStatusCore(documentSubiektId, bgBlad), CancellationToken.None);
+                if (current?.KsefStatus == KsefStatusMap.Rejected)
+                {
+                    throw new KsefException(KsefError.Rejected,
+                        $"KSeF odrzucil dokument {documentSubiektId} (wysylka zakonczona w tle): {bgBlad}");
+                }
+            }
 
             // Krok 1 (jeden job STA): guardy + lokalne kroki pipeline (Sprawdz/Generuj sa synchroniczne
             // i szybkie - lokalny zapis w bazie) + start operacji w tle (Wyslij/PobierzNumer).
@@ -1302,6 +1324,20 @@ public sealed class RealSferaSession : ISferaSession
                 {
                     _logger.LogInformation("KSeF: background wysylka doc={DocId} zakonczona", documentSubiektId);
                 }
+
+                // Status z PRZELADOWANEGO dokumentu: odrzucenie zapamietujemy dla najblizszego POST (patrz pole).
+                // Zapis PRZED zwolnieniem gate (finally) - kolejny POST wchodzi dopiero po gate.
+                try
+                {
+                    var final = await AwaitStaBounded(
+                        RunOnStaAsync(() => ReadKsefStatusCore(documentSubiektId, blad), CancellationToken.None),
+                        TimeSpan.FromMinutes(1), documentSubiektId, "StatusPoTle");
+                    if (final?.KsefStatus == KsefStatusMap.Rejected)
+                    {
+                        _ksefBackgroundRejection[documentSubiektId] = string.IsNullOrWhiteSpace(blad) ? "brak opisu (KSeF)" : blad!;
+                    }
+                }
+                catch (Exception sex) { _logger.LogWarning(sex, "KSeF: odczyt statusu po wysylce w tle doc={DocId} padl", documentSubiektId); }
             }
             else
             {
@@ -1455,6 +1491,10 @@ public sealed class RealSferaSession : ISferaSession
             try { dok = Session.SuDokumentyManager.WczytajDokument(documentSubiektId); }
             catch (Exception ex)
             {
+                if (!IsSessionAlive())
+                {
+                    throw new KsefException(KsefError.CommunicationError, $"Sesja Sfery niedostepna przy odczycie dokumentu {documentSubiektId} - ponow pozniej.", ex);
+                }
                 throw new KsefException(KsefError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje", ex);
             }
             if (dok is null)
@@ -1481,7 +1521,14 @@ public sealed class RealSferaSession : ISferaSession
         try
         {
             try { dok = Session.SuDokumentyManager.WczytajDokument(documentSubiektId); }
-            catch { return null; }
+            catch (Exception ex)
+            {
+                if (!IsSessionAlive())
+                {
+                    throw new KsefException(KsefError.CommunicationError, $"Sesja Sfery niedostepna przy odczycie dokumentu {documentSubiektId} - ponow pozniej.", ex);
+                }
+                return null;
+            }
             if (dok is null) return null;
 
             int status = (int)(TryReadInt64((object)dok, "StatusKSeF") ?? 0);
@@ -1949,7 +1996,11 @@ public sealed class RealSferaSession : ISferaSession
         {
             // 1. Dokument: istnienie + typ. SuDokument.Typ (= dok_Typ): 1=FZ, 2=FS; korekty (5/6) i inne -> odrzuc.
             try { dok = Session.SuDokumentyManager.WczytajDokument(documentSubiektId); }
-            catch (Exception ex) { throw new SettlementException(SettlementError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje", ex); }
+            catch (Exception ex)
+            {
+                if (!IsSessionAlive()) throw new SettlementException(SettlementError.ScanFailed, $"Sesja Sfery niedostepna przy odczycie dokumentu {documentSubiektId} - ponow pozniej.", ex);
+                throw new SettlementException(SettlementError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje", ex);
+            }
             if (dok is null) throw new SettlementException(SettlementError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje");
             long docType = TryReadInt64((object)dok, "Typ") ?? -1;
             if (docType != 1 && docType != 2)
@@ -1961,7 +2012,11 @@ public sealed class RealSferaSession : ISferaSession
             // 2. Wczytaj ISTNIEJACA operacje bankowa (zaimportowany przelew) po nzf_Id - potrzebny kontrahent + saldo.
             bool bankExists;
             try { bankExists = (bool)Session.FinManager.Istnieje(req.BankOperationSubiektId); }
-            catch { bankExists = false; }
+            catch (Exception ex)
+            {
+                if (!IsSessionAlive()) throw new SettlementException(SettlementError.ScanFailed, $"Sesja Sfery niedostepna przy odczycie operacji bankowej {req.BankOperationSubiektId} - ponow pozniej.", ex);
+                bankExists = false;
+            }
             if (!bankExists) throw new SettlementException(SettlementError.BankOperationNotFound, $"Operacja bankowa {req.BankOperationSubiektId} nie istnieje w nz__Finanse");
             try { bankOp = Session.FinManager.WczytajDokument(req.BankOperationSubiektId); }
             catch (Exception ex) { throw new SettlementException(SettlementError.BankOperationNotFound, $"Nie mozna wczytac operacji bankowej {req.BankOperationSubiektId}", ex); }
@@ -2225,7 +2280,12 @@ public sealed class RealSferaSession : ISferaSession
         // 1. Istnienie dokumentu (404 gdy brak).
         dynamic? dok = null;
         try { dok = Session.SuDokumentyManager.WczytajDokument(documentSubiektId); }
-        catch (Exception ex) { _logger.LogInformation(ex, "GetSettlements: dokument {Id} nie znaleziony", documentSubiektId); return null; }
+        catch (Exception ex)
+        {
+            if (!IsSessionAlive()) throw new SettlementException(SettlementError.ScanFailed, $"Sesja Sfery niedostepna przy odczycie dokumentu {documentSubiektId} - ponow pozniej.", ex);
+            _logger.LogInformation(ex, "GetSettlements: dokument {Id} nie znaleziony", documentSubiektId);
+            return null;
+        }
         try { if (dok is null) return null; }
         finally { if (dok is not null) TryClose(dok); }
 
@@ -4079,6 +4139,27 @@ public sealed class RealSferaSession : ISferaSession
     /// Bezpośrednie wywołanie z innego threada zrobiłoby Marshal.ReleaseComObject z MTA
     /// = potencjalny race / wyjątek.
     /// </summary>
+    /// <summary>
+    /// [STA] Sonda: czy sesja Sfery zyje. Wolana PO wyjatku z WczytajDokument/Istnieje, zeby odroznic "dokument
+    /// nie istnieje" (sesja OK -> 404/422) od "sesja padla" (operator zamknal Subiekta, RPC disconnected -> 5xx,
+    /// retry). Martwa sesja jest resetowana (kolejne wywolanie otworzy ja od nowa).
+    /// </summary>
+    private bool IsSessionAlive()
+    {
+        try
+        {
+            _ = (string?)Session.Aplikacja?.Wersja;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Sonda sesji Sfery padla - resetuje sesje");
+            _lastError = $"{ex.GetType().Name}: {ex.Message}";
+            ResetSessionOnSta();
+            return false;
+        }
+    }
+
     private void ResetSessionOnSta()
     {
         try { _subiekt?.Zakoncz(); } catch { }
