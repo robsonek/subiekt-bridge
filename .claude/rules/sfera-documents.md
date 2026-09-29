@@ -68,7 +68,35 @@ Sfery (z `dok_TypNr + dok_Nr/dok_Rok`). Filtruj client-side po pobraniu kolekcji
 Rekordy z `dok__Dokument` po anulacji wciąż w wynikach `OtworzKolekcje(filtr)`.
 Anti-duplicate check **musi weryfikować** że `WczytajDokument(id)` zwraca obiekt
 przed traktowaniem jako duplikat. Kolekcję zwalniaj (`Marshal.ReleaseComObject`) w `finally`
-po enumeracji — osobny RCW, bez tego powolny wyciek na STA.
+po enumeracji — osobny RCW, bez tego powolny wyciek na STA. Kolekcje Sfery są **1-indeksowane**
+(`Element(1..Liczba)`).
+
+## Anti-duplicate po `external_reference` — token i `dok_Typ` (od v0.18.0)
+
+- `LIKE '%ref%'` to tylko pre-filtr **podciągu**: ref `order:12` pasował do `order:123` → 409 z CUDZYM
+  `existing_subiekt_id` → Laravel przypinał zamówieniu obcą FS. Po pobraniu kolekcji most sprawdza
+  `UwagiFields.ContainsReferenceToken(dok.Uwagi, ref)` — ref jako CAŁY token (znak przed/po nie jest znakiem
+  identyfikatora), case-insensitive jak LIKE pod polskim collation.
+- Typ dokumentu przez `dok_Typ` w filtrze (2=FS, 6=KFS, 9=MM, 10=PZ), NIE przez prefiks numeru — symbol
+  numeracji bywa niestandardowy („FH”) i prefiks nigdy nie trafiał (warstwa 2 cicho martwa).
+- `dok_Uwagi` = `TUwagi` = **varchar(500)**: `UwagiFields.Build` zawsze zachowuje ` | ref: X` (obcina notatki),
+  kontrolery odrzucają za długie `notes`/`reason` → `422 NOTES_TOO_LONG`.
+
+## Atrybuty, które NIE istnieją (TrySet/TryRead połykały — cicho złe dane)
+
+- `Kontrahent.AdresEMail` → jest **`Email`** (`Kontrahent_Email.htm`). Do v0.17.2 e-mail nigdy nie był
+  zapisywany ani czytany. `Kraj` → jest `Panstwo` (id ze `sl_Panstwo`; świadomie niemapowane, `country_code`
+  zawsze „PL”).
+- `Towar.VatStawka`/`JmZakupu`/`JmSprzedazy` → są **`SprzedazVatId`** (id/symbol z `sl_StawkaVAT`, procent w
+  `vat_Stawka`), **`SprzedazJm`/`ZakupJm`**. Do v0.17.2 `/products` zwracał zawsze `vat_rate: 23`, `unit: "szt."`.
+- Zanim użyjesz nowego atrybutu: `ls InsERT/pomoc/gta/htm | grep -i "^<Obiekt>_<Atrybut>"` — 0 trafień = nie istnieje.
+
+## Korekta (KFS) — mapowanie linii na pozycje FS
+
+Po `NaPodstawie()` KFS nie pozwala dodać pozycji; każda linia korekty musi trafić w istniejącą pozycję. Każda
+linia zużywa **osobną** pozycję (`usedPositions` — FS z powtórzonym EAN ma dwie pozycje, dwie linie korekty
+trafiały w pierwszą i druga nadpisywała pierwszą). Zwrot większy niż ilość na pozycji → `InvalidCorrectionException`
+→ `422 INVALID_CORRECTION` (było ciche zerowanie = zaniżony KFS). Niezmapowana linia → to samo 422 (było 500).
 
 ## NIP w `adr__Ewid`, NIE w `kh__Kontrahent`
 
@@ -79,6 +107,10 @@ JOIN adr__Ewid a ON a.adr_IdObiektu = k.kh_Id AND a.adr_TypAdresu = 1
 WHERE a.adr_NIP = @nip
 ```
 
+- **Sonda sesji po wyjątku `WczytajDokument`/`Istnieje`** (`IsSessionAlive`, od v0.18.0): wyjątek przy
+  odczycie znaczy „nie istnieje” TYLKO gdy `Session.Aplikacja.Wersja` działa; martwa sesja → reset +
+  `SferaUnavailableException` (503) / `KsefError.CommunicationError` (502) / `SettlementError.ScanFailed` (502).
+  Replay idempotencji przy padniętej sesji NIE kasuje klucza (kasacja + nowy request = duplikat).
 - **KAŻDE porównanie po NIP normalizuje obie strony** (`ContractorFields.NormalizeNip` = bez `-`/spacji,
   + `REPLACE(REPLACE(adr_NIP,'-',''),' ','')` w SQL) — dopasowanie przy FS/PZ i filtr `?nip=` tak samo.
   Starsze/ręczne kartoteki mają NIP z kreskami; dosłowne `=` dawało chybienie → duplikat po Symbolu.

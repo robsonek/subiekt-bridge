@@ -42,4 +42,9 @@ wysyła 2x). `GET .../ksef` = czysty odczyt, niczego nie dociąga.
   `NOT_KSEF_INVOICE` przed dotknięciem managera.
 - Wysyłka NIEODWRACALNA; środowisko KSeF (prod/test MF) to konfiguracja podmiotu w Subiekcie.
 - Dostępność API: od GT 1.77/1.80 (prod klienta 1.89 HF2 OK; przy pisaniu endpointu 1.88 HF4).
+- **Odrzucenie osiągnięte W TLE (po capie) jest zapamiętywane** (`_ksefBackgroundRejection`, od v0.18.0) i
+  najbliższy POST zwraca je jako `422 KSEF_REJECTED` (jednorazowo, tylko gdy dokument nadal ma status 6).
+  Bez tego: klient wg kontraktu polluje POST-em → status 6 na wejściu = „walidacja od nowa” = PONOWNA WYSYŁKA
+  w pętli, a 422 nigdy nie docierał. Status 8 (błąd komunikacji) NIE jest zapamiętywany — retry przez Wyslij
+  jest zamierzony.
 - **Na realnym COM nigdy niezweryfikowane** — checklist w `docs/superpowers/plans/2026-08-12-ksef-endpoint.md` (Task 6).

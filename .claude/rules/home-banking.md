@@ -15,7 +15,9 @@ której faktury" + decyzja auto/ręcznie → Laravel (jak dopasowanie `GET /invo
 - **`GET /bank-transactions`** — czysty passthrough `hb_Transakcja` (read-only SQL, bo `hb_Transakcja` nie jest
   w Sferze): surowe pola (hb_id, data, kwota, direction, hb_Kontrahent, hb_RachKontrahent, hb_Tytul, hb_NrFaktury,
   booked, bank_operation_subiekt_id=hb_idOperacjiBankowej, rachunek_id/rachunek_numer=konto wyciągu przez
-  `hb_NaglowekIStopka` LEFT JOIN po `hb_IdNaglowekTr`). Most NIE rozpoznaje kontrahenta po rachunku, NIE matchuje.
+  `hb_NaglowekIStopka` LEFT JOIN po `hb_IdNaglowekTr`, **`hb_status`**). `unbooked_only` = `IS NULL AND hb_Status IN (0,4)`
+  (linie POMINIĘTE przez operatora, status 3, nie są kandydatami — `/book` i tak odrzuca je 422). Most NIE
+  rozpoznaje kontrahenta po rachunku, NIE matchuje.
 - **`POST /bank-transactions/{hb_id}/book` — WARIANT B, AKTYWNY domyślnie** (`Bridge:EnableHbBooking=false` wyłącza → 501-stub).
   **Sfera NIE wystawia API księgowania home-bankingu** (probe prod + SQL Profiler + CHM + research; cała rodzina `hb_`
   poza biblioteką Sfery, 0/2946 stron CHM). „Zaksięguj" w GUI = 3 zapisy w JEDNEJ niejawnej transakcji: `INSERT nz__Finanse`
@@ -33,6 +35,15 @@ której faktury" + decyzja auto/ręcznie → Laravel (jak dopasowanie `GET /invo
   - **R2 (odwracalność linku w GUI) i R3 (re-import wyciągu) nierozstrzygalne statycznie, NIEzweryfikowane empirycznie**
     (klient bez dostępu do serwera → test §7 niewykonany; świadome ryzyko właściciela 2026-06-14). Integralność zapisu
     chronią mechanizmy w kodzie (guard IS NULL + rollback/orphan→500 + guardy), niezależne od flagi. Wyłącznik: `=false`+restart.
+  - **Journal write-ahead (od v0.18.0):** `IdempotencyStore.SavePendingBookingAsync(hb_id, nzf_id)` zaraz po
+    `bp.Zapisz()`, usuwany po sukcesie/rollbacku. Na wejściu `/book`: pending + `FinManager.Istnieje(nzf_id)` →
+    dokończenie LINKU zamiast drugiego BP (śmierć procesu między `Zapisz` a UPDATE — np. `Stop-Service` przy
+    self-update — dawała cichy orphan + duplikat przy retry). Orphan zostawia wpis (retry może się samowyleczyć).
+  - **Wyjątek przy odbiorze wyniku UPDATE ≠ UPDATE nie wykonany** (batch `UPDATE; SELECT @@ROWCOUNT` w
+    autocommit): przed rollbackiem `ReadHbLink` — link = nasz nzf_id → sukces; null → rollback; cudzy → ścieżka
+    wyścigu; odczyt padł → Orphan **bez** cofania BP (martwy `hb_idOperacjiBankowej` gorszy niż orphan).
+  - `hb_Kwota` jest `money NULL` → listing daje 0, `/book` → `422 INVALID_HB_AMOUNT`; `hb_DataKsiegowania` NULL →
+    fallback `hb_DataWaluty`. Komunikaty błędów z `cex.Message` (`GetExceptionForHR` dawał generyczne E_FAIL).
   - Plan + pełny audyt: `docs/PLAN-home-banking-booking-variant-b.md`. NIE pisać raw SQL
     do `hb_Transakcja` poza `LinkHbToOperation`; NIGDY do `nz__Finanse`/`nz_FinanseSplata` (te tylko przez Sferę).
 - Rozliczenie już jest (`POST /invoices/{id}/settlements`) — most nie decyduje co z czym, dostaje rozkaz

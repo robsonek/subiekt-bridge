@@ -36,7 +36,20 @@ Spinanie zaimportowanych z wyciągu operacji bankowych z fakturami (`/invoices/{
 - **Bank-operations: filtruj po kolumnie DB `nzf_Typ`** (19=BP/20=BW) w stringu `OtworzKolekcje`,
   NIE po `FinDokument.Typ` (atrybut COM ≠ DB od v1.17).
 
+- **`bank_operation_subiekt_id` musi być BP/BW** — guard `nzf_Typ IN (19,20)` przez `OtworzKolekcje("nzf_Id=…")`
+  → inaczej `422 UNSUPPORTED_BANK_OPERATION_TYPE`. Bez tego KP/KW albo inny rozrachunek tego samego kontrahenta
+  przechodził wszystkie guardy i `Rozlicz` je spinał.
+- **`GET settlements` agreguje `settlements` ze WSZYSTKICH wierszy** rozrachunku; nagłówek z otwartego (max
+  pozostało) lub najświeżej rozliczonego. Wcześniej po pełnym rozliczeniu wiersza płatnika nagłówek+lista mogły
+  pochodzić z wiersza kupującego (kolejność DB) → replay idempotencji nie znajdował świeżego `RozliczenieId`.
+
 ## Idempotencja rozliczeń
+
+**Kolejność guardów: duplikat PRZED `AlreadySettled`/`ContractorMismatch`, skan po WSZYSTKICH wierszach.**
+Po pełnym rozliczeniu (typowy przypadek) retry trafiał w „brak otwartej kwoty” → `422 ALREADY_SETTLED` (Laravel:
+koniec, płatność błędna) zamiast `409 DUPLICATE_SETTLEMENT` z `existing_rozliczenie_id` (auto-recovery).
+Skan czyta `SplataId` akcesorem **rzucającym** (`ReadInt64OrNull`) — `TryReadInt64` połykał wyjątek → null →
+„brak duplikatu” → `Rozlicz` (fail-open). Realny null (kompensata, `nzs_IdSplaty` NULL) jest tolerowany.
 
 Rozliczenie NIE ma pola Uwagi → anti-duplicate czyta STAN (`FinDokument.Rozliczenia` po
 `SplataId == bank_operation_subiekt_id`), **FAIL-CLOSED** (każdy wyjątek skanu przerywa flow — podwójne

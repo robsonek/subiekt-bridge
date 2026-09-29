@@ -257,7 +257,10 @@ Response `201`:
 }
 ```
 
-**`GET /api/v1/invoices/{id}/settlements`** → stan:
+**`GET /api/v1/invoices/{id}/settlements`** → stan. `settlements` to rozliczenia ze **wszystkich** rozrachunków
+dokumentu (FS marketplace ma zwykle dwa: wyzerowany na kupującym + na płatniku); nagłówek (`rozrachunek_subiekt_id`,
+`original_amount`, `remaining_amount`) dotyczy rozrachunku otwartego (największe pozostało), a gdy wszystkie są
+zamknięte — tego z najświeższym rozliczeniem. `is_fully_settled` = wszystkie rozrachunki zamknięte.
 ```jsonc
 {
   "document_id": "sub_142877", "document_subiekt_id": 142877, "rozrachunek_subiekt_id": 90011,
@@ -284,10 +287,13 @@ klasyfikuje, NIE rozpoznaje kontrahenta. Logika „która wpłata do której nal
 ręcznie = Twoja strona (znasz `subiekt_id` swoich FS z własnego modelu + `remaining` z `GET /invoices/{id}/settlements`).
 
 **`GET /api/v1/bank-transactions`** — surowe przelewy z wyciągu (przed zaksięgowaniem). Query: `direction`
-(`in`=C/wpłata, `out`=D/wypłata), `unbooked_only` (domyślnie true → `hb_idOperacjiBankowej IS NULL`), `from`/`to`,
-`limit`. Zwraca surowe pola: `hb_id, date, amount, direction, contractor_name, contractor_account, title,
+(`in`=C/wpłata, `out`=D/wypłata), `unbooked_only` (domyślnie true → bez linku **i** `hb_status` ∈ {0,4}, czyli
+linie, które da się zaksięgować; linie pominięte przez operatora w Subiekcie (`hb_status`=3) nie są kandydatami),
+`from`/`to`, `limit`. Zwraca surowe pola: `hb_id, date, amount, direction, contractor_name, contractor_account, title,
 invoice_number, booked, bank_operation_subiekt_id` (= `hb_idOperacjiBankowej`; `null` gdy niezaksięgowana),
-`rachunek_id` (rb_Id konta wyciągu, na które wpłynął przelew) + `rachunek_numer` (IBAN wyciągu).
+`rachunek_id` (rb_Id konta wyciągu, na które wpłynął przelew) + `rachunek_numer` (IBAN wyciągu),
+`hb_status` (0=nowa, 1=zaksięgowana, 2=skojarzona, 3=pominięta, 4=wstępnie skojarzona). `amount` jest `0`,
+gdy w Subiekcie kwota jest pusta (takiej linii `/book` nie zaksięguje — `422 INVALID_HB_AMOUNT`).
 
 Typowy przepływ po Twojej stronie: pobierz `bank-transactions?unbooked_only=true&direction=in`, dopasuj po
 `amount` + `contractor_name`/rachunku do swoich FS, **zaksięguj przelew w module Bankowość Subiekta** (operator),
@@ -374,7 +380,9 @@ przelewu), dopasuj kandydata po swojej stronie, a potem `POST /invoices/{id}/set
 **`POST /api/v1/invoices/{id}/ksef`** — wyślij e-Fakturę dokumentu do Krajowego Systemu e-Faktur.
 Body puste. **BEZ `Idempotency-Key`** — endpoint jest naturalnie idempotentny: to „popchnięcie do
 przodu" maszyny stanów KSeF w Subiekcie (sprawdź poprawność → wygeneruj e-Fakturę → wyślij →
-dociągnij numer). Powtórny POST niczego nie wyśle drugi raz.
+dociągnij numer). Powtórny POST niczego nie wyśle drugi raz. Jeśli po `202` KSeF odrzucił dokument już po
+stronie mostu (w tle), kolejny POST zwraca `422 KSEF_REJECTED` z powodem — dopiero POST po poprawieniu danych
+w Subiekcie ponawia wysyłkę.
 
 **`GET /api/v1/invoices/{id}/ksef`** — czysty odczyt stanu. **UWAGA:** dokument w statusie
 `processing` NIE zaktualizuje się przez GET — numer KSeF dociąga się WYŁĄCZNIE ponownym POST-em.
@@ -443,6 +451,8 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 422 | `UNSUPPORTED_CURRENCY` | most wystawia wyłącznie PLN — `currency` musi być `"PLN"` |
 | 422 | `UNSUPPORTED_VAT_RATE` | `vat_rate` ≠ 23 na wysyłce/pozycji usługowej (EAN=null) — usługi tylko 23%; pozycje towarowe biorą VAT z kartoteki |
 | 422 | `INVALID_DATE` | `issue_date`/`sale_date`/`source_invoice_date` nie w formacie `YYYY-MM-DD` (lub data niemożliwa kalendarzowo) |
+| 422 | `NOTES_TOO_LONG` | `notes` (FS/PZ/MM) lub `reason` (KFS) nie mieści się z doklejanym `ref: <external_reference>` w 500 znakach Uwag Subiekta (`details.max_length`) — skróć (§7.7) |
+| 422 | `INVALID_CORRECTION` | (KFS) linia korekty bez pasującej pozycji FS, dwie linie na tę samą pozycję albo zwrot większy niż ilość na pozycji — popraw linie, nie retry |
 | 404 | `INVOICE_NOT_FOUND` / `RECEIPT_NOT_FOUND` | zły `{id}` |
 | 404 | `SETTLEMENT_NOT_FOUND` | (DELETE) rozliczenie nie istnieje / już cofnięte |
 | 501 | `HB_BOOKING_NOT_SUPPORTED` | (book) księgowanie wyłączone serwerowo (`EnableHbBooking=false`) — księguj w module Bankowość, potem `/settlements` |
@@ -454,7 +464,9 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 422 | `INVALID_BRIDGE_ID` | `{id}` nie w formacie `sub_<n>` |
 | 422 | `SETTLEMENT_NOT_SUPPORTED` | dokument bez rozrachunku (goły PZ/MM) lub rozrachunek na centrum kart/rat — nie retry |
 | 422 | `UNSUPPORTED_DOCUMENT_TYPE` | settlements obsługują tylko FS/FZ; korekty (KFS/KFZ) i inne typy odrzucane — nie retry |
-| 422 | `ALREADY_SETTLED` | rozrachunek już rozliczony (np. faktura gotówkowa) — nie retry |
+| 422 | `ALREADY_SETTLED` | rozrachunek już rozliczony (np. faktura gotówkowa) — nie retry. Retry **tego samego** przelewu po pełnym rozliczeniu daje `409 DUPLICATE_SETTLEMENT` (auto-recovery), nie 422 |
+| 422 | `UNSUPPORTED_BANK_OPERATION_TYPE` | `bank_operation_subiekt_id` nie wskazuje operacji bankowej BP/BW (np. podano `hb_id` zamiast `bank_operation_subiekt_id`, albo id KP/KW) — popraw id |
+| 422 | `INVALID_HB_AMOUNT` | (book) linia wyciągu ma pustą/zerową kwotę w Subiekcie — nie księguj |
 | 422 | `INVALID_AMOUNT` / `AMOUNT_EXCEEDS_REMAINING` | `amount` ≤ 0 lub > pozostało do zapłaty |
 | 422 | `BANK_OPERATION_NOT_FOUND` / `BANK_OPERATION_EXHAUSTED` / `BANK_OPERATION_CONTRACTOR_MISMATCH` | zła/skonsumowana operacja bankowa lub inny kontrahent niż rozrachunek |
 | 422 | `NOT_KSEF_INVOICE` | (ksef) faktura nie-KSeF (np. konsumencka) — nie retry |
@@ -467,6 +479,7 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 502 | `SUBIEKT_QUERY_FAILED` / `BRIDGE_DEGRADED` | Subiekt nie odpowiada — **retry** |
 | 503 | (health) | sesja Sfery martwa — **retry / circuit-breaker** |
 | 503 | `CONTRACTOR_LOOKUP_UNAVAILABLE` | (FS/PZ z NIP-em) most nie mógł sprawdzić kontrahenta po NIP w bazie — dokument NIE powstał, **retry z backoff** (`details.nip`) |
+| 503 | `SFERA_UNAVAILABLE` | sesja Sfery padła w trakcie odczytu dokumentu (np. `GET /invoices/{id}`, weryfikacja replay) — **retry z backoff**; klucz idempotencji zostaje |
 | 500 | `INTERNAL_ERROR` | nieoczekiwany błąd (`details.stack`) — retry ograniczony + alert |
 
 `DUPLICATE_INVOICE.details`:
@@ -541,7 +554,14 @@ za długi symbol kończy się `422 INVALID_CONTRACTOR_SYMBOL` (nie retry). `orig
 **Sanityzuj/przycinaj te pola u siebie** przed wysłaniem.
 
 ### 7.3 Korekta = ujemna ilość pod kluczem `quantity`
-Patrz §3.2 — nie wymyślaj osobnego pola, ujemna wartość w `quantity`.
+Patrz §3.2 — nie wymyślaj osobnego pola, ujemna wartość w `quantity`. Każda linia korekty trafia w **osobną**
+pozycję FS (FS z dwiema pozycjami tego samego EAN → dwie linie korekty); zwrot większy niż ilość na pozycji →
+`422 INVALID_CORRECTION`.
+
+### 7.7 Notatki: `dok_Uwagi` ma 500 znaków
+Most dokleja do `notes`/`reason` ` | ref: <external_reference>` (na tym stoi ochrona przed duplikatami).
+Limit Subiekta to 500 znaków łącznie → `422 NOTES_TOO_LONG`, gdy się nie mieści. Trzymaj `notes` krótkie
+(≤ ~450 znaków przy typowym `external_reference`).
 
 ### 7.4 `is_settled` a forma płatności odroczonej
 Dla płatności **odroczonych** (kredyt kupiecki, „Allegro Pay" itp.) wysyłaj `is_settled=false`.
