@@ -254,6 +254,13 @@ public sealed class InvoicesController : ControllerBase
             await _idempotency.SaveAsync(idempotencyKey, response, ct);
             return StatusCode(StatusCodes.Status201Created, response);
         }
+        catch (InvalidContractorSymbolException ex)
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "INVALID_CONTRACTOR_SYMBOL",
+                Message: ex.Message,
+                Details: new { symbol = ex.Symbol, max_length = ContractorFields.SymbolMaxLength }));
+        }
         catch (MissingProductException ex)
         {
             return UnprocessableEntity(new ErrorResponseDto(

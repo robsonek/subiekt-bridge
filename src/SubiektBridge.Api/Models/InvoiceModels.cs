@@ -58,6 +58,30 @@ public sealed record ContractorDto(
     [property: JsonPropertyName("address")] AddressDto Address
 );
 
+/// <summary>
+/// Walidacja Symbolu kontrahenta - czysta logika (testowalna cross-platform), wołana przez Real i Fake.
+/// </summary>
+public static class ContractorFields
+{
+    /// <summary>kh_Symbol = typ TSymbol = varchar(20) (zrzut schematu 1.88, Types/dbo.TSymbol.sql).</summary>
+    public const int SymbolMaxLength = 20;
+
+    /// <summary>Null gdy Symbol jest poprawny, inaczej komunikat dla klienta.</summary>
+    public static string? ValidateSymbol(string? symbol)
+    {
+        if (string.IsNullOrWhiteSpace(symbol))
+        {
+            return "contractor.symbol jest wymagany, gdy kontrahenta nie da się dopasować po NIP.";
+        }
+        if (symbol.Length > SymbolMaxLength)
+        {
+            return $"contractor.symbol '{symbol}' ma {symbol.Length} znaków - Subiekt przyjmuje maks. " +
+                   $"{SymbolMaxLength} (kh_Symbol varchar({SymbolMaxLength})).";
+        }
+        return null;
+    }
+}
+
 public sealed record AddressDto(
     [property: JsonPropertyName("street")] string Street,
     [property: JsonPropertyName("post_code")] string PostCode,
@@ -68,7 +92,8 @@ public sealed record AddressDto(
 public sealed record LineDto(
     [property: JsonPropertyName("ean")] string? Ean,
     [property: JsonPropertyName("name_fallback")] string NameFallback,
-    [property: JsonPropertyName("quantity")] int Quantity,
+    // decimal (od v0.17.0): towary na kg/m z ułamkami. Całkowite wartości JSON (np. 2) działają jak dotąd.
+    [property: JsonPropertyName("quantity")] decimal Quantity,
     [property: JsonPropertyName("unit")] string Unit,
     [property: JsonPropertyName("unit_price_gross")] decimal UnitPriceGross,
     [property: JsonPropertyName("vat_rate")] decimal VatRate,
@@ -89,7 +114,7 @@ public sealed record LineDto(
 public sealed record CorrectionLineDto(
     [property: JsonPropertyName("ean")] string? Ean,
     [property: JsonPropertyName("name_fallback")] string NameFallback,
-    [property: JsonPropertyName("quantity")] int QuantityChange,
+    [property: JsonPropertyName("quantity")] decimal QuantityChange,
     [property: JsonPropertyName("unit")] string Unit,
     [property: JsonPropertyName("unit_price_gross")] decimal UnitPriceGross,
     [property: JsonPropertyName("vat_rate")] decimal VatRate
@@ -160,7 +185,7 @@ public sealed record TransferRequestDto(
 
 public sealed record TransferLineDto(
     [property: JsonPropertyName("ean")] string Ean,
-    [property: JsonPropertyName("quantity")] int Quantity,
+    [property: JsonPropertyName("quantity")] decimal Quantity,
     [property: JsonPropertyName("unit")] string Unit = "szt."
 );
 
@@ -188,6 +213,29 @@ public sealed record InvoiceQueryRequestDto(
     [property: JsonPropertyName("nip")] string? Nip,                      // NIP kontrahenta
     [property: JsonPropertyName("limit")] int Limit = 200                 // hard cap 1000
 );
+
+/// <summary>
+/// Czysta logika filtra GET /invoices?nip= - wydzielona z windows-only RealSferaSession, by była
+/// testowalna cross-platform. NIP nie jest kolumną dok__Dokument: RealSferaSession zamienia go na kh_Id
+/// (SQL po adr__Ewid) i zawęża OtworzKolekcje klauzulą z <see cref="ContractorClause"/>.
+/// </summary>
+public static class InvoiceQueryFields
+{
+    /// <summary>NIP bez '-' i spacji - ta sama normalizacja co REPLACE po stronie SQL (adr_NIP bywa z kreskami).</summary>
+    public static string NormalizeNip(string nip) => nip.Replace("-", "").Replace(" ", "");
+
+    /// <summary>
+    /// Klauzula WHERE dla kontrahenta (nabywcy) dokumentu sprzedaży: dok_PlatnikId - tę kolumnę bierze
+    /// InsERT we własnym widoku sprzedaży (vwZestDef_DokSprzedazy). NIE dok_OdbiorcaId: na MM to id
+    /// magazynu, więc kh_Id mógłby liczbowo trafić w magazyn. Id to long - bez escapowania.
+    /// Pusta kolekcja -> null (wołający nie powinien wtedy pytać Sfery).
+    /// </summary>
+    public static string? ContractorClause(IReadOnlyCollection<long> contractorIds)
+    {
+        if (contractorIds.Count == 0) return null;
+        return $"dok_PlatnikId IN ({string.Join(",", contractorIds)})";
+    }
+}
 
 /// <summary>Pojedynczy wpis listy FV - wystarczające metadata do dopasowania do Order.</summary>
 public sealed record InvoiceQueryItemDto(
@@ -241,7 +289,10 @@ public sealed record HealthResponseDto(
     [property: JsonPropertyName("sfera_session")] string SferaSession,
     [property: JsonPropertyName("last_invoice_at")] DateTimeOffset? LastInvoiceAt,
     [property: JsonPropertyName("queue_depth")] int QueueDepth,
-    [property: JsonPropertyName("last_error")] string? LastError = null
+    [property: JsonPropertyName("last_error")] string? LastError = null,
+    // "ok" / "down" / "unknown" - własne połączenie SqlClient (raw SQL), niezależne od sesji Sfery.
+    [property: JsonPropertyName("sql_connection")] string SqlConnection = "unknown",
+    [property: JsonPropertyName("sql_error")] string? SqlError = null
 );
 
 // ----------------------------- Raw -----------------------------

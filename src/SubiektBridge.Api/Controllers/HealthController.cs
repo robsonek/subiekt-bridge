@@ -25,17 +25,8 @@ public sealed class HealthController : ControllerBase
         try
         {
             var sfera = await _sfera.HealthAsync(ct);
-
-            var response = new HealthResponseDto(
-                Status: sfera.SessionActive ? "ok" : "degraded",
-                BridgeVersion: BridgeVersion,
-                SubiektVersion: sfera.SubiektVersion,
-                SferaSession: sfera.SessionActive ? "active" : "down",
-                LastInvoiceAt: sfera.LastInvoiceAt,
-                QueueDepth: 0,
-                LastError: sfera.LastError);
-
-            return sfera.SessionActive ? Ok(response) : StatusCode(503, response);
+            var (statusCode, response) = Map(sfera);
+            return StatusCode(statusCode, response);
         }
         catch (Exception ex)
         {
@@ -43,5 +34,25 @@ public sealed class HealthController : ControllerBase
                 Code: "BRIDGE_DEGRADED",
                 Message: ex.Message));
         }
+    }
+
+    /// <summary>
+    /// 503 tylko gdy padła sesja Sfery (wystawianie dokumentów niemożliwe). Padnięty SqlClient =
+    /// "degraded" z 200: dokumenty przez COM dalej idą, ale raw SQL (lookup NIP, /bank-transactions) nie.
+    /// </summary>
+    internal static (int StatusCode, HealthResponseDto Response) Map(SferaHealthDto sfera)
+    {
+        var response = new HealthResponseDto(
+            Status: sfera.SessionActive && sfera.SqlConnectionOk != false ? "ok" : "degraded",
+            BridgeVersion: BridgeVersion,
+            SubiektVersion: sfera.SubiektVersion,
+            SferaSession: sfera.SessionActive ? "active" : "down",
+            LastInvoiceAt: sfera.LastInvoiceAt,
+            QueueDepth: 0,
+            LastError: sfera.LastError,
+            SqlConnection: sfera.SqlConnectionOk switch { true => "ok", false => "down", null => "unknown" },
+            SqlError: sfera.SqlError);
+
+        return (sfera.SessionActive ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable, response);
     }
 }

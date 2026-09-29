@@ -43,7 +43,8 @@ dotnet test SubiektBridge.sln    # xUnit v3 na Microsoft Testing Platform (opt-i
 #  HTTP :8080 + HTTPS :988)
 dotnet run --project src/SubiektBridge.Api
 
-# Self-contained (~46 MB, runtime wbudowany)
+# Lokalny build win-x86 self-contained (~46 MB, runtime wbudowany) - do testów;
+# oficjalne paczki buduje GitHub Actions z taga (patrz niżej)
 ./scripts/publish-win.sh
 
 # Release przez tag (GitHub Actions auto-builduje 2 ZIP-y)
@@ -113,7 +114,7 @@ Invoke-RestMethod -Uri "https://localhost:988/api/v1/admin/update" -Method POST 
 | `GET /api/v1/health` | Sfera session status + Subiekt version |
 | `GET /api/v1/products?ean=` | Lookup towaru |
 | `GET /api/v1/contractors?nip=` | Lookup kontrahenta po NIP |
-| `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | Listing FS/KFS (filtry whitelist) |
+| `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | Listing FS/KFS (filtry whitelist). `nip` (v0.17.0): SQL `adr__Ewid` → `kh_Id` → `dok_PlatnikId IN (...)` (`InvoiceQueryFields`; NIE `dok_OdbiorcaId` — na MM to id magazynu); brak kontrahenta = `[]`. **`dok_NabKodSlownik` NIE istnieje** (wcześniejszy filtr = SQL error) |
 | `GET /api/v1/invoices/{id}` | Single FV metadata |
 | `GET /api/v1/invoices/{id}/pdf` | Retro PDF generation |
 | `GET /api/v1/invoices/open-receivables?min_amount&max_amount&currency&contractor_id&from&to&search&limit` | Otwarte należności (rozrachunki sprzedaży nzf_Typ=39, `WartoscBiezaca>0`) w oknie kwoty — kandydaci do dopasowania z przelewem. Read-only, COM (FinManager.OtworzKolekcje + atrybuty FinDokument); `search` używa też raw SQL do pre-resolve kontrahentów (patrz niżej). `search` (v0.14.0) = fraza case-insensitive z **precedencją scope kontrahenta nad numerem**: SQL `LIKE` po `adr_Nazwa`/`adr_NIP` (`adr__Ewid`, TypAdresu=1) → `kh_Id` → zawężenie `OtworzKolekcje` przez `nzf_IdObiektu IN (...)`; gdy fraza NIE pasuje do żadnego kontrahenta (= numer FV) → pełny skan z tanim number-checkiem przed COM `ResolveContractor`. Perf: eliminuje COM `Kontrahenci.Wczytaj` per wiersz. `OpenReceivableFields.{MatchesSearch,EscapeLikeWildcards}`. **NIE `kh_Nazwa`** — nazwa kontrahenta jest w `adr__Ewid.adr_Nazwa`, nie w `kh__Kontrahent` |
@@ -253,11 +254,20 @@ JOIN adr__Ewid a ON a.adr_IdObiektu = k.kh_Id AND a.adr_TypAdresu = 1
 WHERE a.adr_NIP = @nip
 ```
 
-### Symbol kontrahenta - limit 16 znaków
+### Symbol kontrahenta - limit 20 znaków
 
-`Kontrahenci.Symbol` w Subiekcie ma hard limit 16 znaków + ograniczone znaki
-(litery/cyfry/-/_). Email z `@` `+` lub UUID Allegro przekracza i MSSQL rzuca
-`0x80040E21` (multi-step OLE DB).
+`kh_Symbol` = typ `TSymbol` = **`varchar(20)`** (zrzut schematu, `Types/User-defined Data Types/dbo.TSymbol.sql`; wcześniej
+notowane „16" było błędne). Email z `@` `+` lub UUID Allegro przekracza i MSSQL rzuca `0x80040E21`
+(multi-step OLE DB). Od v0.17.0 `ResolveOrCreateContractor` waliduje Symbol (`ContractorFields.ValidateSymbol`)
+**dopiero po chybionym lookupie po NIP** (z NIP-em Symbol nie idzie do Subiekta) → `InvalidContractorSymbolException`
+→ `422 INVALID_CONTRACTOR_SYMBOL` zamiast 500.
+
+### Ilości `decimal` (od v0.17.0)
+
+`LineDto.Quantity` / `CorrectionLineDto.QuantityChange` / `TransferLineDto.Quantity` są `decimal` (towary
+na kg/m). Do COM idzie `ToComQuantity`: **całkowita jako `int`** (VT_I4 — bajt w bajt jak przed zmianą),
+ułamkowa jako `double`. Odczyt `IloscJm` przy korektach przez `Convert.ToDecimal` (nie `ToInt32`).
+**Ułamki na prawdziwym COM niezweryfikowane** (Subiekt może zaokrąglać wg precyzji jednostki towaru).
 
 ### `LiczonyOdCenBrutto + Rozliczony=true` konwertuje formę płatności
 
@@ -513,9 +523,17 @@ Health endpoint zwraca pełen status:
   "sfera_session": "active",
   "last_invoice_at": "...",
   "queue_depth": 0,
-  "last_error": null
+  "last_error": null,
+  "sql_connection": "ok",
+  "sql_error": null
 }
 ```
+
+`sql_connection` (v0.17.0) = `SELECT 1` przez własny `SqlConnection` (poza STA). **Sesja Sfery (COM) NIE
+używa SqlClienta** — zepsuty SqlClient (hasło/TLS/sterownik) daje `200` + `status: "degraded"` +
+`sql_connection: "down"`; `503` tylko przy padniętej sesji Sfery. SqlClient używają: `/bank-transactions`,
+`/book`, `admin/query`, filtr `nip`, `search` w open-receivables, MM (magazyn dokumentu), lookup NIP przy FS
+(ten połyka błąd → kontrahent zakładany po Symbolu). **`/contractors?nip=` to COM, nie SQL.**
 
 ## Klient Laravel-side
 

@@ -153,4 +153,8 @@ public sealed record SferaHealthDto(
     string SubiektVersion,
     bool SessionActive,
     DateTimeOffset? LastInvoiceAt,
-    string? LastError = null);
+    string? LastError = null,
+    // Własne połączenie SqlClient (raw SQL: /bank-transactions, /book, filtr nip, lookup NIP przy FS...) - niezależne
+    // od sesji COM, więc sesja Sfery może być "active" przy padniętym SqlClient. null = nie sprawdzano.
+    bool? SqlConnectionOk = null,
+    string? SqlError = null);

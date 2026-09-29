@@ -132,7 +132,7 @@ ale `quantity` to **zmiana ilości** — **ujemna** dla zwrotu. ⚠️ Klucz mus
 {
   "ean": "5901234567890",   // string? — jeśli null, dopasowanie po name_fallback
   "name_fallback": "Produkt X",
-  "quantity": 2,
+  "quantity": 2,            // decimal — ułamki dozwolone (towary na kg/m), np. 1.5
   "unit": "szt",
   "unit_price_gross": 49.99,
   "vat_rate": 23,
@@ -148,7 +148,7 @@ Most szuka towaru po `ean` w kartotece Subiekta. **Brak towaru → `422 MISSING_
 ```jsonc
 {
   "is_person": false,
-  "symbol": "NOWYSYS_ABC",   // ⚠️ Subiekt: max 16 znaków, tylko [A-Za-z0-9-_] (§7.2)
+  "symbol": "NOWYSYS_ABC",   // ⚠️ Subiekt: max 20 znaków, zalecane [A-Za-z0-9-_] (§7.2)
   "nip": "1234567890",       // string? — null dla osoby fizycznej
   "name": "Firma Sp. z o.o.",
   "full_name": null,
@@ -224,7 +224,8 @@ wówczas tylko stan, nie ruszając dokumentu.
 ### 3.8 Listingi i pojedynczy dokument
 
 `GET /api/v1/invoices` query: `from` (YYYY-MM-DD), `to`, `type` (`FS`/`KFS`/brak=oba),
-`notes_contains`, `nip`, `limit` (domyślnie 200, max 1000). Zwraca tablicę pozycji z
+`notes_contains`, `nip`, `limit` (domyślnie 200, max 1000). `nip` = dokumenty, na których kontrahent
+o tym NIP jest nabywcą (porównanie bez kresek i spacji); brak takiego kontrahenta = pusta tablica. Zwraca tablicę pozycji z
 `subiekt_id, number, type, issue_date, contractor_*, *_amount, notes`.
 `GET /api/v1/invoices/{id}/pdf` → strumień `application/pdf` (retro generacja).
 
@@ -438,6 +439,7 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 422 | `TOTAL_MISMATCH` | `totals.gross` ≠ Σ(linie+wysyłka) — popraw kwoty (§7.1) |
 | 422 | `MISSING_PRODUCT` | EAN nie istnieje w Subiekcie (`details.missing_eans`) — załóż towar / popraw EAN |
 | 422 | `EMPTY_LINES` | pusta lista pozycji |
+| 422 | `INVALID_CONTRACTOR_SYMBOL` | `contractor.symbol`/`supplier.symbol` pusty lub > 20 znaków, a kontrahenta nie dało się dopasować po NIP (`details.symbol`, `details.max_length`) — skróć symbol (§7.2) |
 | 422 | `UNSUPPORTED_CURRENCY` | most wystawia wyłącznie PLN — `currency` musi być `"PLN"` |
 | 422 | `UNSUPPORTED_VAT_RATE` | `vat_rate` ≠ 23 na wysyłce/pozycji usługowej (EAN=null) — usługi tylko 23%; pozycje towarowe biorą VAT z kartoteki |
 | 422 | `INVALID_DATE` | `issue_date`/`sale_date`/`source_invoice_date` nie w formacie `YYYY-MM-DD` (lub data niemożliwa kalendarzowo) |
@@ -532,8 +534,9 @@ Most sam liczy Σ(qty × unit_price_gross) + shipping i porównuje z `totals.gro
 Licz kwoty tak samo (brutto, ta sama reguła zaokrągleń).
 
 ### 7.2 Limity pól kartoteki Subiekta
-`contractor.symbol`: **max 16 znaków, tylko `[A-Za-z0-9-_]`**. Email z `@`/`+`, UUID Allegro itp.
-przekraczają i Subiekt rzuci kryptyczny błąd. `original_number` (PZ): max 30 znaków.
+`contractor.symbol`: **max 20 znaków** (kolumna `kh_Symbol varchar(20)`), zalecane `[A-Za-z0-9-_]`.
+Email z `@`/`+`, UUID Allegro itp. przekraczają limit. Gdy kontrahenta nie da się dopasować po NIP,
+za długi symbol kończy się `422 INVALID_CONTRACTOR_SYMBOL` (nie retry). `original_number` (PZ): max 30 znaków.
 **Sanityzuj/przycinaj te pola u siebie** przed wysłaniem.
 
 ### 7.3 Korekta = ujemna ilość pod kluczem `quantity`
@@ -567,6 +570,11 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 
 - **Health przed kampanią requestów:** `GET /api/v1/health` → `200` + `sfera_session: "active"`.
   `503` = Subiekt/Sfera offline, wstrzymaj wysyłkę (circuit-breaker).
+  `sql_connection` (`"ok"`/`"down"`) = osobne połączenie mostu do bazy (`/bank-transactions`, `/book`,
+  filtr `nip`, `search` w open-receivables/payables, dopasowanie kontrahenta po NIP przy wystawianiu FS).
+  `200` + `status: "degraded"` + `sql_connection: "down"` = sesja Sfery działa, ale zapytania SQL mostu
+  nie — przyczyna w `sql_error`. Wstrzymaj wtedy wystawianie FS dla firm: bez dopasowania po NIP most
+  założy kontrahenta po `symbol` (ryzyko duplikatu w kartotece).
 - **Pełne, autorytatywne DTO:** `src/SubiektBridge.Api/Models/InvoiceModels.cs`.
 - **Dokładna logika statusów/błędów:** `src/SubiektBridge.Api/Controllers/*.cs`.
 - **Referencyjny istniejący klient** (aplikacja Laravel): klasy

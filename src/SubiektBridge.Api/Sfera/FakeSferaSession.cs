@@ -16,6 +16,7 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<InvoiceResponseDto> CreateInvoiceAsync(InvoiceRequestDto request, CancellationToken ct)
     {
+        ThrowIfSymbolInvalidWithoutNip(request.Contractor);
         var counter = Interlocked.Increment(ref _invoiceCounter);
         var year = DateTimeOffset.UtcNow.Year;
         _lastInvoiceAt = DateTimeOffset.UtcNow;
@@ -82,6 +83,7 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<InvoiceResponseDto> CreateReceiptAsync(ReceiptIssueRequestDto request, CancellationToken ct)
     {
+        ThrowIfSymbolInvalidWithoutNip(request.Supplier);
         var counter = Interlocked.Increment(ref _invoiceCounter);
         var year = DateTimeOffset.UtcNow.Year;
         _lastInvoiceAt = DateTimeOffset.UtcNow;
@@ -242,6 +244,16 @@ public sealed class FakeSferaSession : ISferaSession
         return Task.FromResult(FilterOpenSettlements(all, request));
     }
 
+    // Parytet z RealSferaSession.ResolveOrCreateContractor: bez NIP Real od razu idzie po Symbolu i waliduje
+    // go (z NIP-em waliduje dopiero po chybionym lookupie - Fake nie ma bazy kontrahentow, wiec tego nie odtwarza).
+    private static void ThrowIfSymbolInvalidWithoutNip(ContractorDto contractor)
+    {
+        if (string.IsNullOrEmpty(contractor.Nip) && ContractorFields.ValidateSymbol(contractor.Symbol) is { } error)
+        {
+            throw new InvalidContractorSymbolException(contractor.Symbol, error);
+        }
+    }
+
     // Wspolny filtr in-memory dla open-receivables (FS) i open-payables (FZ) - parytet z RealSferaSession
     // QueryOpenSettlementsCore (rozne strony rozni TYLKO zbior 'all'; semantyka filtra identyczna):
     // PLN-only, okno kwoty (WartoscBiezaca > 0 + min/max), kontrahent, okno daty (from/to), wyszukiwarka
@@ -318,7 +330,8 @@ public sealed class FakeSferaSession : ISferaSession
             SubiektVersion: "FAKE-1.78.0",
             SessionActive: true,
             LastInvoiceAt: _lastInvoiceAt,
-            LastError: null));
+            LastError: null,
+            SqlConnectionOk: true));
     }
 
     public Task<object?> InvokeRawAsync(string method, IReadOnlyList<object?> args, CancellationToken ct)

@@ -96,24 +96,38 @@ public sealed class RealSferaSession : ISferaSession
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         // Cancellation: jeśli token anulowany przed startem - od razu cancel.
-        ct.Register(() => tcs.TrySetCanceled(ct));
+        // Rejestrację zwalniamy po wykonaniu joba, inaczej token trzyma referencję do tcs.
+        var registration = ct.Register(() => tcs.TrySetCanceled(ct));
 
-        _workQueue.Add(() =>
+        try
         {
-            if (ct.IsCancellationRequested)
+            _workQueue.Add(() =>
             {
-                tcs.TrySetCanceled(ct);
-                return;
-            }
-            try
-            {
-                tcs.TrySetResult(func());
-            }
-            catch (Exception ex)
-            {
-                tcs.TrySetException(ex);
-            }
-        }, CancellationToken.None);
+                try
+                {
+                    if (ct.IsCancellationRequested)
+                    {
+                        tcs.TrySetCanceled(ct);
+                        return;
+                    }
+                    tcs.TrySetResult(func());
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+                finally
+                {
+                    registration.Dispose();
+                }
+            }, CancellationToken.None);
+        }
+        catch
+        {
+            // Kolejka zamknieta (Dispose w trakcie) - job nie ruszy, wiec jego finally nie zwolni rejestracji.
+            registration.Dispose();
+            throw;
+        }
 
         return tcs.Task;
     }
@@ -155,7 +169,8 @@ public sealed class RealSferaSession : ISferaSession
         gt.Operator = _options.Operator;
         gt.OperatorHaslo = dodatki.Szyfruj(_options.OperatorPassword);
 
-        // 0 = bez UI, 4 = profil "Subiekt" (ze sprzedażą).
+        // Uruchom(TypDopasowania, TypUruchomienia): 0 = gtaUruchomDopasuj (podłącz się do
+        // działającej instancji na tym serwerze/bazie), 4 = gtaUruchomWTle (bez okna/UI).
         dynamic session = gt.Uruchom(0, 4);
 
         try { _subiektVersion = (string?)session.Aplikacja?.Wersja; } catch { /* opcjonalne */ }
@@ -166,9 +181,9 @@ public sealed class RealSferaSession : ISferaSession
 
     // -------------------------- Health --------------------------
 
-    public Task<SferaHealthDto> HealthAsync(CancellationToken ct)
+    public async Task<SferaHealthDto> HealthAsync(CancellationToken ct)
     {
-        return RunOnStaAsync(() =>
+        var sfera = await RunOnStaAsync(() =>
         {
             try
             {
@@ -183,6 +198,35 @@ public sealed class RealSferaSession : ISferaSession
                 return new SferaHealthDto("unknown", false, _lastInvoiceAt, _lastError);
             }
         }, ct);
+
+        // SQL poza STA: ping nie blokuje kolejki COM (connect timeout do 5 s).
+        var sqlError = await PingSqlAsync(ct);
+        return sfera with { SqlConnectionOk = sqlError is null, SqlError = sqlError };
+    }
+
+    /// <summary>
+    /// SELECT 1 przez własny SqlConnection (te same credentials co raw SQL). /health wcześniej sprawdzał
+    /// tylko sesję COM, więc zepsuty SqlClient (hasło, TLS, sterownik) wychodził dopiero na pierwszym
+    /// /bank-transactions albo cicho przy FS (lookup NIP połyka błąd). Zwraca null gdy OK, inaczej opis błędu.
+    /// </summary>
+    private async Task<string?> PingSqlAsync(CancellationToken ct)
+    {
+        try
+        {
+            var connStr = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(SqlConnStr()) { ConnectTimeout = 5 }.ToString();
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT 1";
+            cmd.CommandTimeout = 5;
+            await cmd.ExecuteScalarAsync(ct);
+            return null;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Health: test polaczenia SQL padl");
+            return $"{ex.GetType().Name}: {ex.Message}";
+        }
     }
 
     // -------------------------- Query (read-only listing) --------------------------
@@ -194,7 +238,20 @@ public sealed class RealSferaSession : ISferaSession
 
     private IReadOnlyList<InvoiceQueryItemDto> QueryInvoicesCore(InvoiceQueryRequestDto request)
     {
-        var filter = BuildInvoiceQueryFilter(request);
+        // NIP nie jest kolumna dok__Dokument (siedzi w adr__Ewid) - najpierw NIP -> kh_Id przez SQL,
+        // potem zawezamy OtworzKolekcje po kontrahencie dokumentu. Brak kontrahenta = pusty wynik.
+        IReadOnlyCollection<long>? nipContractorIds = null;
+        if (!string.IsNullOrWhiteSpace(request.Nip))
+        {
+            nipContractorIds = FindContractorIdsByNip(request.Nip);
+            if (nipContractorIds.Count == 0)
+            {
+                _logger.LogInformation("QueryInvoices: brak kontrahenta z NIP {Nip} - pusty wynik", request.Nip);
+                return Array.Empty<InvoiceQueryItemDto>();
+            }
+        }
+
+        var filter = BuildInvoiceQueryFilter(request, nipContractorIds);
         // Type filter client-side (kolumna SQL nie istnieje dla NumerPelny).
         // Pobieramy wiecej niz limit zeby po filtrze nie zabraklo, hard cap = limit*5.
         var typeFilter = string.IsNullOrWhiteSpace(request.Type)
@@ -212,7 +269,19 @@ public sealed class RealSferaSession : ISferaSession
             filter, sort, limit);
 
         dynamic kolekcja = Session.SuDokumentyManager.OtworzKolekcje(filter, sort);
+        try
+        {
+            return EnumerateInvoiceQueryItems((object)kolekcja, typeFilter, fetchCap, limit);
+        }
+        finally
+        {
+            // Kolekcja to osobny RCW - bez release powolny wyciek na STA (audyt 2026-06-10).
+            try { Marshal.ReleaseComObject(kolekcja); } catch { /* cleanup */ }
+        }
+    }
 
+    private IReadOnlyList<InvoiceQueryItemDto> EnumerateInvoiceQueryItems(dynamic kolekcja, string? typeFilter, int fetchCap, int limit)
+    {
         // Liczba moze byc int albo Variant - cast defensywnie.
         int total;
         try { total = Convert.ToInt32(kolekcja.Liczba); }
@@ -286,7 +355,7 @@ public sealed class RealSferaSession : ISferaSession
     /// strony są escapeowane (single quote -&gt; double single quote), daty walidowane
     /// po regex YYYY-MM-DD.
     /// </summary>
-    private static string BuildInvoiceQueryFilter(InvoiceQueryRequestDto r)
+    private static string BuildInvoiceQueryFilter(InvoiceQueryRequestDto r, IReadOnlyCollection<long>? nipContractorIds)
     {
         var clauses = new List<string>();
 
@@ -301,8 +370,10 @@ public sealed class RealSferaSession : ISferaSession
         if (!string.IsNullOrWhiteSpace(r.NotesContains))
             clauses.Add($"dok_Uwagi LIKE '%{EscapeLikePattern(r.NotesContains)}%'");
 
-        if (!string.IsNullOrWhiteSpace(r.Nip))
-            clauses.Add($"dok_NabKodSlownik = '{EscapeSqlLiteral(r.Nip)}'");
+        // Kolumna dok_NabKodSlownik NIE istnieje (zrzut schematu 1.88) - filtr po NIP szedl w SQL error.
+        // Kontrahent FS/KFS = dok_PlatnikId (szczegoly w InvoiceQueryFields.ContractorClause).
+        if (nipContractorIds is not null && InvoiceQueryFields.ContractorClause(nipContractorIds) is { } contractorClause)
+            clauses.Add(contractorClause);
 
         return clauses.Count == 0 ? "dok_Id > 0" : string.Join(" AND ", clauses);
     }
@@ -314,8 +385,6 @@ public sealed class RealSferaSession : ISferaSession
         !string.IsNullOrWhiteSpace(s)
         && DateTime.TryParseExact(s, "yyyy-MM-dd", CultureInfo.InvariantCulture,
             DateTimeStyles.None, out _);
-
-    private static string EscapeSqlLiteral(string s) => s.Replace("'", "''");
 
     /// <summary>
     /// Escape dla literału użytego we wzorcu LIKE. Poza apostrofem neutralizuje wildcardy
@@ -1739,7 +1808,7 @@ public sealed class RealSferaSession : ISferaSession
                 try
                 {
                     dynamic pos = mm.Pozycje.Dodaj(towar);
-                    pos.IloscJm = line.Quantity;
+                    pos.IloscJm = ToComQuantity(line.Quantity);
                     pos.Jm = string.IsNullOrEmpty(line.Unit) ? "szt." : line.Unit;
                 }
                 finally
@@ -2756,6 +2825,12 @@ public sealed class RealSferaSession : ISferaSession
 
         string symbol = c.Symbol;
 
+        // Dopiero tu (po chybionym NIP) Symbol idzie do Subiekta - za dlugi konczyl sie 0x80040E21 i 500.
+        if (ContractorFields.ValidateSymbol(symbol) is { } symbolError)
+        {
+            throw new InvalidContractorSymbolException(symbol, symbolError);
+        }
+
         // 2. Istnieje po Symbolu: UPDATE danych z biezacego payload (klient mogl sie przeprowadzic
         // / zmienic nazwisko - reuse symbol/Identyfikator, ale ksiegowosc oczekuje
         // aktualnych danych na FV). Update tylko gdy widoczna roznica - mniej write'ow.
@@ -2856,6 +2931,35 @@ public sealed class RealSferaSession : ISferaSession
             _logger.LogWarning(ex, "FindContractorIdByNip({Nip}) failed", nip);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Wszystkie kh_Id z danym NIP (adr__Ewid, TypAdresu=1) - filtr GET /invoices?nip=. NIP porownywany po
+    /// normalizacji (bez '-' i spacji po obu stronach), bo Subiekt trzyma go tak, jak wpisal operator.
+    /// Blad SQL RZUCA (nie pusty zbior): cichy fallback zwrocilby listing bez filtra albo falszywe "brak FV".
+    /// </summary>
+    private IReadOnlyCollection<long> FindContractorIdsByNip(string nip)
+    {
+        var normalized = InvoiceQueryFields.NormalizeNip(nip);
+        var ids = new List<long>();
+        if (normalized.Length == 0) return ids;
+
+        using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT DISTINCT TOP 200 k.kh_Id
+            FROM kh__Kontrahent k
+            JOIN adr__Ewid a ON a.adr_IdObiektu = k.kh_Id AND a.adr_TypAdresu = 1
+            WHERE REPLACE(REPLACE(a.adr_NIP, '-', ''), ' ', '') = @nip";
+        cmd.Parameters.AddWithValue("@nip", normalized);
+        cmd.CommandTimeout = 10;
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            ids.Add(Convert.ToInt64(r.GetValue(0)));
+        }
+        return ids;
     }
 
     /// <summary>
@@ -3024,9 +3128,10 @@ public sealed class RealSferaSession : ISferaSession
         var escaped = EscapeLikePattern(externalReference);
         var filter = $"dok_Uwagi LIKE '%{escaped}%'";
 
+        dynamic? kolekcja = null;
         try
         {
-            dynamic kolekcja = Session.SuDokumentyManager.OtworzKolekcje(filter, "dok_Id DESC");
+            kolekcja = Session.SuDokumentyManager.OtworzKolekcje(filter, "dok_Id DESC");
             int total = Convert.ToInt32(kolekcja.Liczba);
             if (total == 0)
             {
@@ -3080,11 +3185,15 @@ public sealed class RealSferaSession : ISferaSession
             // legitymowane wystawianie FV.
             _logger.LogWarning(ex, "FindExistingInvoiceByReference failed for ref='{Ref}'; assuming no duplicate", externalReference);
         }
+        finally
+        {
+            if (kolekcja is not null) { try { Marshal.ReleaseComObject(kolekcja); } catch { /* cleanup */ } }
+        }
 
         return null;
     }
 
-    private void AddLineToDocument(dynamic document, string? ean, string name, int quantity, string unit, decimal unitPriceGross, int? warehouseId = null, bool useNetPrice = false, decimal vatRate = 23m, decimal? unitPriceNet = null)
+    private void AddLineToDocument(dynamic document, string? ean, string name, decimal quantity, string unit, decimal unitPriceGross, int? warehouseId = null, bool useNetPrice = false, decimal vatRate = 23m, decimal? unitPriceNet = null)
     {
         dynamic position;
         bool isTowar = false;
@@ -3126,7 +3235,7 @@ public sealed class RealSferaSession : ISferaSession
             TrySet(position, "MagazynId", warehouseId.Value);
         }
 
-        position.IloscJm = quantity;
+        position.IloscJm = ToComQuantity(quantity);
         position.Jm = string.IsNullOrEmpty(unit) ? "szt." : unit;
 
         if (useNetPrice)
@@ -3165,7 +3274,7 @@ public sealed class RealSferaSession : ISferaSession
     /// 2. Sequential: jeśli pozCount == 1 i to jedyny call dla tego KFS - bierz pozycję 1
     ///    (1:1 mapping w przypadkach single-item refund)
     /// </summary>
-    private bool TryAdjustExistingPosition(dynamic document, string ean, int deltaQuantity)
+    private bool TryAdjustExistingPosition(dynamic document, string ean, decimal deltaQuantity)
     {
         int pozCount;
         try { pozCount = (int)document.Pozycje.Liczba; }
@@ -3212,8 +3321,8 @@ public sealed class RealSferaSession : ISferaSession
                 // Diagnostyka: jakie property faktycznie sa dostepne na pozycji KFS po NaPodstawie.
                 long? posTowarId = TryReadInt64(poz, "TowarId");
                 long? posIdentyfikator = TryReadInt64(poz, "Identyfikator");
-                int posIloscJm = -1;
-                try { posIloscJm = Convert.ToInt32(poz.IloscJm); } catch { /* ignore */ }
+                decimal posIloscJm = -1m;
+                try { posIloscJm = Convert.ToDecimal(poz.IloscJm); } catch { /* ignore */ }
 
                 long? posTowarIdFromTowar = null;
                 string? posSymbol = null, posEan = null;
@@ -3255,12 +3364,12 @@ public sealed class RealSferaSession : ISferaSession
 
                 if (!match) continue;
 
-                int newQty = posIloscJm >= 0 ? posIloscJm + deltaQuantity : 0;
-                if (newQty < 0) newQty = 0;
+                decimal newQty = posIloscJm >= 0 ? posIloscJm + deltaQuantity : 0m;
+                if (newQty < 0) newQty = 0m;
 
                 try
                 {
-                    SetComProperty(poz, "IloscJmPoKorekcie", newQty);
+                    SetComProperty(poz, "IloscJmPoKorekcie", ToComQuantity(newQty));
                     _logger.LogInformation("  poz[{I}]: IloscJmPoKorekcie ustawione na {NewQty}", i, newQty);
                     return true;
                 }
@@ -3292,7 +3401,7 @@ public sealed class RealSferaSession : ISferaSession
     /// QuantityChange jest ujemne (np. -1 zwraca 1 szt). Wynikowe IloscJmPoKorekcie =
     /// max(currentQty + change, 0).
     /// </summary>
-    private bool TryAdjustServicePosition(dynamic document, string? nameHint, int quantityChange)
+    private bool TryAdjustServicePosition(dynamic document, string? nameHint, decimal quantityChange)
     {
         int pozCount;
         try { pozCount = (int)document.Pozycje.Liczba; }
@@ -3308,7 +3417,7 @@ public sealed class RealSferaSession : ISferaSession
 
         // Faza 1: zbierz wszystkie pozycje uslugowe + ich nazwy. RCW pozostawiamy otwarte do
         // konca metody bo bedziemy potencjalnie ustawiac IloscJmPoKorekcie na trafionej pozycji.
-        var serviceMatches = new List<(int Index, dynamic Position, string? UslJednNazwa, int IloscJm)>();
+        var serviceMatches = new List<(int Index, dynamic Position, string? UslJednNazwa, decimal IloscJm)>();
         for (int i = 1; i <= pozCount; i++)
         {
             dynamic? poz = null;
@@ -3329,8 +3438,8 @@ public sealed class RealSferaSession : ISferaSession
             }
 
             string? uslName = TryReadString(poz, "UslJednNazwa");
-            int iloscJm = -1;
-            try { iloscJm = Convert.ToInt32(poz.IloscJm); } catch { /* ignore */ }
+            decimal iloscJm = -1m;
+            try { iloscJm = Convert.ToDecimal(poz.IloscJm); } catch { /* ignore */ }
 
             _logger.LogInformation(
                 "  poz[{I}] (usluga): UslJednNazwa='{Name}', IloscJm={Qty}", i, uslName ?? "<null>", iloscJm);
@@ -3347,7 +3456,7 @@ public sealed class RealSferaSession : ISferaSession
             }
 
             // Match priority: dokladne (case-insensitive, trim) > prefix > pojedyncza pozycja.
-            (int Index, dynamic Position, string? UslJednNazwa, int IloscJm)? chosen = null;
+            (int Index, dynamic Position, string? UslJednNazwa, decimal IloscJm)? chosen = null;
 
             if (!string.IsNullOrWhiteSpace(nameHint))
             {
@@ -3388,12 +3497,12 @@ public sealed class RealSferaSession : ISferaSession
             }
 
             var target = chosen.Value;
-            int newQty = target.IloscJm >= 0 ? target.IloscJm + quantityChange : 0;
-            if (newQty < 0) newQty = 0;
+            decimal newQty = target.IloscJm >= 0 ? target.IloscJm + quantityChange : 0m;
+            if (newQty < 0) newQty = 0m;
 
             try
             {
-                SetComProperty(target.Position, "IloscJmPoKorekcie", newQty);
+                SetComProperty(target.Position, "IloscJmPoKorekcie", ToComQuantity(newQty));
                 _logger.LogInformation(
                     "  poz[{I}] (usluga '{Name}'): IloscJmPoKorekcie ustawione na {NewQty}",
                     target.Index, target.UslJednNazwa ?? "<null>", newQty);
@@ -3611,6 +3720,15 @@ public sealed class RealSferaSession : ISferaSession
             _logger.LogWarning(ex, "Nie udało się przywrócić magazynu sesji do {Mag}", previous.Value);
         }
     }
+
+    /// <summary>
+    /// Ilość do COM: całkowita jako int (VT_I4 - dokładnie to, co most wysyłał przed v0.17.0, gdy DTO miało
+    /// int), ułamkowa jako double (VT_R8, konwencja mostu dla liczb do Sfery - jak kwoty).
+    /// </summary>
+    private static object ToComQuantity(decimal quantity) =>
+        decimal.IsInteger(quantity) && quantity is >= int.MinValue and <= int.MaxValue
+            ? (int)quantity
+            : (double)quantity;
 
     private static void SetComProperty(object target, string propName, object value)
     {
