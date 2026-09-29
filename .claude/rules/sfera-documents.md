@@ -79,7 +79,7 @@ JOIN adr__Ewid a ON a.adr_IdObiektu = k.kh_Id AND a.adr_TypAdresu = 1
 WHERE a.adr_NIP = @nip
 ```
 
-- **Lookup po NIP przy FS/PZ (`FindContractorIdByNip`) jest FAIL-CLOSED** (po v0.17.0): błąd SQL →
+- **Lookup po NIP przy FS/PZ (`FindContractorIdByNip`) jest FAIL-CLOSED** (od v0.17.1): błąd SQL →
   `ContractorLookupUnavailableException` → `503 CONTRACTOR_LOOKUP_UNAVAILABLE`, dokument nie powstaje.
   Wcześniej błąd był połykany → kontrahent zakładany po Symbolu → duplikat, gdy kartotekę założono
   ręcznie z innym symbolem. Osoby bez NIP-u nie pytają SQL.
