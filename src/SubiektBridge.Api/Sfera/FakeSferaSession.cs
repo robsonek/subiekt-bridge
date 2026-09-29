@@ -16,6 +16,7 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<InvoiceResponseDto> CreateInvoiceAsync(InvoiceRequestDto request, CancellationToken ct)
     {
+        ThrowIfContractorLookupFails(request.Contractor);
         ThrowIfSymbolInvalidWithoutNip(request.Contractor);
         var counter = Interlocked.Increment(ref _invoiceCounter);
         var year = DateTimeOffset.UtcNow.Year;
@@ -83,6 +84,7 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<InvoiceResponseDto> CreateReceiptAsync(ReceiptIssueRequestDto request, CancellationToken ct)
     {
+        ThrowIfContractorLookupFails(request.Supplier);
         ThrowIfSymbolInvalidWithoutNip(request.Supplier);
         var counter = Interlocked.Increment(ref _invoiceCounter);
         var year = DateTimeOffset.UtcNow.Year;
@@ -251,6 +253,18 @@ public sealed class FakeSferaSession : ISferaSession
         if (string.IsNullOrEmpty(contractor.Nip) && ContractorFields.ValidateSymbol(contractor.Symbol) is { } error)
         {
             throw new InvalidContractorSymbolException(contractor.Symbol, error);
+        }
+    }
+
+    // Test-only: symuluje padniety lookup po NIP (RealSferaSession.FindContractorIdByNip -> SQL error).
+    internal bool FailContractorLookupForTests { get; set; }
+
+    // Real pyta SQL tylko dla kontrahenta z NIP-em - tak samo tu.
+    private void ThrowIfContractorLookupFails(ContractorDto contractor)
+    {
+        if (FailContractorLookupForTests && !string.IsNullOrEmpty(contractor.Nip))
+        {
+            throw new ContractorLookupUnavailableException(contractor.Nip, new InvalidOperationException("symulowany blad SQL"));
         }
     }
 

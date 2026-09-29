@@ -466,6 +466,7 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 501 | `NOT_IMPLEMENTED` | operacja nieobsługiwana — zgłoś, nie retry |
 | 502 | `SUBIEKT_QUERY_FAILED` / `BRIDGE_DEGRADED` | Subiekt nie odpowiada — **retry** |
 | 503 | (health) | sesja Sfery martwa — **retry / circuit-breaker** |
+| 503 | `CONTRACTOR_LOOKUP_UNAVAILABLE` | (FS/PZ z NIP-em) most nie mógł sprawdzić kontrahenta po NIP w bazie — dokument NIE powstał, **retry z backoff** (`details.nip`) |
 | 500 | `INTERNAL_ERROR` | nieoczekiwany błąd (`details.stack`) — retry ograniczony + alert |
 
 `DUPLICATE_INVOICE.details`:
@@ -573,8 +574,9 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
   `sql_connection` (`"ok"`/`"down"`) = osobne połączenie mostu do bazy (`/bank-transactions`, `/book`,
   filtr `nip`, `search` w open-receivables/payables, dopasowanie kontrahenta po NIP przy wystawianiu FS).
   `200` + `status: "degraded"` + `sql_connection: "down"` = sesja Sfery działa, ale zapytania SQL mostu
-  nie — przyczyna w `sql_error`. Wstrzymaj wtedy wystawianie FS dla firm: bez dopasowania po NIP most
-  założy kontrahenta po `symbol` (ryzyko duplikatu w kartotece).
+  nie — przyczyna w `sql_error`. Dokumenty dla kontrahenta z NIP-em (firmy) dostaną wtedy
+  `503 CONTRACTOR_LOOKUP_UNAVAILABLE` (most nie zakłada kontrahenta na ślepo) — ponów z backoffem;
+  osoby prywatne (bez NIP) wystawiają się normalnie.
 - **Pełne, autorytatywne DTO:** `src/SubiektBridge.Api/Models/InvoiceModels.cs`.
 - **Dokładna logika statusów/błędów:** `src/SubiektBridge.Api/Controllers/*.cs`.
 - **Referencyjny istniejący klient** (aplikacja Laravel): klasy

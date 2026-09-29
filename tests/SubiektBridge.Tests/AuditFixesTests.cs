@@ -189,6 +189,55 @@ public class AuditFixesTests
         Assert.Equal("INVALID_CONTRACTOR_SYMBOL", Assert.IsType<ErrorResponseDto>(value).Code);
     }
 
+    // ----------------------------- Lookup po NIP fail-closed -----------------------------
+
+    [Fact]
+    public async Task CreateInvoice_NipLookupFails_Returns503_NoDocument()
+    {
+        // Padnięty SQL przy dopasowaniu po NIP: kiedyś most zakładał kontrahenta po Symbolu (duplikat
+        // w kartotece), teraz odmawia - 503 = klient ponawia, dokument nie powstaje.
+        var fake = new FakeSferaSession { FailContractorLookupForTests = true };
+        var controller = new InvoicesController(fake, NewStore(), NullLogger<InvoicesController>.Instance);
+
+        var result = await controller.Create(Invoice(Contractor("FIRMA1", nip: "1111111111")), Guid.NewGuid().ToString(), CancellationToken.None);
+
+        var (status, value) = Unwrap(result.Result);
+        Assert.Equal(503, status);
+        Assert.Equal("CONTRACTOR_LOOKUP_UNAVAILABLE", Assert.IsType<ErrorResponseDto>(value).Code);
+    }
+
+    [Fact]
+    public async Task CreateInvoice_PersonWithoutNip_NotAffectedByLookupFailure()
+    {
+        // Bez NIP-u Real nie pyta SQL - osoby prywatne wystawiają się dalej nawet przy padniętej bazie.
+        var fake = new FakeSferaSession { FailContractorLookupForTests = true };
+        var controller = new InvoicesController(fake, NewStore(), NullLogger<InvoicesController>.Instance);
+
+        var result = await controller.Create(Invoice(Contractor("K1")), Guid.NewGuid().ToString(), CancellationToken.None);
+
+        Assert.Equal(201, Unwrap(result.Result).status);
+    }
+
+    [Fact]
+    public async Task CreateReceipt_NipLookupFails_Returns503()
+    {
+        var fake = new FakeSferaSession { FailContractorLookupForTests = true };
+        var controller = new ReceiptsController(fake, NewStore(), NullLogger<ReceiptsController>.Instance);
+        var request = new ReceiptIssueRequestDto(
+            IssueDate: "",
+            WarehouseSubiektId: null,
+            Supplier: Contractor("DOSTAWCA1", nip: "1111111111"),
+            Lines: new[] { new LineDto("5901234123457", "Towar testowy", 1m, "szt.", 100m, 23m) },
+            ExternalReference: $"test:{Guid.NewGuid():N}",
+            Notes: "");
+
+        var result = await controller.Create(request, Guid.NewGuid().ToString(), CancellationToken.None);
+
+        var (status, value) = Unwrap(result.Result);
+        Assert.Equal(503, status);
+        Assert.Equal("CONTRACTOR_LOOKUP_UNAVAILABLE", Assert.IsType<ErrorResponseDto>(value).Code);
+    }
+
     // ----------------------------- Ilości decimal -----------------------------
 
     [Theory]

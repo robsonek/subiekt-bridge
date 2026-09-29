@@ -207,7 +207,7 @@ public sealed class RealSferaSession : ISferaSession
     /// <summary>
     /// SELECT 1 przez własny SqlConnection (te same credentials co raw SQL). /health wcześniej sprawdzał
     /// tylko sesję COM, więc zepsuty SqlClient (hasło, TLS, sterownik) wychodził dopiero na pierwszym
-    /// /bank-transactions albo cicho przy FS (lookup NIP połyka błąd). Zwraca null gdy OK, inaczej opis błędu.
+    /// /bank-transactions albo przy FS dla firmy (503 CONTRACTOR_LOOKUP_UNAVAILABLE). Zwraca null gdy OK, inaczej opis błędu.
     /// </summary>
     private async Task<string?> PingSqlAsync(CancellationToken ct)
     {
@@ -2897,22 +2897,14 @@ public sealed class RealSferaSession : ISferaSession
     /// Lookup kh_Id po NIP. Subiekt trzyma NIP w adr__Ewid (TypAdresu=1, glowny adres)
     /// JOIN z kh__Kontrahent. Nie ma kolumny NIP w samym kh__Kontrahent.
     /// Zwraca pierwszy match (mogą być duplikaty - klient widzi sam i konsoliduje recznie).
+    /// Blad SQL RZUCA <see cref="ContractorLookupUnavailableException"/> (fail-closed): wczesniej null ->
+    /// kontrahent zakladany po Symbolu -> duplikat, gdy kartoteke zalozono recznie z innym symbolem.
     /// </summary>
     private long? FindContractorIdByNip(string nip)
     {
         try
         {
-            var connStr = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder
-            {
-                DataSource = _options.Server,
-                InitialCatalog = _options.Database,
-                UserID = _options.DbUser,
-                Password = _options.DbPassword,
-                TrustServerCertificate = true,
-                ConnectTimeout = 10,
-            }.ToString();
-
-            using var conn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
+            using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
             conn.Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
@@ -2928,8 +2920,8 @@ public sealed class RealSferaSession : ISferaSession
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "FindContractorIdByNip({Nip}) failed", nip);
-            return null;
+            _logger.LogError(ex, "FindContractorIdByNip({Nip}) failed - dokument NIE powstanie (fail-closed)", nip);
+            throw new ContractorLookupUnavailableException(nip, ex);
         }
     }
 

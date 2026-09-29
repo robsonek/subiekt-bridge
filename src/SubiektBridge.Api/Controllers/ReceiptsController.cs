@@ -170,6 +170,13 @@ public sealed class ReceiptsController : ControllerBase
             await _idempotency.SaveAsync(idempotencyKey, response, ct);
             return StatusCode(StatusCodes.Status201Created, response);
         }
+        catch (ContractorLookupUnavailableException ex)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ErrorResponseDto(
+                Code: "CONTRACTOR_LOOKUP_UNAVAILABLE",
+                Message: ex.Message,
+                Details: new { nip = ex.Nip }));
+        }
         catch (InvalidContractorSymbolException ex)
         {
             return UnprocessableEntity(new ErrorResponseDto(
