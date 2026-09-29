@@ -15,6 +15,10 @@ namespace SubiektBridge.Tests;
 /// Real (COM) jest windows-only - testujemy parytet w Fake + mapowanie HTTP. Unikalne documentSubiektId
 /// (stan Fake jest statyczny).
 /// </summary>
+// Statyczny stan FakeSferaSession (rozliczenia/ksiegowanie) jest resetowany w konstruktorach - klasy
+// dzielace go musza biec sekwencyjnie (xunit rownolegli KLASY; bez kolekcji reset z innej klasy trafial
+// miedzy dwa wywolania testu - flaky na CI).
+[Collection("FakeSferaSharedState")]
 public class ReviewFixesSettlementsTests
 {
     private static SettlementCreateRequestDto Req(long bankOp, decimal amount) => new(bankOp, amount, null);

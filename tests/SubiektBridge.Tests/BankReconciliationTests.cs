@@ -15,6 +15,10 @@ namespace SubiektBridge.Tests;
 /// dopasowanie i decyzje robi Laravel. Testy przeciw FakeSferaSession + kontrolerowi (HTTP).
 /// Real (raw UPDATE hb_Transakcja + COM) testowalny tylko na prod DB (test odwracalny §7 planu).
 /// </summary>
+// Statyczny stan FakeSferaSession (rozliczenia/ksiegowanie) jest resetowany w konstruktorach - klasy
+// dzielace go musza biec sekwencyjnie (xunit rownolegli KLASY; bez kolekcji reset z innej klasy trafial
+// miedzy dwa wywolania testu - flaky na CI).
+[Collection("FakeSferaSharedState")]
 public class BankReconciliationTests
 {
     public BankReconciliationTests() => FakeSferaSession.ResetBankBookingForTests();

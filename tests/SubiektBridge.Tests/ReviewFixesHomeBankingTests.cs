@@ -15,6 +15,10 @@ namespace SubiektBridge.Tests;
 /// `unbooked_only` (bez linii pominiętych), 422 INVALID_HB_AMOUNT, journal /book w SQLite. Ścieżka COM/raw
 /// UPDATE (link-state check przed rollbackiem) jest windows-only - tu testujemy Fake, kontroler i store.
 /// </summary>
+// Statyczny stan FakeSferaSession (rozliczenia/ksiegowanie) jest resetowany w konstruktorach - klasy
+// dzielace go musza biec sekwencyjnie (xunit rownolegli KLASY; bez kolekcji reset z innej klasy trafial
+// miedzy dwa wywolania testu - flaky na CI).
+[Collection("FakeSferaSharedState")]
 public class ReviewFixesHomeBankingTests
 {
     private static IdempotencyStore NewStore()

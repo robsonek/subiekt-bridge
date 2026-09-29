@@ -14,6 +14,10 @@ namespace SubiektBridge.Tests;
 /// (mapowanie HTTP + idempotency). Bez WebApplicationFactory - controller instancjonujemy wprost.
 /// RealSferaSession (COM) jest [SupportedOSPlatform(windows)] i testuje się tylko na Windowsie.
 /// </summary>
+// Statyczny stan FakeSferaSession (rozliczenia/ksiegowanie) jest resetowany w konstruktorach - klasy
+// dzielace go musza biec sekwencyjnie (xunit rownolegli KLASY; bez kolekcji reset z innej klasy trafial
+// miedzy dwa wywolania testu - flaky na CI).
+[Collection("FakeSferaSharedState")]
 public class SettlementsTests
 {
     public SettlementsTests() => FakeSferaSession.ResetSettlementsForTests();
