@@ -71,6 +71,10 @@ filtr `OtworzKolekcje` na surowych kolumnach — sprawdź tam nazwę i semantyk�
 > potwierdzono na prod 29.09; całego zrzutu z 1.89 nie porównywano. Dla NOWEJ kolumny w raw SQL potwierdź ją
 > na prod read-only: `POST /admin/query` z `SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
 > WHERE TABLE_NAME = '<tabela>'`.
+>
+> ⚠️ **Polskie collation bazy:** zakres `[A-Z]` w `LIKE` łapie też polskie litery (Ą, Ł, Ż…). Klasy znaków
+> licz z `COLLATE Latin1_General_BIN` — bez tego `LIKE '%[^A-Za-z0-9_-]%'` na `kh_Symbol` zgubił na prod
+> 3 z 2 859 symboli (29.09).
 
 ```bash
 D="InsERT/Skrypty_SQL_1_88_HF3(1)/Tables"
@@ -260,7 +264,9 @@ WHERE a.adr_NIP = @nip
 
 `kh_Symbol` = typ `TSymbol` = **`varchar(20)`** (zrzut schematu, `Types/User-defined Data Types/dbo.TSymbol.sql`; wcześniej
 notowane „16" było błędne). Email z `@` `+` lub UUID Allegro przekracza i MSSQL rzuca `0x80040E21`
-(multi-step OLE DB). Od v0.17.0 `ResolveOrCreateContractor` waliduje Symbol (`ContractorFields.ValidateSymbol`)
+(multi-step OLE DB). Na prod (29.09) są symbole 20-znakowe — limit potwierdzony; 17% symboli ma spacje
+(także na końcu) i wielkie polskie litery, **`@`/`+` = 0 na 16 688** (czy Subiekt je odrzuca — niesprawdzone;
+test: symbol `TEST@+1` w GUI Subiekta). Walidujemy tylko długość. Od v0.17.0 `ResolveOrCreateContractor` waliduje Symbol (`ContractorFields.ValidateSymbol`)
 **dopiero po chybionym lookupie po NIP** (z NIP-em Symbol nie idzie do Subiekta) → `InvalidContractorSymbolException`
 → `422 INVALID_CONTRACTOR_SYMBOL` zamiast 500.
 
@@ -269,7 +275,9 @@ notowane „16" było błędne). Email z `@` `+` lub UUID Allegro przekracza i M
 `LineDto.Quantity` / `CorrectionLineDto.QuantityChange` / `TransferLineDto.Quantity` są `decimal` (towary
 na kg/m). Do COM idzie `ToComQuantity`: **całkowita jako `int`** (VT_I4 — bajt w bajt jak przed zmianą),
 ułamkowa jako `double`. Odczyt `IloscJm` przy korektach przez `Convert.ToDecimal` (nie `ToInt32`).
-**Ułamki na prawdziwym COM niezweryfikowane** (Subiekt może zaokrąglać wg precyzji jednostki towaru).
+**Ułamki na prawdziwym COM niezweryfikowane** (Subiekt może zaokrąglać wg precyzji jednostki towaru); na prod
+(29.09) 0 z 61 062 pozycji `dok_Pozycja` ma ułamkową ilość (`ob_Ilosc` = `money`). Przed pierwszym towarem na
+kg/m: test przez `POST /transfers` (MM, dokument wewnętrzny) z `quantity: 0.5` i MM zwrotne.
 
 ### `LiczonyOdCenBrutto + Rozliczony=true` konwertuje formę płatności
 
