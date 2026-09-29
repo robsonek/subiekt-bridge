@@ -108,6 +108,7 @@ przykłady tylko z fikcyjnymi danymi (NIP `1111111111`, EAN-y `5901...`), ZERO d
 | `POST` / `GET /api/v1/invoices/{id}/settlements` | Rozlicz FS/FZ z operacją bankową / stan rozliczenia |
 | `DELETE /api/v1/invoices/{id}/settlements/{rozliczenie_id}` | Cofnij rozliczenie |
 | `POST /api/v1/admin/query` | Read-only SQL (whitelist SELECT/WITH) |
+| `GET /api/v1/admin/logs?tail=N&grep=substr` | Tail najnowszego pliku logu (domyślnie 100, max 5000 linii; `grep` = substring, case-insensitive) — zdalna weryfikacja bez RDP |
 | `POST /api/v1/admin/update` | Self-update (detached PowerShell) |
 | `POST /api/v1/sfera/raw` | Escape hatch (whitelist metod w configu) |
 
@@ -164,7 +165,8 @@ grep -rEi "ONEE|onee.pl|WIN-MSSQL|onee-sync|test@allegro" .   # jeśli coś wrac
 
 ## Diagnostyka
 
-Logi: `C:\SubiektBridge\logs\subiekt-bridge-YYYY-MM-DD.log` (Serilog rolling daily). Usługa:
+Logi: `C:\SubiektBridge\logs\subiekt-bridge-yyyyMMdd.log` (Serilog rolling daily, data BEZ kresek, np.
+`subiekt-bridge-20260929.log`); zdalnie: `GET /api/v1/admin/logs?tail=200&grep=KFS`. Usługa:
 `Get-Service SubiektBridge`, `sc.exe qc SubiektBridge`.
 
 ```json

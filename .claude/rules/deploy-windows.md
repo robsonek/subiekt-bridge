@@ -80,6 +80,9 @@ przy pierwszej instalacji).
 
 ## Podgląd logów na serwerze
 
+Bez RDP: `GET /api/v1/admin/logs?tail=200&grep=<fraza>` (X-Bridge-Token) zwraca ogon najnowszego pliku
+`logs\subiekt-bridge-yyyyMMdd.log` (data bez kresek). Na hoście:
+
 ```powershell
 Get-ChildItem C:\SubiektBridge\logs\ | Sort-Object LastWriteTime -Descending |
   Select-Object -First 1 | ForEach-Object { Get-Content $_.FullName -Tail 60 }
