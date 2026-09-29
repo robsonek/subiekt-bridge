@@ -2897,11 +2897,16 @@ public sealed class RealSferaSession : ISferaSession
     /// Lookup kh_Id po NIP. Subiekt trzyma NIP w adr__Ewid (TypAdresu=1, glowny adres)
     /// JOIN z kh__Kontrahent. Nie ma kolumny NIP w samym kh__Kontrahent.
     /// Zwraca pierwszy match (mogą być duplikaty - klient widzi sam i konsoliduje recznie).
+    /// NIP porownywany po normalizacji obu stron (ContractorFields.NormalizeNip + REPLACE w SQL) - jak filtr
+    /// GET /invoices?nip=; wczesniej dosłowne '=' i kartoteka z kreskami dawala duplikat po Symbolu.
     /// Blad SQL RZUCA <see cref="ContractorLookupUnavailableException"/> (fail-closed): wczesniej null ->
     /// kontrahent zakladany po Symbolu -> duplikat, gdy kartoteke zalozono recznie z innym symbolem.
     /// </summary>
     private long? FindContractorIdByNip(string nip)
     {
+        var normalized = ContractorFields.NormalizeNip(nip);
+        if (normalized.Length == 0) return null;
+
         try
         {
             using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
@@ -2911,9 +2916,9 @@ public sealed class RealSferaSession : ISferaSession
                 SELECT TOP 1 k.kh_Id
                 FROM kh__Kontrahent k
                 JOIN adr__Ewid a ON a.adr_IdObiektu = k.kh_Id AND a.adr_TypAdresu = 1
-                WHERE a.adr_NIP = @nip
+                WHERE REPLACE(REPLACE(a.adr_NIP, '-', ''), ' ', '') = @nip
                 ORDER BY k.kh_Id ASC";
-            cmd.Parameters.AddWithValue("@nip", nip);
+            cmd.Parameters.AddWithValue("@nip", normalized);
             cmd.CommandTimeout = 10;
             var result = cmd.ExecuteScalar();
             return result == null || result == DBNull.Value ? null : Convert.ToInt64(result);
@@ -2934,7 +2939,7 @@ public sealed class RealSferaSession : ISferaSession
     /// </summary>
     private IReadOnlyCollection<long> FindContractorIdsByNip(string nip)
     {
-        var normalized = InvoiceQueryFields.NormalizeNip(nip);
+        var normalized = ContractorFields.NormalizeNip(nip);
         var ids = new List<long>();
         if (normalized.Length == 0) return ids;
 

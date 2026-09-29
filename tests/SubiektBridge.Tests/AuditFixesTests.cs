@@ -63,7 +63,7 @@ public class AuditFixesTests
     [InlineData("111 111 11 11", "1111111111")]
     [InlineData("1111111111", "1111111111")]
     public void NormalizeNip_StripsDashesAndSpaces(string raw, string expected)
-        => Assert.Equal(expected, InvoiceQueryFields.NormalizeNip(raw));
+        => Assert.Equal(expected, ContractorFields.NormalizeNip(raw));
 
     [Fact]
     public void ContractorClause_FiltersByBuyer_NotNonexistentColumn()

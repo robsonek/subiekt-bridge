@@ -66,6 +66,14 @@ public static class ContractorFields
     /// <summary>kh_Symbol = typ TSymbol = varchar(20) (zrzut schematu 1.88, Types/dbo.TSymbol.sql).</summary>
     public const int SymbolMaxLength = 20;
 
+    /// <summary>
+    /// NIP bez '-' i spacji. Subiekt trzyma adr_NIP tak, jak wpisał operator (starsze/ręczne kartoteki bywają
+    /// z kreskami), więc KAŻDE porównanie po NIP (dopasowanie kontrahenta przy FS/PZ, filtr GET /invoices?nip=)
+    /// normalizuje obie strony: tę wartość vs REPLACE(REPLACE(adr_NIP,'-',''),' ','') w SQL. Bez tego kartoteka
+    /// z "111-111-11-11" nie pasuje do "1111111111" i most zakłada duplikat po Symbolu.
+    /// </summary>
+    public static string NormalizeNip(string nip) => nip.Replace("-", "").Replace(" ", "");
+
     /// <summary>Null gdy Symbol jest poprawny, inaczej komunikat dla klienta.</summary>
     public static string? ValidateSymbol(string? symbol)
     {
@@ -221,9 +229,6 @@ public sealed record InvoiceQueryRequestDto(
 /// </summary>
 public static class InvoiceQueryFields
 {
-    /// <summary>NIP bez '-' i spacji - ta sama normalizacja co REPLACE po stronie SQL (adr_NIP bywa z kreskami).</summary>
-    public static string NormalizeNip(string nip) => nip.Replace("-", "").Replace(" ", "");
-
     /// <summary>
     /// Klauzula WHERE dla kontrahenta (nabywcy) dokumentu sprzedaży: dok_PlatnikId - tę kolumnę bierze
     /// InsERT we własnym widoku sprzedaży (vwZestDef_DokSprzedazy). NIE dok_OdbiorcaId: na MM to id

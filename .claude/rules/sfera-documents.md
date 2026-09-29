@@ -79,6 +79,10 @@ JOIN adr__Ewid a ON a.adr_IdObiektu = k.kh_Id AND a.adr_TypAdresu = 1
 WHERE a.adr_NIP = @nip
 ```
 
+- **KAŻDE porównanie po NIP normalizuje obie strony** (`ContractorFields.NormalizeNip` = bez `-`/spacji,
+  + `REPLACE(REPLACE(adr_NIP,'-',''),' ','')` w SQL) — dopasowanie przy FS/PZ i filtr `?nip=` tak samo.
+  Starsze/ręczne kartoteki mają NIP z kreskami; dosłowne `=` dawało chybienie → duplikat po Symbolu.
+  Prefiks `PL` NIE jest obcinany (nie wiadomo, czy Subiekt trzyma go w `adr_NIP` — brak osobnej kolumny).
 - **Lookup po NIP przy FS/PZ (`FindContractorIdByNip`) jest FAIL-CLOSED** (od v0.17.1): błąd SQL →
   `ContractorLookupUnavailableException` → `503 CONTRACTOR_LOOKUP_UNAVAILABLE`, dokument nie powstaje.
   Wcześniej błąd był połykany → kontrahent zakładany po Symbolu → duplikat, gdy kartotekę założono
