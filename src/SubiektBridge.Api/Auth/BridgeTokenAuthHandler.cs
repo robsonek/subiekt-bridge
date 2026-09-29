@@ -61,7 +61,7 @@ public sealed class BridgeTokenAuthHandler : AuthenticationHandler<BridgeTokenAu
 
         var identity = new ClaimsIdentity(new[]
         {
-            new Claim(ClaimTypes.Name, "marketplace-manage"),
+            new Claim(ClaimTypes.Name, "bridge-client"),
         }, BridgeTokenAuthOptions.Scheme);
 
         var ticket = new AuthenticationTicket(

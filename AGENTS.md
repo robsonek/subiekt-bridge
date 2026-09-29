@@ -1,8 +1,7 @@
 # SubiektBridge
 
 Most HTTP→COM/Sfera dla Subiekta GT. Stoi na Windowsie obok Subiekta klienta,
-udostępnia HTTPS REST API z którego korzysta Laravel-owy konsument
-(np. marketplace-manage).
+udostępnia HTTPS REST API z którego korzysta Laravel-owy konsument.
 
 ## Architektura
 
@@ -519,7 +518,7 @@ Health endpoint zwraca pełen status:
 
 ## Klient Laravel-side
 
-Reference implementation: https://github.com/robsonek/marketplace-manage (private)
+Reference implementation (prywatny klient Laravel):
 - `app/Modules/Invoicing/Bridge/SubiektBridgeClient.php`
 - `app/Modules/Invoicing/Services/{InvoiceIssuer,ReceiptIssuer,InvoiceCorrectionIssuer}.php`
 - `app/Modules/Invoicing/Jobs/{IssueInvoiceJob,IssueCorrectionJob,IssueReceiptJob}.php`

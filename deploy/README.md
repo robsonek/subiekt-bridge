@@ -106,7 +106,7 @@ Jeśli któryś krok zawiedzie — skrypt pokaże dokładnie co (z kodem wyjści
 
 ## Krok 4 — Konfiguracja Laravela (na serwerze Linux)
 
-Na serwerze marketplace-manage, edytuj `.env`:
+Na serwerze aplikacji Laravel, edytuj `.env`:
 
 ```bash
 SUBIEKT_BRIDGE_URL=https://WIN-HOST-IP:988
@@ -137,8 +137,8 @@ curl -k https://WIN-HOST-IP:988/api/v1/health
 ### b) Z Laravela, wystaw FV testową (przez Tinker):
 
 ```bash
-# Na serwerze z marketplace-manage
-cd /path/to/marketplace-manage
+# Na serwerze z aplikacją Laravel
+cd /path/to/laravel-app
 
 php artisan tinker --execute="
 \$order = App\Modules\Order\Models\Order::find(<ID-zamowienia-testowego>);

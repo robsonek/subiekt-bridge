@@ -3,8 +3,7 @@
 [![Build](https://github.com/robsonek/subiekt-bridge/actions/workflows/build.yml/badge.svg)](https://github.com/robsonek/subiekt-bridge/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/robsonek/subiekt-bridge)](https://github.com/robsonek/subiekt-bridge/releases/latest)
 
-Most HTTP→COM/Sfera dla integracji **Subiekt GT** z aplikacjami Linux/macOS (np. Laravelowy
-[marketplace-manage](https://github.com/robsonek/marketplace-manage)). Wystawia faktury sprzedaży
+Most HTTP→COM/Sfera dla integracji **Subiekt GT** z aplikacjami Linux/macOS. Wystawia faktury sprzedaży
 i korygujące przez oficjalne API Sfery, działa jako Windows Service obok Subiekta.
 
 ## Architektura

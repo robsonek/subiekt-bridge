@@ -54,7 +54,7 @@ jobs:
         run: |
           cat > /tmp/appsettings.Production.json.template <<'JSON'
           {
-            "//token": "Wygeneruj losowy 64+ znaków, ten sam wpisz w marketplace-manage .env jako SUBIEKT_BRIDGE_TOKEN",
+            "//token": "Wygeneruj losowy 64+ znaków, ten sam wpisz w .env klienta Laravel jako SUBIEKT_BRIDGE_TOKEN",
             "Logging": { "LogLevel": { "Default": "Information", "Microsoft.AspNetCore": "Warning" } },
             "Kestrel": {
               "Endpoints": {

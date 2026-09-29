@@ -5,11 +5,11 @@
 > **Topologia tej integracji.**
 > ```
 > Nowy system sprzedażowy  ──HTTPS + X-Bridge-Token──►  SubiektBridge  ──COM/Sfera──►  Subiekt GT
->      (Ty budujesz klienta)         JSON REST            (już istnieje, działa)        (ten sam co dla marketplace-manage)
+>      (Ty budujesz klienta)         JSON REST            (już istnieje, działa)        (ten sam co dla istniejącego klienta)
 > ```
 > Most i Subiekt **już są**. Nie budujesz mostu ani nie dotykasz Subiekta — budujesz
 > **konsumenta** tego API: kod, który woła endpointy, by wystawiać FS, KFS i PZ z nowego
-> systemu. Referencyjny istniejący klient to Laravelowy `marketplace-manage`.
+> systemu. Referencyjny istniejący klient to aplikacja Laravel.
 >
 > Faktury z nowego systemu trafiają do **tego samego** Subiekta co dotychczasowe.
 > Zamówienia są rozłączne (nowe), więc realnej kolizji nie ma — **pod jednym warunkiem**:
@@ -493,7 +493,7 @@ Most ma dwie warstwy zabezpieczeń; obie zależą od tego, **co Ty wyślesz**:
    jeśli nie umieściłeś referencji w `notes` — nie musisz (ale możesz) robić tego sam.
 
 > ⚠️ **Jedyna realna pułapka przy współdzielonym Subiekcie.**
-> Subiekt jest **wspólny** z `marketplace-manage`. Anty-duplikat działa po dopasowaniu
+> Subiekt jest **wspólny** z istniejącym klientem Laravel. Anty-duplikat działa po dopasowaniu
 > tekstu `external_reference` w uwagach. Jeśli oba systemy użyją np. `order:123`, mogą
 > się **przypadkiem zderzyć**. Zamówienia są nowe i rozłączne — ale **żeby tak zostało,
 > prefiksuj `external_reference` identyfikatorem systemu**, np. `nowysystem:order:<id>`.
@@ -569,7 +569,7 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
   `503` = Subiekt/Sfera offline, wstrzymaj wysyłkę (circuit-breaker).
 - **Pełne, autorytatywne DTO:** `src/SubiektBridge.Api/Models/InvoiceModels.cs`.
 - **Dokładna logika statusów/błędów:** `src/SubiektBridge.Api/Controllers/*.cs`.
-- **Referencyjny istniejący klient** (jak to robi marketplace-manage): klasy
+- **Referencyjny istniejący klient** (aplikacja Laravel): klasy
   `SubiektBridgeClient`, `{InvoiceIssuer,ReceiptIssuer,InvoiceCorrectionIssuer}`,
   `{IssueInvoiceJob,IssueCorrectionJob,IssueReceiptJob}` — wzorzec retry/409/idempotency 1:1.
 

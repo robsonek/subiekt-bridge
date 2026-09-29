@@ -13,7 +13,7 @@
     - Sanity check (Subiekt zainstalowany, COM ProgID dziala)
     - Tworzy katalog C:\SubiektBridge\data\ (idempotency SQLite, PDFs)
     - Rejestruje Windows Service przez sc.exe z auto-startem i auto-restart on failure
-    - Otwiera port 988 w Windows Firewall (TYLKO z IP marketplace-manage)
+    - Otwiera port 988 w Windows Firewall (TYLKO z IP klienta Laravel)
     - Uruchamia serwis i weryfikuje /api/v1/health
 
 .PARAMETER InstallDir
@@ -23,7 +23,7 @@
     Nazwa Windows Service. Domyslnie "SubiektBridge".
 
 .PARAMETER LaravelHostIp
-    OPCJONALNE. IP/IPs serwera(ow) marketplace-manage uprawnionych do polaczenia.
+    OPCJONALNE. IP/IPs serwera(ow) klienta Laravel uprawnionych do polaczenia.
     Jesli podasz - skrypt utworzy regule Windows Firewall z whitelista.
     Jesli pominiesz - skrypt NIE TWORZY reguly firewall (zarzadzasz sam, np. router/perimeter firewall).
 
@@ -135,7 +135,7 @@ sc.exe create $ServiceName binPath= $binPathArg `
     obj= "LocalSystem" | Out-Null
 Test-Or-Die ($LASTEXITCODE -eq 0) "sc.exe create"
 
-sc.exe description $ServiceName "HTTP bridge marketplace-manage <-> Subiekt GT (Sfera)" | Out-Null
+sc.exe description $ServiceName "HTTP bridge Laravel <-> Subiekt GT (Sfera)" | Out-Null
 
 # Auto-restart przy crashu: 3 razy z opoznieniem 60 sekund.
 sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
@@ -221,7 +221,7 @@ Write-Host "Logi:" -ForegroundColor Cyan
 Write-Host "  $logsDir\subiekt-bridge-*.log  (Serilog rolling, 30 dni)"
 Write-Host "  Get-WinEvent -LogName Application | Where-Object Source -eq '$ServiceName' | Select -First 20"
 Write-Host ""
-Write-Host "Nastepne kroki w marketplace-manage (.env na serwerze Linux):" -ForegroundColor Cyan
+Write-Host "Nastepne kroki w aplikacji Laravel (.env na serwerze Linux):" -ForegroundColor Cyan
 Write-Host "  SUBIEKT_BRIDGE_URL=https://<IP-tego-Windowsa>:$Port"
 Write-Host "  SUBIEKT_BRIDGE_TOKEN=<ten-sam-token-co-w-appsettings.Production.json>"
 Write-Host "  SUBIEKT_BRIDGE_VERIFY_TLS=false  # dla self-signed cert"
