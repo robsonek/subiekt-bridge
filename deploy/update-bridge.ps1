@@ -111,6 +111,61 @@ function Fail($msg) {
     exit 1
 }
 
+# Procesy Bridge'a uruchomione z $InstallDir (serwis albo zablakana instancja, np. reczne uruchomienie exe).
+# Path bywa $null bez uprawnien do procesu - wtedy wystarcza nazwa exe (jest nasza).
+function Get-BridgeProcesses {
+    $exePath = Join-Path $InstallDir "SubiektBridge.Api.exe"
+    @(Get-Process -Name "SubiektBridge.Api" -ErrorAction SilentlyContinue | Where-Object {
+        (-not $_.Path) -or ($_.Path -eq $exePath)
+    })
+}
+
+# Status 'Stopped' z SCM NIE znaczy, ze proces juz wyszedl - konczy sie jeszcze chwile i trzyma zaladowane
+# DLL-e. Copy-Item trafial wtedy na zablokowany clrjit.dll, skrypt przerywal w polowie wymiany i zostawial
+# zatrzymana usluge z mieszanka starych i nowych plikow. Czekamy na wyjscie procesu, resztki ubijamy;
+# gdy proces nie zniknie - przerywamy PRZED wymiana (instalacja nietknieta).
+function Wait-BridgeProcessesExit($servicePid) {
+    if ($servicePid -and $servicePid -ne 0) {
+        try {
+            Wait-Process -Id $servicePid -Timeout 15 -ErrorAction SilentlyContinue
+        } catch {
+            Write-Host "Proces serwisu (PID $servicePid) nie wyszedl w 15s" -ForegroundColor Yellow
+        }
+    }
+    $left = Get-BridgeProcesses
+    if ($left.Count -eq 0) {
+        return
+    }
+    foreach ($p in $left) {
+        Write-Host "Proces Bridge'a nadal zyje (PID $($p.Id)) - Stop-Process" -ForegroundColor Yellow
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 2
+    $left = Get-BridgeProcesses
+    if ($left.Count -gt 0) {
+        $pids = ($left | ForEach-Object { $_.Id }) -join ', '
+        Fail "Proces Bridge'a nie zakonczyl sie (PID: $pids) - pliki zablokowane, nic nie podmieniono. Ubij go i uruchom ponownie."
+    }
+}
+
+# Kopia z ponawianiem: plik bywa chwile trzymany (zwalniane DLL-e, antywirus skanujacy nowy plik).
+# Copy-Item -Force jest idempotentny - powtorka po czesciowej kopii nadpisuje te same pliki.
+function Copy-WithRetry($source, $destination) {
+    $attempts = 10
+    for ($i = 1; $i -le $attempts; $i++) {
+        try {
+            Copy-Item $source -Destination $destination -Recurse -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($i -eq $attempts) {
+                throw
+            }
+            Write-Host "Kopiowanie $(Split-Path $source -Leaf) nie powiodlo sie ($($_.Exception.Message)) - ponawiam za 3s ($i/$attempts)" -ForegroundColor Yellow
+            Start-Sleep -Seconds 3
+        }
+    }
+}
+
 # ---------------------- TLS 1.2+ + ignore self-signed cert ----------------------
 # PowerShell 5.x (Windows PS) domyslnie uzywa TLS 1.0/1.1, GitHub wymaga 1.2+.
 # Probuj TLS 1.3 jesli dostepne (PS 5.x na starszym .NET moze nie miec Tls13 enum).
@@ -244,6 +299,9 @@ try {
 # ---------------------- Stop service ----------------------
 Write-Section "Stop service"
 
+# PID PRZED stopem - po 'Stopped' czekamy na faktyczne wyjscie procesu (Wait-BridgeProcessesExit).
+$servicePid = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" | Select-Object -ExpandProperty ProcessId
+
 if ($service.Status -ne 'Stopped') {
     # sc.exe stop jest asynchroniczny - nie blokuje jak Stop-Service.
     # Unikamy deadlocka gdy ten skrypt jest child processem serwisu
@@ -257,10 +315,10 @@ if ($service.Status -ne 'Stopped') {
         $tries++
     }
     if ($svc.Status -ne 'Stopped') {
-        Write-Host "sc.exe stop timeout - probuje taskkill" -ForegroundColor Yellow
+        Write-Host "sc.exe stop timeout - probuje Stop-Process" -ForegroundColor Yellow
         $proc = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" | Select-Object -ExpandProperty ProcessId
         if ($proc -and $proc -ne 0) {
-            & taskkill /F /PID $proc 2>$null
+            Stop-Process -Id $proc -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 2
         }
         $svc.Refresh()
@@ -269,6 +327,7 @@ if ($service.Status -ne 'Stopped') {
         }
     }
 }
+Wait-BridgeProcessesExit $servicePid
 Write-Host "OK: service zatrzymany" -ForegroundColor Green
 
 # ---------------------- Backup config ----------------------
@@ -297,8 +356,14 @@ if ($rootContents.Count -eq 1 -and $rootContents[0].PSIsContainer) {
 # Skopiuj wszystko OPROCZ tych co zachowujemy.
 $excludes = @("appsettings.Production.json", "data", "logs", "*.log")
 
-Get-ChildItem -Path $sourceDir -Exclude $excludes | ForEach-Object {
-    Copy-Item $_.FullName -Destination $InstallDir -Recurse -Force
+try {
+    Get-ChildItem -Path $sourceDir -Exclude $excludes | ForEach-Object {
+        Copy-WithRetry $_.FullName $InstallDir
+    }
+} catch {
+    Fail ("Wymiana binariow przerwana: $($_.Exception.Message) - instalacja NIEKOMPLETNA, usluga zatrzymana " +
+        "(appsettings.Production.json i data\ nietkniete). Zamknij proces trzymajacy plik i uruchom ponownie: " +
+        ".\update-bridge.ps1 -Tag $Tag -Force -Detached")
 }
 
 # Przywroc config

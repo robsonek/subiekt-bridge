@@ -81,9 +81,12 @@ Bridge:
 Detached PowerShell (przeżyje śmierć Bridge'a):
   1. Detect latest tag z GitHub Releases API
   2. Download SubiektBridge-X.Y.Z-win-x86-fxdep.zip → %TEMP%
-  3. Stop-Service SubiektBridge
+  3. sc.exe stop SubiektBridge + czekanie na WYJŚCIE procesu (status 'Stopped' ≠ koniec procesu - trzyma DLL-e;
+     2026-10-04 Copy-Item padł na zablokowanym clrjit.dll i zostawił zatrzymaną usługę z mieszanką wersji);
+     resztki SubiektBridge.Api z InstallDir ubijane, gdy nie znikną → przerwanie PRZED wymianą
   4. Backup appsettings.Production.json (in-memory)
-  5. Copy bin do C:\SubiektBridge\ (zachowując data/, logs/)
+  5. Copy bin do C:\SubiektBridge\ (zachowując data/, logs/) - z ponawianiem (10 × 3 s); porażka = komunikat
+     z poleceniem dokończenia: .\update-bridge.ps1 -Tag vX.Y.Z -Force -Detached
   6. Restore appsettings
   7. Start-Service SubiektBridge
   8. Health check
