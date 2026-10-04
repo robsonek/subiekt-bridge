@@ -10,12 +10,19 @@ namespace SubiektBridge.Api.Idempotency;
 /// Powtórny POST z tym samym <c>Idempotency-Key</c> dostaje to samo body co pierwszy
 /// - zapobiega podwójnemu wystawieniu FV przy retry po stronie Laravela.
 ///
-/// TTL z BridgeOptions (domyślnie 30 dni) - po przekroczeniu wpis jest ignorowany
-/// (cron czyszczący dorobimy w Hosted Service później).
+/// TTL z BridgeOptions (domyślnie 30 dni) - po przekroczeniu wpis jest ignorowany przy odczycie,
+/// a <see cref="IdempotencyCleanupService"/> raz na dobę go kasuje (<see cref="PurgeExpiredAsync"/>).
 /// </summary>
 public sealed class IdempotencyStore
 {
+    /// <summary>
+    /// Wierszy kasowanych w jednej instrukcji - krótkie blokady zapisu, żeby równoległy SaveAsync po wystawionej
+    /// FV nie czekał na usunięcie całego zaległego ogona (pierwszy przebieg po wdrożeniu: miesiące wpisów z PDF).
+    /// </summary>
+    internal const int PurgeBatchSize = 200;
+
     private readonly string _connectionString;
+    private readonly string _fullPath;
     private readonly ILogger<IdempotencyStore> _logger;
     private readonly TimeSpan _ttl;
 
@@ -36,6 +43,7 @@ public sealed class IdempotencyStore
         }
 
         _connectionString = $"Data Source={path}";
+        _fullPath = fullPath;
         _logger = logger;
         _ttl = TimeSpan.FromDays(options.IdempotencyTtlDays);
         EnsureSchema();
@@ -128,6 +136,93 @@ public sealed class IdempotencyStore
         cmd.Parameters.AddWithValue("$created", DateTimeOffset.UtcNow.ToString("O"));
 
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // ----------------------------- Retencja (IdempotencyCleanupService) -----------------------------
+    //
+    // Każda FS/KFS zostawia tu odpowiedź z pełnym pdf_base64 (dziesiątki KB). Bez kasowania plik rósł bez końca
+    // (~400 MB po 5 miesiącach) - przy małym dysku hosta kończyło się "SQLite Error 13: database or disk is full".
+
+    /// <summary>
+    /// Kasuje wpisy starsze niż TTL - te same, które <see cref="TryGetAsync{TResponse}"/> już ignoruje, więc dla
+    /// klienta nic się nie zmienia. Tylko tabela idempotency: pending_bookings to journal /book (wpis = niedomknięty
+    /// BP do dokończenia przy retry), nie cache - nie ma TTL.
+    /// </summary>
+    /// <returns>Liczba usuniętych wpisów.</returns>
+    public async Task<int> PurgeExpiredAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        // TTL <= 0 to błąd konfiguracji, nie polecenie "skasuj wszystko" - nie kasujemy nic.
+        if (_ttl <= TimeSpan.Zero)
+        {
+            return 0;
+        }
+
+        // created_at zapisuje SaveAsync jako UtcNow.ToString("O") - stała szerokość, zawsze +00:00, więc porównanie
+        // tekstowe jest chronologiczne (i idzie po idx_idempotency_created). Granica jak w TryGetAsync: wiek > TTL.
+        var cutoff = (now.ToUniversalTime() - _ttl).ToString("O");
+
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+
+        var total = 0;
+        int deleted;
+        do
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                DELETE FROM idempotency WHERE key IN (
+                    SELECT key FROM idempotency WHERE created_at < $cutoff LIMIT $batch)
+                """;
+            cmd.Parameters.AddWithValue("$cutoff", cutoff);
+            cmd.Parameters.AddWithValue("$batch", PurgeBatchSize);
+            deleted = await cmd.ExecuteNonQueryAsync(ct);
+            total += deleted;
+        }
+        while (deleted == PurgeBatchSize);
+
+        return total;
+    }
+
+    /// <summary>
+    /// VACUUM tylko gdy co najmniej 1/4 stron pliku leży na freeliście. W stanie ustalonym dobowy purge zwalnia
+    /// ~1/TTL pliku, a nowe wpisy zajmują te strony ponownie - plik przestaje rosnąć bez VACUUM. VACUUM jest
+    /// potrzebny po pierwszym purge zaległego ogona (albo po dłuższej przerwie w działaniu usługi).
+    /// Przepisuje całą bazę pod wyłączną blokadą; równoległe zapytania czekają (Microsoft.Data.Sqlite ponawia
+    /// SQLITE_BUSY do CommandTimeout, domyślnie 30 s). Potrzebuje wolnego miejsca ~ rozmiar żywych danych -
+    /// przy pełnym dysku padnie bez szkody (VACUUM jest atomowy), a strony z freelisty i tak są ponownie używane.
+    /// </summary>
+    /// <returns>True, gdy VACUUM został wykonany.</returns>
+    public async Task<bool> VacuumIfFragmentedAsync(CancellationToken ct)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+
+        var freePages = await PragmaLongAsync(conn, "freelist_count", ct);
+        var totalPages = await PragmaLongAsync(conn, "page_count", ct);
+        if (freePages == 0 || freePages < totalPages / 4)
+        {
+            return false;
+        }
+
+        var sizeBefore = new FileInfo(_fullPath).Length;
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "VACUUM";
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        var sizeAfter = new FileInfo(_fullPath).Length;
+
+        _logger.LogInformation(
+            "Idempotency store VACUUM: {FreePages}/{TotalPages} stron wolnych, plik {BeforeMb:F1} MB -> {AfterMb:F1} MB",
+            freePages, totalPages, sizeBefore / 1048576.0, sizeAfter / 1048576.0);
+        return true;
+    }
+
+    private static async Task<long> PragmaLongAsync(SqliteConnection conn, string pragma, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"PRAGMA {pragma}";
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
     }
 
     // ----------------------------- Journal ksiegowania /book (write-ahead) -----------------------------

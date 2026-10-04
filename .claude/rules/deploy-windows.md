@@ -48,6 +48,15 @@ localhost + 127.0.0.1 + ::1. Klient (Laravel) używa `verify=false`.
 przed `conn.Open()` — SQLite tworzy plik bazy auto, ale **nie folder rodzica**.
 Bez tego Error 14 "unable to open database file".
 
+## Retencja `idempotency.db`
+
+Każda FS/KFS zapisuje w cache odpowiedź z pełnym `pdf_base64` (dziesiątki KB). Do v0.19.0 TTL działał tylko przy
+odczycie — plik rósł bez końca (~400 MB po 5 miesiącach; pełny dysk hosta = `SQLite Error 13: database or disk is
+full`). `IdempotencyCleanupService` (start +5 min, potem co 24 h) kasuje wpisy starsze niż TTL partiami po 200 i robi
+`VACUUM` tylko przy ≥ 1/4 wolnych stron (pierwszy przebieg po wdrożeniu; potem strony z freelisty są ponownie
+używane i plik stoi na ~TTL dni wpisów). `pending_bookings` (journal `/book`) nie ma TTL — nigdy nie jest czyszczony
+automatycznie i **nie wolno kasować całego pliku** przy wpisie w tej tabeli (retry stworzyłby drugi BP).
+
 ## Logi - absolute path
 
 Windows Service ma `WorkingDirectory=C:\Windows\System32` (default). Relative

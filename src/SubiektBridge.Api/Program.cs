@@ -72,6 +72,8 @@ builder.Services.AddSingleton<ISferaSession>(sp =>
 });
 
 builder.Services.AddSingleton<IdempotencyStore>();
+// Retencja cache: kasuje wpisy starsze niż TTL (każda FS/KFS trzyma tam pełny PDF - bez tego plik rósł bez końca).
+builder.Services.AddHostedService<IdempotencyCleanupService>();
 
 // Autoryzacja po X-Bridge-Token.
 builder.Services.AddAuthentication(BridgeTokenAuthOptions.Scheme)
