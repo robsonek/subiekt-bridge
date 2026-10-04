@@ -15,7 +15,15 @@ public sealed class BridgeOptions
 
     public string IdempotencyStorePath { get; init; } = "idempotency.db";
 
-    public int IdempotencyTtlDays { get; init; } = 30;
+    /// <summary>
+    /// Retencja cache idempotency (dni). Nie krótsza niż okno automatycznych ponowień klienta tym samym kluczem
+    /// (u klienta Laravel: 14 dni) - replay z cache przy padniętym Subiekcie daje 503, a anti-duplicate po
+    /// external_reference jest fail-open. Później ponowienie trafia w anti-duplicate (409 DUPLICATE_* tylko przy
+    /// udanym wykryciu; błąd skanu przepuszcza zapis).
+    /// Celowo NIE ma tego klucza w szablonie appsettings.Production.json (self-update go zachowuje - przypięta
+    /// wartość blokowałaby zmianę domyślnej).
+    /// </summary>
+    public int IdempotencyTtlDays { get; init; } = 14;
 
     /// <summary>
     /// Sciezka do install dir (default: dir w ktorym uruchomil sie SubiektBridge.Api.exe).

@@ -21,6 +21,11 @@ public sealed class IdempotencyCleanupService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Efektywny TTL w logu - zdalna weryfikacja (GET /admin/logs?grep=Idempotency), czy konfiguracja
+        // produkcyjna nie przypina starej wartości.
+        _logger.LogInformation("Idempotency cleanup: TTL {TtlDays} dni, pierwszy przebieg za {DelayMinutes} min",
+            _store.Ttl.TotalDays, StartupDelay.TotalMinutes);
+
         await Task.Delay(StartupDelay, stoppingToken);
 
         using var timer = new PeriodicTimer(Interval);

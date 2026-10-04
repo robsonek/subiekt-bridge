@@ -132,7 +132,7 @@ Wszystkie wymagają `X-Bridge-Token: <secret>`. Mutujące POST (`/invoices`, `/c
 
 ## Idempotency (3 warstwy)
 
-1. **`Idempotency-Key`** — SQLite cache (TTL 30 dni; wpisy starsze kasuje `IdempotencyCleanupService` raz na dobę
+1. **`Idempotency-Key`** — SQLite cache (TTL 14 dni = okno automatycznych ponowień klienta; wpisy starsze kasuje `IdempotencyCleanupService` raz na dobę
    — retencja i `VACUUM`: `deploy-windows.md`). Replay zwraca zapisany response, ale najpierw weryfikuje,
    że cached `subiekt_id` wciąż istnieje (anulowana FV w Subiekcie → invalidate + nowy request). Do cache trafia
    TYLKO sukces — `503 SUBIEKT_UNAVAILABLE` z preflightu sesji (Subiekt offline przed pierwszym zapisem) nie jest

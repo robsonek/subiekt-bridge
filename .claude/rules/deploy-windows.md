@@ -57,6 +57,11 @@ full`). `IdempotencyCleanupService` (start +5 min, potem co 24 h) kasuje wpisy s
 używane i plik stoi na ~TTL dni wpisów). `pending_bookings` (journal `/book`) nie ma TTL — nigdy nie jest czyszczony
 automatycznie i **nie wolno kasować całego pliku** przy wpisie w tej tabeli (retry stworzyłby drugi BP).
 
+TTL (domyślnie 14 dni od v0.19.1, wcześniej 30): **szablon `appsettings.Production.json` do v0.19.0 przypinał
+`"IdempotencyTtlDays": 30`**, a self-update zachowuje ten plik — w instalacji z takiego szablonu zmień ręcznie na 14
+(albo usuń klucz, pilnując przecinka w JSON) i zrestartuj usługę. Efektywny TTL loguje start usługi:
+`GET /api/v1/admin/logs?grep=Idempotency%20cleanup`.
+
 ## Logi - absolute path
 
 Windows Service ma `WorkingDirectory=C:\Windows\System32` (default). Relative

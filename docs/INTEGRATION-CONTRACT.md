@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.19.0**. Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
+> **Dotyczy:** SubiektBridge **v0.19.1**. Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -520,10 +520,14 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 
 Most ma dwie warstwy zabezpieczeń; obie zależą od tego, **co Ty wyślesz**:
 
-1. **`Idempotency-Key` (header)** — most cache'uje `klucz → response` (TTL 30 dni).
-   Ten sam klucz przy retry = ten sam wynik, bez dublowania. **Generuj jeden stabilny
-   klucz na (zamówienie × typ)** i powtarzaj go przy ponowieniu. (Most dodatkowo weryfikuje,
-   że dokument z cache nadal istnieje w Subiekcie — jeśli ktoś go skasował, potraktuje request jako nowy.)
+1. **`Idempotency-Key` (header)** — most cache'uje `klucz → response` (TTL 14 dni).
+   Ten sam klucz przy retry = ten sam wynik, bez dublowania. **Automatyczne ponowienia mieść w 14 dniach**
+   od pierwszej próby — później cache już nie odpowie, a ponowienie trafi w warstwę 2. Warstwa 2 daje `409` tylko
+   przy **udanym** wykryciu duplikatu (błąd wyszukiwania w Subiekcie nie blokuje zapisu — fail-open), więc późne,
+   ręczne ponowienie poprzedź sprawdzeniem, czy dokument już nie istnieje (np.
+   `GET /invoices?notes_contains=<external_reference>`). **Generuj jeden stabilny klucz na (zamówienie × typ)**
+   i powtarzaj go przy ponowieniu. (Most dodatkowo weryfikuje, że dokument z cache nadal istnieje w Subiekcie —
+   jeśli ktoś go skasował, potraktuje request jako nowy.)
 
 2. **Anty-duplikat w Subiekcie po `external_reference`** — przed utworzeniem most szuka
    dokumentu z tym samym `external_reference` (w polu uwag). Trafienie → `409`.
@@ -633,6 +637,11 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
+
+### v0.19.1 (2026-10-04)
+- **TTL cache `Idempotency-Key` skrócony z 30 do 14 dni** (§5), wygasłe wpisy most teraz kasuje (wcześniej tylko
+  ignorował). Ponowienie tym samym kluczem po 14 dniach nie dostanie replayu — trafi w anti-duplicate, który
+  jest fail-open (`409 DUPLICATE_*` tylko przy udanym wykryciu; późne ponowienie poprzedź sprawdzeniem, §5).
 
 ### v0.19.0 (2026-09-29)
 - **Zasada „kod = dowód o skutku”** (§4): kody z listy retry (`SUBIEKT_UNAVAILABLE`, `SUBIEKT_QUERY_FAILED`,

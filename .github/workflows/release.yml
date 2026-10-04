@@ -71,8 +71,7 @@ jobs:
               "Token": "WSTAW-LOSOWY-64-ZNAKOWY-TOKEN",
               "UseFakeSfera": false,
               "AllowedRawSferaMethods": [],
-              "IdempotencyStorePath": "C:\\SubiektBridge\\data\\idempotency.db",
-              "IdempotencyTtlDays": 30
+              "IdempotencyStorePath": "C:\\SubiektBridge\\data\\idempotency.db"
             },
             "Subiekt": {
               "Product": 1,

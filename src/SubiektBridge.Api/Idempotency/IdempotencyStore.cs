@@ -10,7 +10,7 @@ namespace SubiektBridge.Api.Idempotency;
 /// Powtórny POST z tym samym <c>Idempotency-Key</c> dostaje to samo body co pierwszy
 /// - zapobiega podwójnemu wystawieniu FV przy retry po stronie Laravela.
 ///
-/// TTL z BridgeOptions (domyślnie 30 dni) - po przekroczeniu wpis jest ignorowany przy odczycie,
+/// TTL z BridgeOptions (domyślnie 14 dni) - po przekroczeniu wpis jest ignorowany przy odczycie,
 /// a <see cref="IdempotencyCleanupService"/> raz na dobę go kasuje (<see cref="PurgeExpiredAsync"/>).
 /// </summary>
 public sealed class IdempotencyStore
@@ -25,6 +25,9 @@ public sealed class IdempotencyStore
     private readonly string _fullPath;
     private readonly ILogger<IdempotencyStore> _logger;
     private readonly TimeSpan _ttl;
+
+    /// <summary>Efektywny TTL (appsettings.Production.json nadpisuje domyślny) - logowany przez cleanup.</summary>
+    public TimeSpan Ttl => _ttl;
 
     public IdempotencyStore(BridgeOptions options, ILogger<IdempotencyStore> logger)
     {
