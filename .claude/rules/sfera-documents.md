@@ -69,7 +69,12 @@ Rekordy z `dok__Dokument` po anulacji wciąż w wynikach `OtworzKolekcje(filtr)`
 Anti-duplicate check **musi weryfikować** że `WczytajDokument(id)` zwraca obiekt
 przed traktowaniem jako duplikat. Kolekcję zwalniaj (`Marshal.ReleaseComObject`) w `finally`
 po enumeracji — osobny RCW, bez tego powolny wyciek na STA. Kolekcje Sfery są **1-indeksowane**
-(`Element(1..Liczba)`).
+(`Element(1..Liczba)`). **`OtworzKolekcje` zwraca TYLKO dokumenty z magazynu kontekstu sesji** (`Subiekt.MagazynId`;
+CHM `SuDokumentyManager_OtworzKolekcje`) — skan po wszystkich magazynach wymaga SQL po `dok__Dokument`.
+**Duch ≠ wyjątek:** „dokument nie istnieje” tylko gdy `dok_Status = 2` (`gtaSubiektDokumentStatusAnulowany`); semantykę
+statusów czytaj z CHM `SubiektDokumentStatusEnum.htm`, nie ze skrótu `MS_Description` zrzutu — `0` to „wycofany SKUTEK
+MAGAZYNOWY” (dokument istnieje), `3` odłożony skutek, `4` MM wywołany na źródłowym. Wyjątek `WczytajDokument` dla
+dokumentu o innym statusie to awaria (sonda sesji → `SferaUnavailableException` / `DuplicateCheckUnavailableException`), nie duch.
 
 ## Anti-duplicate po `external_reference` — token i `dok_Typ` (od v0.18.0)
 
@@ -185,8 +190,23 @@ opcji `Subiekt:Server/Database/DbUser/DbPassword` (te same credentials co Sfera)
 
 ## Anti-duplicate w Subiekcie (warstwa 2 idempotencji)
 
-Przed `DodajFS`/`DodajKFS`/`DodajPZ`/`DodajMM` most szuka `dok_Uwagi LIKE '%external_reference%'`
-+ verify przez `WczytajDokument`. Match → 409 `DUPLICATE_INVOICE`/`DUPLICATE_RECEIPT`/`DUPLICATE_TRANSFER`
-z `existing_subiekt_id` w details. Bridge SAM dokleja `| ref: <external_reference>` do Uwag dokumentu
-(`BuildUwagiWithReference`) — warstwa nie zależy od tego, czy klient wkleił ref do notes. Skan jest
-fail-open (błąd skanu = brak duplikatu — lepszy ewentualny duplikat niż zablokowane wystawianie FS).
+Przed `DodajFS`/`DodajKFS`/`DodajPZ`/`DodajMM` most szuka dokumentu z `external_reference` w Uwagach. Match → 409
+`DUPLICATE_INVOICE`/`DUPLICATE_RECEIPT`/`DUPLICATE_TRANSFER` z `existing_subiekt_id` w details. Bridge SAM dokleja
+`| ref: <external_reference>` do Uwag dokumentu (`BuildUwagiWithReference`) — warstwa nie zależy od tego, czy klient
+wkleił ref do notes.
+
+**Od v0.20.0 skan jest FAIL-CLOSED i idzie przez SQL** (`FindExistingDocumentByReference` → rdzeń `DuplicateScan.Find`
+na delegatach, testowalny bez COM; spec `docs/superpowers/specs/2026-10-10-booking-journal-first-dupscan-fail-closed-design.md`):
+- prefiltr read-only SQL `SELECT dok_Id, dok_NrPelny, dok_Uwagi, dok_Status FROM dok__Dokument WHERE dok_Typ=@typ AND dok_Uwagi
+  LIKE @pat ORDER BY dok_Id DESC` (własny `SqlConnection`, escapowanie nawiasowe jak `search`, bez `TOP` — ref `sys:order:1`
+  jest podciągiem `sys:order:1xxx`), czytany strumieniowo; widzi WSZYSTKIE magazyny (COM `OtworzKolekcje` tylko magazyn sesji,
+  a skan idzie PRZED `SetSessionWarehouse` — do v0.19.x dokument z innego magazynu nie był wykrywany);
+- token-check `UwagiFields.ContainsReferenceToken` (LIKE to podciąg), duch WYŁĄCZNIE `dok_Status = 2`, potwierdzenie COM
+  `WczytajDokument` (wyjątek: martwa sesja → `SferaUnavailableException` 503 `SUBIEKT_UNAVAILABLE`; żywa albo „nie wczytał” →
+  `DuplicateCheckUnavailableException` 503 `DUPLICATE_CHECK_UNAVAILABLE`); stop na pierwszym potwierdzonym;
+- budżet całego skanu `DuplicateScan.Deadline` (20 s, Stopwatch) sprawdzany PRZED każdym kandydatem i PO enumeracji przed
+  `null` — przekroczenie = 503, nigdy częściowy „brak duplikatu”; `CommandTimeout` ogranicza tylko pojedynczy `Read`;
+- żadnego `catch → null`; pusty ref nie dociera do skanu (`UwagiFields.ValidateExternalReference` w kontrolerach PRZED
+  `ValidateNotes` → `422 INVALID_EXTERNAL_REFERENCE`, limit 495 = 500 − `"ref: "`; dłuższy ref `Build` obcinał i skan go nie znajdował).
+Konsekwencja: każde wystawienie FS/KFS/PZ/MM zależy od SqlClienta (`/health` `sql_connection`). Przed wydaniem potwierdź
+`dok_Status`/`dok_Uwagi` na prod read-only (`INFORMATION_SCHEMA.COLUMNS`).

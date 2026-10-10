@@ -137,8 +137,11 @@ Wszystkie wymagają `X-Bridge-Token: <secret>`. Mutujące POST (`/invoices`, `/c
    że cached `subiekt_id` wciąż istnieje (anulowana FV w Subiekcie → invalidate + nowy request). Do cache trafia
    TYLKO sukces — `503 SUBIEKT_UNAVAILABLE` z preflightu sesji (Subiekt offline przed pierwszym zapisem) nie jest
    zapisywane, retry tym samym kluczem wykonuje pełny flow.
-2. **Anti-duplicate w Subiekcie** — po `external_reference` w `dok_Uwagi` → 409 `DUPLICATE_*` (szczegóły:
-   `sfera-documents.md`; rozliczenia fail-closed po stanie: `settlements.md`).
+2. **Anti-duplicate w Subiekcie** — po `external_reference` w `dok_Uwagi` → 409 `DUPLICATE_*`. Od v0.20.0 **fail-closed**:
+   prefiltr read-only SQL po `dok__Dokument` (wszystkie magazyny; COM `OtworzKolekcje` widzi tylko magazyn sesji) + token-check
+   + duch wyłącznie `dok_Status = 2` + potwierdzenie COM; awaria skanu → `503 DUPLICATE_CHECK_UNAVAILABLE` (nic nie zapisano,
+   retry tym samym kluczem), pusty/za długi ref → `422 INVALID_EXTERNAL_REFERENCE` (szczegóły: `sfera-documents.md`;
+   rozliczenia fail-closed po stanie: `settlements.md`).
 3. **Klient (Laravel)** — `UNIQUE(order_id, type)` w DB + `ShouldBeUnique` na jobie.
 
 ## Deployment na Windowsie klienta
@@ -179,7 +182,9 @@ Logi: `C:\SubiektBridge\logs\subiekt-bridge-yyyyMMdd.log` (Serilog rolling daily
 zepsuty SqlClient daje `200` + `status: "degraded"` + `sql_connection: "down"`; `503` tylko przy padniętej sesji
 Sfery. `sfera_session` jest od v0.19.0 sprawdzane sondą (`IsSessionAlive`: `OtworzKolekcje("dok_Id=-1")`, runda do
 SQL), nie samą obecnością obiektu sesji — zamknięty Subiekt daje `503` od razu, martwa sesja jest resetowana. SqlClient używają: `/bank-transactions`, `/book`, `admin/query`, filtr `nip`, `search` w open-receivables,
-MM (magazyn dokumentu) i lookup NIP przy FS/PZ (fail-closed → `503 CONTRACTOR_LOOKUP_UNAVAILABLE`).
+lookup NIP przy FS/PZ (fail-closed → `503 CONTRACTOR_LOOKUP_UNAVAILABLE`), magazyn FS źródłowej przy KFS i — od v0.20.0 —
+skan duplikatów przy KAŻDYM FS/KFS/PZ/MM (fail-closed → `503 DUPLICATE_CHECK_UNAVAILABLE`; SqlClient down = żaden dokument
+nie powstanie). MM samo nie używa SqlClienta.
 **`/contractors?nip=` to COM, nie SQL.** `last_invoice_at` trzymane w pamięci — po restarcie `null`.
 
 ## Klient Laravel-side
@@ -188,7 +193,8 @@ Reference implementation (prywatny klient Laravel): `app/Modules/Invoicing/Bridg
 `Services/{InvoiceIssuer,ReceiptIssuer,InvoiceCorrectionIssuer}.php`, `Jobs/{IssueInvoiceJob,IssueCorrectionJob,IssueReceiptJob}.php`.
 Konwencje: `GET` → null przy 404; mutujący `POST` wymaga Idempotency-Key; 4xx = walidacja (NIE retry);
 5xx: klient ponawia (tym samym kluczem) **wyłącznie kody z listy retry** w `INTEGRATION-CONTRACT.md` §4
-(`SUBIEKT_UNAVAILABLE`, `SUBIEKT_QUERY_FAILED`, `HB_BOOKING_FAILED`, …) — każdy z nich gwarantuje „nic nie
+(`SUBIEKT_UNAVAILABLE`, `SUBIEKT_QUERY_FAILED`, `CONTRACTOR_LOOKUP_UNAVAILABLE`, `DUPLICATE_CHECK_UNAVAILABLE`,
+`HB_BOOKING_FAILED`, …) — każdy z nich gwarantuje „nic nie
 zapisano w tym żądaniu” (wyjątek: kody KSeF są retry-safe przez idempotentną maszynę stanów, nie przez „nic nie
 zapisano”); `HB_BOOKING_ORPHAN` / `INTERNAL_ERROR` = ręcznie; 409 `DUPLICATE_*` = auto-recovery.
 **Nowy kod 5xx bez wpisu na liście retry klient traktuje jako twardy błąd** (lekcja `SFERA_UNAVAILABLE` z v0.18.0).

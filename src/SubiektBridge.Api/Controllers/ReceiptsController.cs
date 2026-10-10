@@ -177,6 +177,12 @@ public sealed class ReceiptsController : ControllerBase
                 Message: "issue_date musi być w formacie YYYY-MM-DD."));
         }
 
+        // external_reference PRZED ValidateNotes: pusty = skan duplikatów bez sensu, > 495 = obcięty w Uwagach (skan nie trafi).
+        if (UwagiFields.ValidateExternalReference(request.ExternalReference) is { } refError)
+        {
+            return UnprocessableEntity(InvoicesController.InvalidExternalReference(refError));
+        }
+
         if (UwagiFields.ValidateNotes(request.Notes, request.ExternalReference) is { } notesError)
         {
             return UnprocessableEntity(new ErrorResponseDto(
@@ -197,6 +203,11 @@ public sealed class ReceiptsController : ControllerBase
                 Code: "CONTRACTOR_LOOKUP_UNAVAILABLE",
                 Message: ex.Message,
                 Details: new { nip = ex.Nip }));
+        }
+        catch (DuplicateCheckUnavailableException ex)
+        {
+            // Skan duplikatów PZ padł - fail-closed: PZ NIE powstało, 503 z listy retry (ten sam klucz).
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, InvoicesController.DuplicateCheckUnavailable(ex));
         }
         catch (InvalidContractorSymbolException ex)
         {
