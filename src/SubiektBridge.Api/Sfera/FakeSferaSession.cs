@@ -17,6 +17,7 @@ public sealed class FakeSferaSession : ISferaSession
     public Task<InvoiceResponseDto> CreateInvoiceAsync(InvoiceRequestDto request, CancellationToken ct)
     {
         if (SferaUnavailableForTests) throw new SferaUnavailableException("Sesja Sfery niedostepna (fake) - nic nie zapisano");
+        ThrowIfDuplicateCheckFails(request.ExternalReference, "FS");
         ThrowIfContractorLookupFails(request.Contractor);
         ThrowIfSymbolInvalidWithoutNip(request.Contractor);
         var counter = Interlocked.Increment(ref _invoiceCounter);
@@ -43,6 +44,7 @@ public sealed class FakeSferaSession : ISferaSession
         CancellationToken ct)
     {
         if (SferaUnavailableForTests) throw new SferaUnavailableException("Sesja Sfery niedostepna (fake) - nic nie zapisano");
+        ThrowIfDuplicateCheckFails(request.ExternalReference, "KFS");
         var counter = Interlocked.Increment(ref _invoiceCounter);
         var year = DateTimeOffset.UtcNow.Year;
         _lastInvoiceAt = DateTimeOffset.UtcNow;
@@ -89,6 +91,7 @@ public sealed class FakeSferaSession : ISferaSession
     public Task<InvoiceResponseDto> CreateReceiptAsync(ReceiptIssueRequestDto request, CancellationToken ct)
     {
         if (SferaUnavailableForTests) throw new SferaUnavailableException("Sesja Sfery niedostepna (fake) - nic nie zapisano");
+        ThrowIfDuplicateCheckFails(request.ExternalReference, "PZ");
         ThrowIfContractorLookupFails(request.Supplier);
         ThrowIfSymbolInvalidWithoutNip(request.Supplier);
         var counter = Interlocked.Increment(ref _invoiceCounter);
@@ -120,6 +123,7 @@ public sealed class FakeSferaSession : ISferaSession
     public Task<TransferResponseDto> CreateTransferAsync(TransferRequestDto request, CancellationToken ct)
     {
         if (SferaUnavailableForTests) throw new SferaUnavailableException("Sesja Sfery niedostepna (fake) - nic nie zapisano");
+        ThrowIfDuplicateCheckFails(request.ExternalReference, "MM");
         var counter = Interlocked.Increment(ref _invoiceCounter);
         var year = DateTimeOffset.UtcNow.Year;
         _lastInvoiceAt = DateTimeOffset.UtcNow;
@@ -265,6 +269,18 @@ public sealed class FakeSferaSession : ISferaSession
 
     // Test-only: symuluje padniety lookup po NIP (RealSferaSession.FindContractorIdByNip -> SQL error).
     internal bool FailContractorLookupForTests { get; set; }
+
+    // Test-only: symuluje awarie skanu duplikatow po external_reference (SQL/COM/deadline) - Real rzuca
+    // DuplicateCheckUnavailableException PRZED pierwszym zapisem (fail-closed, 503 DUPLICATE_CHECK_UNAVAILABLE).
+    internal bool FailDuplicateCheckForTests { get; set; }
+
+    private void ThrowIfDuplicateCheckFails(string externalReference, string documentType)
+    {
+        if (FailDuplicateCheckForTests)
+        {
+            throw new DuplicateCheckUnavailableException(externalReference, documentType, new InvalidOperationException("symulowany blad skanu duplikatow"));
+        }
+    }
 
     // Test-only: symuluje martwa sesje Sfery - przy odczycie (FindInvoiceByIdAsync: sonda po wyjatku), na wejsciu
     // KAZDEJ mutacji (Real: preflight EnsureSessionForMutation, nic nie zapisano -> 503 SUBIEKT_UNAVAILABLE) i w health.

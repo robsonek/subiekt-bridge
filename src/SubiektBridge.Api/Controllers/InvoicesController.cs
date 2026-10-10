@@ -274,6 +274,11 @@ public sealed class InvoicesController : ControllerBase
                 Message: ex.Message,
                 Details: new { nip = ex.Nip }));
         }
+        catch (DuplicateCheckUnavailableException ex)
+        {
+            // Skan duplikatów po external_reference padł (SQL/COM/deadline) - fail-closed: FS NIE powstała, 503 z listy retry.
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, DuplicateCheckUnavailable(ex));
+        }
         catch (InvalidContractorSymbolException ex)
         {
             return UnprocessableEntity(new ErrorResponseDto(
@@ -382,6 +387,12 @@ public sealed class InvoicesController : ControllerBase
                 Message: "issue_date i source_invoice_date muszą być w formacie YYYY-MM-DD."));
         }
 
+        // external_reference PRZED ValidateNotes (jak FS): pusty = skan bez sensu, > 495 = obcięty w Uwagach.
+        if (UwagiFields.ValidateExternalReference(request.ExternalReference) is { } refError)
+        {
+            return UnprocessableEntity(InvalidExternalReference(refError));
+        }
+
         // Uwagi KFS = "Korekta: {reason} | ref: X" - ten sam limit varchar(500).
         if (UwagiFields.ValidateNotes($"Korekta: {request.Reason}", request.ExternalReference, "reason") is { } reasonError)
         {
@@ -396,6 +407,11 @@ public sealed class InvoicesController : ControllerBase
             var response = await _sfera.CreateCorrectionAsync(sourceSubiektId, request, ct);
             await _idempotency.SaveAsync(idempotencyKey, response, ct);
             return StatusCode(StatusCodes.Status201Created, response);
+        }
+        catch (DuplicateCheckUnavailableException ex)
+        {
+            // Skan duplikatów KFS padł - fail-closed: korekta NIE powstała, 503 z listy retry (ten sam klucz).
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, DuplicateCheckUnavailable(ex));
         }
         catch (InvalidCorrectionException ex)
         {
@@ -459,8 +475,26 @@ public sealed class InvoicesController : ControllerBase
     ///   SuPozycja.VatId (id z sl_StawkaVAT, różne per baza), czego Bridge nie mapuje,
     /// - zły format dat → daty były ignorowane (teraz idą do Sfery, patrz RealSferaSession).
     /// </summary>
+    /// <summary>422 INVALID_EXTERNAL_REFERENCE (pusty/biały albo > 495 znaków) - wspólne dla FS i KFS; PZ/MM mają kopię (kontrolery nie współdzielą bazy).</summary>
+    internal static ErrorResponseDto InvalidExternalReference(string message) => new(
+        Code: "INVALID_EXTERNAL_REFERENCE",
+        Message: message,
+        Details: new { max_length = UwagiFields.MaxExternalReferenceLength });
+
+    /// <summary>503 DUPLICATE_CHECK_UNAVAILABLE: skan duplikatów padł PRZED zapisem - nic nie zapisano, klient ponawia tym samym kluczem.</summary>
+    internal static ErrorResponseDto DuplicateCheckUnavailable(DuplicateCheckUnavailableException ex) => new(
+        Code: "DUPLICATE_CHECK_UNAVAILABLE",
+        Message: ex.Message,
+        Details: new { external_reference = ex.ExternalReference, document_type = ex.DocumentType });
+
     private static ErrorResponseDto? ValidateBusinessRules(InvoiceRequestDto request)
     {
+        // external_reference PRZED ValidateNotes: pusty = skan duplikatów bez sensu, > 495 = obcięty w Uwagach (skan nie trafi).
+        if (UwagiFields.ValidateExternalReference(request.ExternalReference) is { } refError)
+        {
+            return InvalidExternalReference(refError);
+        }
+
         if (!string.IsNullOrEmpty(request.Currency)
             && !string.Equals(request.Currency, "PLN", StringComparison.OrdinalIgnoreCase))
         {

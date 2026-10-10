@@ -654,21 +654,11 @@ public sealed class RealSferaSession : ISferaSession
         // odmow wystawienia. Idempotency-Key cache w Bridge zalapie powtorzony request z tym
         // samym kluczem, ale jak klient wyśle ten sam payload pod innym kluczem (np. retry
         // z innym job ID, debug curl) - bez tej kontroli powstanie duplikat w ksiegowosci.
-        var existingId = FindExistingInvoiceByReference(request.ExternalReference, DokTypFS);
-        if (existingId.HasValue)
+        // Fail-closed (v0.20.0): awaria skanu rzuca DuplicateCheckUnavailableException (503) - FS NIE powstaje.
+        var existingFs = FindExistingDocumentByReference(request.ExternalReference, DokTyp.FS);
+        if (existingFs is not null)
         {
-            dynamic existing = Session.SuDokumentyManager.WczytajDokument(existingId.Value);
-            try
-            {
-                throw new DuplicateInvoiceException(
-                    existingId.Value,
-                    (string)existing.NumerPelny ?? "",
-                    request.ExternalReference);
-            }
-            finally
-            {
-                try { existing.Zamknij(); } catch { /* cleanup */ }
-            }
+            throw new DuplicateInvoiceException(existingFs.Id, existingFs.Number, request.ExternalReference);
         }
 
         // Magazyn dokumentu = magazyn roboczy sesji (Subiekt.MagazynId), ustawiany per request.
@@ -1865,21 +1855,11 @@ public sealed class RealSferaSession : ISferaSession
         // Anti-duplicate po external_reference w Uwagach (jak FS/MM) - retry z innym
         // Idempotency-Key nie może dublować PZ (zawyżony stan magazynowy + podwójny
         // koszt zakupu). Dodane w audycie 2026-06-10 - wcześniej PZ nie miał tej warstwy.
-        var existingReceiptId = FindExistingInvoiceByReference(request.ExternalReference, DokTypPZ);
-        if (existingReceiptId.HasValue)
+        // Fail-closed (v0.20.0): awaria skanu rzuca DuplicateCheckUnavailableException (503) - PZ NIE powstaje.
+        var existingPz = FindExistingDocumentByReference(request.ExternalReference, DokTyp.PZ);
+        if (existingPz is not null)
         {
-            dynamic existingPz = Session.SuDokumentyManager.WczytajDokument(existingReceiptId.Value);
-            try
-            {
-                throw new DuplicateInvoiceException(
-                    existingReceiptId.Value,
-                    (string)existingPz.NumerPelny ?? "",
-                    request.ExternalReference);
-            }
-            finally
-            {
-                try { existingPz.Zamknij(); } catch { /* cleanup */ }
-            }
+            throw new DuplicateInvoiceException(existingPz.Id, existingPz.Number, request.ExternalReference);
         }
 
         // Magazyn dokumentu = magazyn roboczy sesji (Subiekt.MagazynId), ustawiany per request
@@ -2017,22 +1997,12 @@ public sealed class RealSferaSession : ISferaSession
         // SuDokument_MagazynNadawczyId/OdbiorczyId). Pozycje tylko towarowe (po EAN), bez ceny -
         // wartość MM Subiekt liczy z kosztu towaru.
 
-        // Anti-duplicate po external_reference w Uwagach (jak FS) - ochrona przed podwójnym MM
-        // przy retry/timeout. Fail-open (FindExistingInvoiceByReference loguje i zwraca null
-        // przy błędzie) - idempotency-key cache w kontrolerze to główna warstwa ochrony.
-        var existingId = FindExistingInvoiceByReference(request.ExternalReference, DokTypMM);
-        if (existingId.HasValue)
+        // Anti-duplicate po external_reference w Uwagach (jak FS) - ochrona przed podwójnym MM przy retry/timeout.
+        // Fail-closed (v0.20.0): awaria skanu rzuca DuplicateCheckUnavailableException (503) - MM NIE powstaje.
+        var existingMm = FindExistingDocumentByReference(request.ExternalReference, DokTyp.MM);
+        if (existingMm is not null)
         {
-            dynamic existingDok = Session.SuDokumentyManager.WczytajDokument(existingId.Value);
-            try
-            {
-                throw new DuplicateInvoiceException(
-                    existingId.Value, (string)existingDok.NumerPelny ?? "", request.ExternalReference);
-            }
-            finally
-            {
-                try { existingDok.Zamknij(); } catch { /* cleanup */ }
-            }
+            throw new DuplicateInvoiceException(existingMm.Id, existingMm.Number, request.ExternalReference);
         }
 
         dynamic? mm = null;
@@ -2797,21 +2767,11 @@ public sealed class RealSferaSession : ISferaSession
         // Anti-duplicate po external_reference w Uwagach (jak FS/PZ/MM) - Uwagi KFS
         // zawsze zawierają "ref: <external_reference>" (niżej), więc pre-check chroni
         // przed podwójną korektą przy retry z innym Idempotency-Key (audyt 2026-06-10).
-        var existingCorrectionId = FindExistingInvoiceByReference(request.ExternalReference, DokTypKFS);
-        if (existingCorrectionId.HasValue)
+        // Fail-closed (v0.20.0): awaria skanu rzuca DuplicateCheckUnavailableException (503) - KFS NIE powstaje.
+        var existingKfs = FindExistingDocumentByReference(request.ExternalReference, DokTyp.KFS);
+        if (existingKfs is not null)
         {
-            dynamic existingKfs = Session.SuDokumentyManager.WczytajDokument(existingCorrectionId.Value);
-            try
-            {
-                throw new DuplicateInvoiceException(
-                    existingCorrectionId.Value,
-                    (string)existingKfs.NumerPelny ?? "",
-                    request.ExternalReference);
-            }
-            finally
-            {
-                try { existingKfs.Zamknij(); } catch { /* cleanup */ }
-            }
+            throw new DuplicateInvoiceException(existingKfs.Id, existingKfs.Number, request.ExternalReference);
         }
 
         int? prevWarehouse = null;
@@ -3468,8 +3428,8 @@ public sealed class RealSferaSession : ISferaSession
 
     /// <summary>
     /// Buduje Uwagi dokumentu tak, by NA PEWNO zawierały external_reference - na tym
-    /// opiera się anty-duplikat (<see cref="FindExistingInvoiceByReference"/> szuka
-    /// dok_Uwagi LIKE '%ref%'). Nie polegamy na tym, że klient sam wklei referencję
+    /// opiera się anty-duplikat (<see cref="FindExistingDocumentByReference"/> szuka
+    /// dok_Uwagi LIKE '%ref%' w dok__Dokument). Nie polegamy na tym, że klient sam wklei referencję
     /// do notes (kontrakt §5 obiecuje tę warstwę bezwarunkowo); doklejamy ją, jeśli
     /// jeszcze jej tam nie ma.
     /// </summary>
@@ -3509,92 +3469,70 @@ public sealed class RealSferaSession : ISferaSession
     }
 
     /// <summary>
-    /// Szuka istniejacego dokumentu w Subiekcie po external_reference w polu Uwagi.
-    /// Zwraca subiekt_id najnowszego pasujacego dokumentu typu zgodnego z typePrefix
-    /// (np. "FS"), lub null gdy brak. SQL LIKE skanuje dok_Uwagi - dla typowej bazy
-    /// (kilkadziesiat tysiecy FS) szybkie. Sfera dodatkowo filtruje po magazynie
-    /// operatora.
+    /// Anty-duplikat (warstwa 2 idempotencji) po external_reference - FAIL-CLOSED (spec 2026-10-10, backlog 138; do v0.19.x
+    /// catch-all zwracal null = "brak duplikatu" = dokument wystawiany mimo awarii skanu). Kandydaci z read-only SQL po
+    /// dok__Dokument - WSZYSTKIE magazyny (COM OtworzKolekcje widzi tylko magazyn sesji: CHM SuDokumentyManager_OtworzKolekcje,
+    /// a skan idzie przed SetSessionWarehouse - do v0.19.x dokument z innego magazynu nie byl wykrywany). Token-check, duch
+    /// (dok_Status = 2) i deadline w <see cref="DuplicateScan"/>; potwierdzenie COM WczytajDokument. Rzuca
+    /// DuplicateCheckUnavailableException (503 DUPLICATE_CHECK_UNAVAILABLE) albo SferaUnavailableException (503 SUBIEKT_UNAVAILABLE).
+    /// [STA] - wolane z Create*Core po preflighcie sesji, PRZED pierwszym zapisem (gwarancja "nic nie zapisano").
     /// </summary>
-    // dok_Typ (zrzut schematu dok__Dokument, MS_Description): 2=FS, 6=KFS, 9=MM, 10=PZ.
-    private const int DokTypFS = 2, DokTypKFS = 6, DokTypMM = 9, DokTypPZ = 10;
-
-    private long? FindExistingInvoiceByReference(string externalReference, int dokTyp)
+    private ExistingDocument? FindExistingDocumentByReference(string externalReference, int dokTyp)
     {
-        if (string.IsNullOrWhiteSpace(externalReference))
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        return DuplicateScan.Find(
+            externalReference,
+            DokTyp.Name(dokTyp),
+            fetchCandidates: () => FetchDuplicateCandidates(externalReference, dokTyp),
+            verifyLoads: VerifyDocumentLoads,
+            sessionAlive: IsSessionAlive,
+            deadlineExceeded: () => sw.Elapsed > DuplicateScan.Deadline,
+            logger: _logger);
+    }
+
+    // Prefiltr SQL: dok_Uwagi LIKE '%ref%' to podciag (token-check robi rdzen), bez TOP (ref "sys:order:1" jest podciagiem
+    // "sys:order:1xxx" - cap moglby odciac wlasciwy, starszy dokument), strumieniowo przez SqlDataReader (iterator - rdzen
+    // przerywa po pierwszym potwierdzonym trafieniu), DESC po dok_Id. Wlasny SqlConnection jak FindContractorIdByNip
+    // (PolaczenieAdoNet Sfery przychodzi jako __ComObject). Kolumny ze zrzutu schematu dok__Dokument: dok_Typ int,
+    // dok_Uwagi TUwagi varchar(500), dok_NrPelny TNrDok (REALNA kolumna; dok_NumerPelny to atrybut COM), dok_Status int.
+    // Escapowanie nawiasowe ([%] [_] [[]) jak `search` w open-receivables - bez klauzuli ESCAPE. CommandTimeout dotyczy
+    // pojedynczego Read; budzet calego skanu pilnuje Stopwatch w FindExistingDocumentByReference.
+    private IEnumerable<DuplicateCandidate> FetchDuplicateCandidates(string externalReference, int dokTyp)
+    {
+        using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT dok_Id, dok_NrPelny, dok_Uwagi, dok_Status FROM dok__Dokument "
+                        + "WHERE dok_Typ = @typ AND dok_Uwagi LIKE @pat ORDER BY dok_Id DESC";
+        cmd.CommandTimeout = 10;
+        cmd.Parameters.AddWithValue("@typ", dokTyp);
+        cmd.Parameters.AddWithValue("@pat", "%" + OpenReceivableFields.EscapeLikeWildcards(externalReference) + "%");
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
         {
-            return null;
+            yield return new DuplicateCandidate(
+                Convert.ToInt64(r["dok_Id"]),
+                r["dok_NrPelny"] as string ?? "",
+                r["dok_Uwagi"] as string ?? "",
+                Convert.ToInt32(r["dok_Status"]));
         }
+    }
 
-        // Typ po kolumnie dok_Typ, NIE po prefiksie numeru: symbol numeracji bywa niestandardowy
-        // ("FH" zamiast "FS") i wtedy porownanie prefiksu nigdy nie trafialo = anti-duplicate martwy.
-        var escaped = EscapeLikePattern(externalReference);
-        var filter = $"dok_Typ={dokTyp} AND dok_Uwagi LIKE '%{escaped}%'";
-
-        dynamic? kolekcja = null;
+    // [STA] Potwierdzenie COM: WczytajDokument zwraca obiekt = dokument istnieje (dla uniewaznionych, status 2, rdzen nie pyta).
+    // Wyjatek propaguje do rdzenia, ktory sonduje sesje: martwa -> SferaUnavailable, zywa -> DuplicateCheckUnavailable
+    // (nie zgadujemy "ducha" po wyjatku - r1 F2). Uchwyt zwalniany w finally (TryClose = Zamknij + release).
+    private bool VerifyDocumentLoads(long documentId)
+    {
+        dynamic? dok = null;
         try
         {
-            kolekcja = Session.SuDokumentyManager.OtworzKolekcje(filter, "dok_Id DESC");
-            int total = Convert.ToInt32(kolekcja.Liczba);
-            if (total == 0)
-            {
-                return null;
-            }
-
-            foreach (dynamic dok in (System.Collections.IEnumerable)kolekcja)
-            {
-                try
-                {
-                    // LIKE to tylko pre-filtr podciagu: ref "order:12" pasuje do "order:123".
-                    // Duplikat = ref jako CALY token w Uwagach (inaczej 409 z CUDZYM existing_subiekt_id).
-                    string uwagi = TryReadString((object)dok, "Uwagi") ?? "";
-                    if (!UwagiFields.ContainsReferenceToken(uwagi, externalReference))
-                    {
-                        continue;
-                    }
-
-                    long candidateId = ToInt64(dok.Identyfikator);
-
-                    // OtworzKolekcje czasem zwraca rekordy z dok__Dokument ktore zostaly
-                    // soft-deleted/anulowane (Sfera nie filtruje per default). Weryfikujemy
-                    // ze dokument NAPRAWDE istnieje przez WczytajDokument - jesli rzuca,
-                    // skip (kolekcja zawiera "ducha", nie traktujemy jako duplikat).
-                    try
-                    {
-                        dynamic verify = Session.SuDokumentyManager.WczytajDokument(candidateId);
-                        try
-                        {
-                            return candidateId;
-                        }
-                        finally
-                        {
-                            try { verify.Zamknij(); } catch { /* cleanup */ }
-                        }
-                    }
-                    catch (Exception verifyEx)
-                    {
-                        _logger.LogInformation(verifyEx, "Anti-duplicate: kolekcja zwrocila {Id} ale WczytajDokument padl - traktuje jako duch", candidateId);
-                        continue;
-                    }
-                }
-                finally
-                {
-                    try { dok.Zamknij(); } catch { /* cleanup */ }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            // Anti-duplicate check zawiodl (np. Sfera SQL error). Logujemy i kontynuujemy
-            // jakby duplikatu nie bylo - lepiej miec ewentualny duplikat niz zablokowac
-            // legitymowane wystawianie FV.
-            _logger.LogWarning(ex, "FindExistingInvoiceByReference failed for ref='{Ref}'; assuming no duplicate", externalReference);
+            dok = Session.SuDokumentyManager.WczytajDokument(documentId);
+            return dok is not null;
         }
         finally
         {
-            if (kolekcja is not null) { try { Marshal.ReleaseComObject(kolekcja); } catch { /* cleanup */ } }
+            if (dok is not null) TryClose(dok);
         }
-
-        return null;
     }
 
     private void AddLineToDocument(dynamic document, string? ean, string name, decimal quantity, string unit, decimal unitPriceGross, int? warehouseId = null, bool useNetPrice = false, decimal vatRate = 23m, decimal? unitPriceNet = null)

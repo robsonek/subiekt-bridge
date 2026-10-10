@@ -83,6 +83,12 @@ public sealed class TransfersController : ControllerBase
                 Message: "Magazyn źródłowy i docelowy są identyczne - MM bezcelowe."));
         }
 
+        // external_reference PRZED ValidateNotes: pusty = skan duplikatów bez sensu, > 495 = obcięty w Uwagach (skan nie trafi).
+        if (UwagiFields.ValidateExternalReference(request.ExternalReference) is { } refError)
+        {
+            return UnprocessableEntity(InvoicesController.InvalidExternalReference(refError));
+        }
+
         if (UwagiFields.ValidateNotes(request.Notes, request.ExternalReference) is { } notesError)
         {
             return UnprocessableEntity(new ErrorResponseDto(
@@ -96,6 +102,11 @@ public sealed class TransfersController : ControllerBase
             var response = await _sfera.CreateTransferAsync(request, ct);
             await _idempotency.SaveAsync(idempotencyKey, response, ct);
             return StatusCode(StatusCodes.Status201Created, response);
+        }
+        catch (DuplicateCheckUnavailableException ex)
+        {
+            // Skan duplikatów MM padł - fail-closed: MM NIE powstało, 503 z listy retry (ten sam klucz).
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, InvoicesController.DuplicateCheckUnavailable(ex));
         }
         catch (MissingProductException ex)
         {

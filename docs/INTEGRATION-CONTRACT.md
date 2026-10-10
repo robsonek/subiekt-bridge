@@ -107,6 +107,10 @@ Autorytatywne źródło: `src/SubiektBridge.Api/Models/InvoiceModels.cs`.
 
 Zapisz u siebie `subiekt_id` / `id` jako wskaźnik na dokument w Subiekcie.
 
+Błędy specyficzne (od v0.20.0): `422 INVALID_EXTERNAL_REFERENCE` (pusty/biały `external_reference` albo > 495 znaków —
+nie retry); `503 DUPLICATE_CHECK_UNAVAILABLE` (most nie mógł sprawdzić w Subiekcie, czy dokument z tym `external_reference`
+już istnieje — dokument NIE powstał w tym żądaniu, **retry z backoffem tym samym kluczem**). Pełna lista: §4.
+
 ### 3.2 `POST /api/v1/invoices/{id}/corrections` — KFS
 
 ```jsonc
@@ -126,6 +130,9 @@ Zapisz u siebie `subiekt_id` / `id` jako wskaźnik na dokument w Subiekcie.
 ale `quantity` to **zmiana ilości** — **ujemna** dla zwrotu. ⚠️ Klucz musi się nazywać `quantity`
 (nie `quantity_change`), inaczej korekta zaksięguje 0 szt. Response: `201` z `InvoiceResponseDto`;
 `contractor_subiekt_id` = kontrahent (płatnik) korygowanej FS (od v0.19.0; do v0.18.0 zawsze `0`). `0` = nieznany.
+Błędy specyficzne (od v0.20.0) jak dla FS: `422 INVALID_EXTERNAL_REFERENCE`, `503 DUPLICATE_CHECK_UNAVAILABLE` (§4);
+`details.document_type` = `"KFS"`. Uwagi KFS to zawsze `Korekta: <reason> | ref: <external_reference>` — przy `external_reference`
+bliskim 495 znaków `reason` się nie zmieści → `422 NOTES_TOO_LONG` (§7.7).
 
 ### 3.3 Linia (`LineDto`)
 
@@ -195,6 +202,9 @@ wpisane wprost, `ob_CenaBrutto` wyliczane z VAT). Masz dwie opcje:
 
 `unit_price_net` działa **tylko dla PZ**. Dla FS/KFS jest ignorowane (te dokumenty liczą od brutto).
 
+Błędy specyficzne (od v0.20.0) jak dla FS: `422 INVALID_EXTERNAL_REFERENCE`, `503 DUPLICATE_CHECK_UNAVAILABLE` (§4;
+`details.document_type` = `"PZ"`).
+
 ### 3.7 `POST /api/v1/transfers` — MM (przesunięcie międzymagazynowe)
 
 Przenosi stan towaru między magazynami. **Dokument wewnętrzny magazynowy — NIE idzie do KSeF**
@@ -221,6 +231,7 @@ wówczas tylko stan, nie ruszając dokumentu.
 - Wymaga `Idempotency-Key`. Response: `{ id, subiekt_id, number, issued_at, source_warehouse_id, dest_warehouse_id }`.
 - `source_warehouse_id == dest_warehouse_id` → `422` (`SAME_WAREHOUSE`).
 - Powtórzony `external_reference` (dokument już istnieje) → `409` (`DUPLICATE_TRANSFER`).
+- Od v0.20.0 jak dla FS: `422 INVALID_EXTERNAL_REFERENCE`, `503 DUPLICATE_CHECK_UNAVAILABLE` (§4; `details.document_type` = `"MM"`).
 
 ### 3.8 Listingi i pojedynczy dokument
 
@@ -436,8 +447,8 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 - **4xx** → błąd danych po Twojej stronie → **NIE retry'uj**, popraw request / zgłoś operatorowi.
 - **5xx / 502 / 503** → ponawiaj (z backoffem, **tym samym `Idempotency-Key`**) **wyłącznie kody z listy retry**:
   - **„nic nie zapisano”**: `SUBIEKT_UNAVAILABLE`, `SUBIEKT_QUERY_FAILED`, `BRIDGE_DEGRADED`,
-    `CONTRACTOR_LOOKUP_UNAVAILABLE`, `HB_BOOKING_FAILED` — gwarancja mostu: **w tym żądaniu nic nie zostało zapisane
-    w Subiekcie** (albo zapis został czysto cofnięty);
+    `CONTRACTOR_LOOKUP_UNAVAILABLE`, `DUPLICATE_CHECK_UNAVAILABLE` (od v0.20.0), `HB_BOOKING_FAILED` — gwarancja mostu:
+    **w tym żądaniu nic nie zostało zapisane w Subiekcie** (albo zapis został czysto cofnięty);
   - **KSeF**: `KSEF_COMMUNICATION_ERROR`, `KSEF_SEND_INCOMPLETE` — stan dokumentu w Subiekcie **mógł** się zmienić
     (np. e-Faktura wygenerowana, wysyłka bez stanu końcowego), ale ponowny `POST .../ksef` jest bezpieczny, bo to
     idempotentny „advance” maszyny stanów (§3.12), nie dlatego, że nic nie zapisano.
@@ -468,6 +479,7 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 422 | `INVALID_DATE` | `issue_date`/`sale_date`/`source_invoice_date` nie w formacie `YYYY-MM-DD` (lub data niemożliwa kalendarzowo) |
 | 422 | `NOTES_TOO_LONG` | `notes` (FS/PZ/MM) lub `reason` (KFS) nie mieści się z doklejanym `ref: <external_reference>` w 500 znakach Uwag Subiekta (`details.max_length`) — skróć (§7.7) |
 | 422 | `INVALID_CORRECTION` | (KFS) linia korekty bez pasującej pozycji FS, dwie linie na tę samą pozycję albo zwrot większy niż ilość na pozycji — popraw linie, nie retry |
+| 422 | `INVALID_EXTERNAL_REFERENCE` | (FS/KFS/PZ/MM, od v0.20.0) `external_reference` pusty/biały albo dłuższy niż 495 znaków (`details.max_length`) — bez niego most nie może sprawdzić duplikatu, a dłuższy nie mieści się w Uwagach z `ref: `; sprawdzane PRZED `NOTES_TOO_LONG` — popraw, nie retry |
 | 404 | `INVOICE_NOT_FOUND` / `RECEIPT_NOT_FOUND` | zły `{id}` |
 | 404 | `SETTLEMENT_NOT_FOUND` | (DELETE) rozliczenie nie istnieje / już cofnięte |
 | 501 | `HB_BOOKING_NOT_SUPPORTED` | (book) księgowanie wyłączone serwerowo (`EnableHbBooking=false`) — księguj w module Bankowość, potem `/settlements` |
@@ -494,6 +506,7 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 502 | `SUBIEKT_QUERY_FAILED` / `BRIDGE_DEGRADED` | Subiekt nie odpowiada — **retry** |
 | 503 | (health) | sesja Sfery martwa — **retry / circuit-breaker** |
 | 503 | `CONTRACTOR_LOOKUP_UNAVAILABLE` | (FS/PZ z NIP-em) most nie mógł sprawdzić kontrahenta po NIP w bazie — dokument NIE powstał, **retry z backoff** (`details.nip`) |
+| 503 | `DUPLICATE_CHECK_UNAVAILABLE` | (FS/KFS/PZ/MM, od v0.20.0) most nie mógł sprawdzić w Subiekcie, czy dokument z tym `external_reference` już istnieje (baza, przekroczony czas skanu albo weryfikacja dokumentu) — dokument NIE powstał w tym żądaniu, **retry z backoff tym samym kluczem** (`details.external_reference`, `details.document_type` ∈ {`FS`,`KFS`,`PZ`,`MM`}). Do v0.19.x awaria skanu była fail-open (dokument powstawał) |
 | 503 | `SUBIEKT_UNAVAILABLE` | Subiekt/Sfera offline: przy odczycie (`GET /invoices/{id}`, weryfikacja replay) albo **przed pierwszym zapisem** mutacji (FS/KFS/PZ/MM, settlements, book — most sonduje sesję na starcie) — **nic nie zapisano, retry z backoff tym samym kluczem**; klucz idempotencji zostaje. Do v0.18.0 kod nazywał się `SFERA_UNAVAILABLE` i dotyczył tylko odczytów |
 | 500 | `INTERNAL_ERROR` | nieoczekiwany błąd (`details.stack`) — **nie ponawiaj automatycznie** (kod spoza listy retry) + alert. FS/KFS/PZ/MM: ręczne ponowienie bezpieczne (anti-duplicate `409`). book: od v0.19.0 nigdy nie oznacza niepowiązanej operacji — pojawia się tylko **przed** utworzeniem BP albo po **domkniętym** linku (np. błąd zapisu cache idempotencji; ponowienie zwraca `already_booked`), błędy po zapisie BP idą jako `HB_BOOKING_ORPHAN` |
 
@@ -506,6 +519,13 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
   "external_reference": "nowysystem:order:ABC123"
 }
 ```
+
+`DUPLICATE_CHECK_UNAVAILABLE.details` (FS/KFS/PZ/MM, od v0.20.0; klient może je ignorować — liczy się kod):
+```json
+{ "external_reference": "nowysystem:order:ABC123", "document_type": "FS" }
+```
+
+`INVALID_EXTERNAL_REFERENCE.details`: `{ "max_length": 495 }`.
 
 `HB_BOOKING_ORPHAN.details` (book):
 ```json
@@ -522,15 +542,17 @@ Most ma dwie warstwy zabezpieczeń; obie zależą od tego, **co Ty wyślesz**:
 
 1. **`Idempotency-Key` (header)** — most cache'uje `klucz → response` (TTL 14 dni).
    Ten sam klucz przy retry = ten sam wynik, bez dublowania. **Automatyczne ponowienia mieść w 14 dniach**
-   od pierwszej próby — później cache już nie odpowie, a ponowienie trafi w warstwę 2. Warstwa 2 daje `409` tylko
-   przy **udanym** wykryciu duplikatu (błąd wyszukiwania w Subiekcie nie blokuje zapisu — fail-open), więc późne,
-   ręczne ponowienie poprzedź sprawdzeniem, czy dokument już nie istnieje (np.
-   `GET /invoices?notes_contains=<external_reference>`). **Generuj jeden stabilny klucz na (zamówienie × typ)**
+   od pierwszej próby — później cache już nie odpowie, a ponowienie trafi w warstwę 2. Od v0.20.0 warstwa 2 jest
+   **fail-closed**: albo `409 DUPLICATE_*` (dokument istnieje), albo `201` (nie istniał), albo `503 DUPLICATE_CHECK_UNAVAILABLE`
+   (most nie mógł sprawdzić — nic nie zapisano, ponów); nigdy duplikat przez niesprawdzony skan. Do v0.19.x błąd skanu
+   nie blokował zapisu (fail-open) i skan widział tylko magazyn roboczy sesji. **Generuj jeden stabilny klucz na (zamówienie × typ)**
    i powtarzaj go przy ponowieniu. (Most dodatkowo weryfikuje, że dokument z cache nadal istnieje w Subiekcie —
    jeśli ktoś go skasował, potraktuje request jako nowy.)
 
 2. **Anty-duplikat w Subiekcie po `external_reference`** — przed utworzeniem most szuka
-   dokumentu z tym samym `external_reference` (w polu uwag). Trafienie → `409`.
+   dokumentu z tym samym `external_reference` (w polu uwag, **we wszystkich magazynach** — od v0.20.0; wcześniej tylko
+   w magazynie roboczym sesji Sfery). Trafienie → `409`; awaria skanu → `503 DUPLICATE_CHECK_UNAVAILABLE` (nic nie
+   zapisano, ponów tym samym kluczem). `external_reference` musi być niepusty i mieć ≤ 495 znaków (`422 INVALID_EXTERNAL_REFERENCE`).
    Most **sam dokleja** `| ref: <external_reference>` do uwag dokumentu (FS/KFS/PZ/MM),
    jeśli nie umieściłeś referencji w `notes` — nie musisz (ale możesz) robić tego sam.
 
@@ -587,7 +609,9 @@ pozycję FS (FS z dwiema pozycjami tego samego EAN → dwie linie korekty); zwro
 ### 7.7 Notatki: `dok_Uwagi` ma 500 znaków
 Most dokleja do `notes`/`reason` ` | ref: <external_reference>` (na tym stoi ochrona przed duplikatami).
 Limit Subiekta to 500 znaków łącznie → `422 NOTES_TOO_LONG`, gdy się nie mieści. Trzymaj `notes` krótkie
-(≤ ~450 znaków przy typowym `external_reference`).
+(≤ ~450 znaków przy typowym `external_reference`). Sam `external_reference` ma twardy limit **495** znaków
+(`422 INVALID_EXTERNAL_REFERENCE`, od v0.20.0) — to granica dla dokumentów BEZ notatek; z notatkami obowiązuje suma 500,
+a KFS zawsze niesie prefiks `Korekta: <reason>`, więc przy `external_reference` ≥ ~485 znaków korekta nie przejdzie.
 
 ### 7.4 `is_settled` a forma płatności odroczonej
 Dla płatności **odroczonych** (kredyt kupiecki, „Allegro Pay" itp.) wysyłaj `is_settled=false`.
@@ -637,6 +661,17 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
+
+### v0.20.0 (w przygotowaniu — backlog 138)
+- **Nowy kod `503 DUPLICATE_CHECK_UNAVAILABLE`** (FS/KFS/PZ/MM): most nie mógł sprawdzić w Subiekcie, czy dokument z tym
+  `external_reference` już istnieje — dokument NIE powstał w tym żądaniu, **retry z backoffem tym samym kluczem**
+  (`details.external_reference`, `details.document_type`). Kod wchodzi na listę retry „nic nie zapisano” (§4).
+- **Nowy kod `422 INVALID_EXTERNAL_REFERENCE`** (FS/KFS/PZ/MM): `external_reference` pusty/biały albo > 495 znaków
+  (`details.max_length = 495`); sprawdzany PRZED `NOTES_TOO_LONG` — nie retry (§7.7).
+- **Zmiana zachowania anty-duplikatu (§5):** skan jest **fail-closed** (do v0.19.x awaria skanu = „brak duplikatu” = dokument
+  wystawiany) i obejmuje dokumenty ze **wszystkich magazynów** (do v0.19.x tylko z magazynu roboczego sesji Sfery — dokument
+  wystawiony wcześniej na innym magazynie nie był wykrywany). Dokument unieważniony w Subiekcie nie jest duplikatem (jak dotąd).
+- `/book`, `/settlements`, KSeF: bez zmian.
 
 ### v0.19.1 (2026-10-04)
 - **TTL cache `Idempotency-Key` skrócony z 30 do 14 dni** (§5), wygasłe wpisy most teraz kasuje (wcześniej tylko

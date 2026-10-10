@@ -161,6 +161,32 @@ public static class UwagiFields
             ? $"{fieldName} ma {notes.Length} znaków - Subiekt mieści {UwagiFields.MaxLength} w Uwagach, z czego {suffixLen} zajmuje 'ref: {externalReference}'. Maks. {max}."
             : null;
     }
+
+    /// <summary>
+    /// Maks. długość external_reference: musi zmieścić się W CAŁOŚCI w Uwagach razem z prefiksem "ref: " (500 - 5 = 495).
+    /// Dłuższy ref był do v0.19.x obcinany po cichu przez <see cref="Build"/> (przy pustych notatkach ValidateNotes nie sprawdzał
+    /// ref), a skan pełnym ref nigdy go nie znajdował = duplikat przy ponowieniu. Limit jest globalny; limit notatek OBOK ref
+    /// liczy ValidateNotes (przy ref 495 żadne notatki/reason się nie mieszczą - KFS z "Korekta: " zawsze NOTES_TOO_LONG).
+    /// </summary>
+    public const int MaxExternalReferenceLength = MaxLength - 5; // "ref: "
+
+    /// <summary>
+    /// Walidacja external_reference PRZED ValidateNotes (kontrolery FS/KFS/PZ/MM → 422 INVALID_EXTERNAL_REFERENCE):
+    /// pusty/biały ref = skan duplikatów bez sensu (anty-duplikat warstwy 2 stoi na nim), za długi = obcięty w Uwagach.
+    /// </summary>
+    public static string? ValidateExternalReference(string? externalReference)
+    {
+        if (string.IsNullOrWhiteSpace(externalReference))
+        {
+            return "external_reference jest wymagane (anty-duplikat w Subiekcie szuka dokumentu po tej wartosci).";
+        }
+        if (externalReference.Length > MaxExternalReferenceLength)
+        {
+            return $"external_reference ma {externalReference.Length} znakow - maks. {MaxExternalReferenceLength} " +
+                   $"(musi zmiescic sie w {MaxLength} znakach Uwag Subiekta razem z 'ref: ').";
+        }
+        return null;
+    }
 }
 
 public sealed record AddressDto(
