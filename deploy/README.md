@@ -187,3 +187,21 @@ cd C:\SubiektBridge\new\
 - Token w `appsettings.Production.json` ma uprawnienia 0600 (read-only przez user serwisu) — `icacls C:\SubiektBridge\appsettings.Production.json /inheritance:r /grant:r "NT AUTHORITY\SYSTEM:R"`.
 - Firewall otwiera 988 **tylko z IP Laravela** (parametr `-LaravelHostIp` w `install-windows.ps1`).
 - Self-signed cert na MVP — wystarczy bo `SUBIEKT_BRIDGE_VERIFY_TLS=false` po stronie Laravela. Dla pełnej produkcji można później wystawić Let's Encrypt jeśli host ma publiczny DNS.
+
+## Sondy pozycji PZ na dokumencie testowym (`probe-pz-items.ps1`, v0.21.0)
+
+Skrypt operatora do okna wdrożenia (spec edycji PZ §8.2): wykonuje na WCZYTANYM PZ łańcuch `set → Zapisz → Zamknij` przez Sferę i wypisuje
+fazę, HRESULT i komunikat Sfery. **ZAPIS w żywym Subiekcie — tylko dokument testowy (`-DokId` obowiązkowy, `-Confirm` wymagany), za zgodą usera.**
+Subiekt GT i Sfera są 32-bit, więc uruchamiaj 32-bitowy Windows PowerShell w STA:
+
+```powershell
+& "$env:windir\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" -STA -ExecutionPolicy Bypass -File C:\SubiektBridge\deploy\probe-pz-items.ps1 `
+  -Server ".\SQLEXPRESS" -Database MAGAZYN -DbUser sa -Operator Szef -DokId 123456 -Scenario inspect
+```
+(z `cmd.exe`: `%windir%\SysWOW64\WindowsPowerShell\v1.0\powershell.exe -STA ...`). Kod wyjścia procesu: `0` sonda wykonana i dokument
+zamknięty; `1` błąd COM w sondzie (faza w logu); `2` warunki wstępne (x64, nie-STA, brak dokumentu, nie-PZ); `3` brak `-Confirm`;
+**`4` = niepotwierdzone**: sonda przeszła, ale `Zamknij`/`Zakoncz` rzuciło — lock może wisieć w sesji, sprawdź GUI i SQL.
+
+`-Scenario inspect` (tylko odczyt) | `patch` (NumerOryginalny) | `reduce` (ilość pozycji 1 o 1 w dół) | `remove` (Usun pozycji 1) | `add -Ean …` |
+`replace -Ean …` | `two-changes` (2 pozycje). `-NoSave` zatrzymuje się przed `Zapisz`. Skrypt odmawia w procesie 64-bit / nie-STA.
+Po każdej sondzie odczytaj skutki SQL-em przez `POST /api/v1/admin/query` (zapytania wypisuje skrypt).
