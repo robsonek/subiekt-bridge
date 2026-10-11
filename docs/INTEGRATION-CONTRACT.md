@@ -51,9 +51,12 @@ Dostajesz go w polach `id` / `existing_bridge_id` z response.
 ## 2. Zasady wywołań (obowiązkowe)
 
 - **Każdy request:** nagłówek `X-Bridge-Token: <sekret>`. Brak/zły → `401`.
-- **Każda operacja mutująca (POST):** nagłówek `Idempotency-Key: <uuid>`. Brak → `400 MISSING_IDEMPOTENCY_KEY`.
+- **Każda operacja mutująca (POST, PATCH):** nagłówek `Idempotency-Key: <uuid>`. Brak → `400 MISSING_IDEMPOTENCY_KEY`.
   - Klucz generujesz **Ty (klient)**, jeden stabilny klucz na (zamówienie × typ dokumentu).
     Przy retry użyj **tego samego** klucza → most zwróci zapisany wynik, nie zdubluje faktury.
+  - **Klucz jest ważny per operacja i dokument** (od v0.21.0): metoda + ścieżka z id z URL. Ten sam klucz na innym
+    endpoincie (np. `POST /receipts` i `PATCH /receipts/{id}`) albo na innym dokumencie (`/invoices/sub_1/corrections`
+    vs `/invoices/sub_2/corrections`) to osobny wpis — most nigdy nie zwróci zapisanej odpowiedzi innej operacji.
   - **Wyjątek:** `POST /invoices/{id}/ksef` NIE wymaga `Idempotency-Key` — to idempotentny
     „advance" maszyny stanów KSeF w Subiekcie; powtórny POST nic nie wyśle drugi raz (§3.12).
 - **HTTPS z self-signed certem** — most generuje własny cert. W kliencie ustaw `verify=false`
@@ -215,7 +218,7 @@ notes` bez zmian) plus:
 ```jsonc
 {
   "original_number": "Client:test_buyer",              // „Dokument dostawcy” (SuDokument.NumerOryginalny, max 30 zn.)
-  "external_reference": "nowysystem:order:ABC:supplier:42", // token "ref: …" z Uwag; null, gdy brak markera
+  "external_reference": "nowysystem:order:ABC:supplier:42", // pełna referencja z Uwag (reguła niżej); null, gdy brak markera
   "warehouse_id": 4, "status": 1, "booking_status": 0, "period_locked": false,   // status = dok_Status; booking_status = status księgowy (0..7)
   "linked_documents": [ { "relation": "linked", "type": "FZ", "subiekt_id": 60001, "number": "FZ 7/2026" } ],  // FZ/KFS/…; [] = brak
   "editability": { "sfera_can_edit": true, "reasons": [] },  // FAKTY: CANCELLED | NOT_A_RECEIPT | PERIOD_LOCKED | BOOKED | EXPORTED_TO_ACCOUNTING | LINKED_DOCUMENT | SFERA_NOT_EDITABLE
@@ -229,12 +232,19 @@ notes` bez zmian) plus:
 - `editability` to informacja, nie decyzja mostu: most NIE odmawia edycji na podstawie powiązania czy `sfera_can_edit` — o odmowie
   decyduje Sfera przy zapisie (409 `RECEIPT_LOCKED` z powodem). Dokument innego typu niż PZ i dokument unieważniony też dają `200`
   (z powodem w `reasons`). `404` tylko, gdy Subiekt POZYTYWNIE potwierdzi brak dokumentu; awaria odczytu → `502 SUBIEKT_QUERY_FAILED`.
+- `external_reference` = tekst po **ostatnim** znaczniku `ref: ` (na początku Uwag albo po separatorze ` | `) **do końca pola,
+  dosłownie** (ze spacjami) — tak most zapisuje referencję przy `POST` (zawsze na końcu Uwag). `null`, gdy Uwagi nie mają znacznika
+  (np. referencja była już w `notes` i most jej nie dopisał). Granica: referencja zawierająca ` | ref: ` jest nieodróżnialna od notatek
+  z markerem — wygrywa ostatni znacznik.
 - `issued_stock_units` / `issued_quantity` = ile z dostawy tej pozycji już wydano (jednostki magazynowe / jednostki dokumentu);
   `null` + ostrzeżenie, gdy most nie mógł tego odczytać albo dane są niespójne. Pola z bazy (`warehouse_id`, `period_locked`, `ean`,
   `symbol`, `linked_documents[].type`, `issued_*`) są **fail-soft**: `null` + `warnings: ["SQL_FACTS_UNAVAILABLE"]`.
 
 **PATCH** (wymaga `Idempotency-Key`): `{ "original_number": "FZ 1/01/2026", "expected_revision": "r1:…" }` (`expected_revision`
 opcjonalne). Zasady:
+- `Idempotency-Key` jest ważny dla **tego PZ i tej operacji** (§2): klucz użyty wcześniej w `POST /receipts` albo w PATCH innego PZ
+  nie daje replayu. **Każda odrębna zmiana = nowy klucz** (np. `…:original_number:<wartość>`) — ten sam klucz z innym body na tym
+  samym PZ zwraca zapisany wynik pierwszej zmiany (replay).
 - walidacja PRZED Sferą: brak pola → `422 EMPTY_UPDATE`; `null`, nie-string, pusty → `422 INVALID_ORIGINAL_NUMBER` (`details.reason`);
   po przycięciu spacji > 30 znaków → `422 ORIGINAL_NUMBER_TOO_LONG` (`details.max_length`, `details.length`). **Bez cichego ucięcia**
   (POST `/receipts` nadal tnie `original_number` do 30 — tam nic się nie zmienia).
@@ -593,8 +603,8 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 
 Most ma dwie warstwy zabezpieczeń; obie zależą od tego, **co Ty wyślesz**:
 
-1. **`Idempotency-Key` (header)** — most cache'uje `klucz → response` (TTL 14 dni).
-   Ten sam klucz przy retry = ten sam wynik, bez dublowania. **Automatyczne ponowienia mieść w 14 dniach**
+1. **`Idempotency-Key` (header)** — most cache'uje `(operacja, klucz) → response` (TTL 14 dni); operacja = metoda + ścieżka
+   z id dokumentu (od v0.21.0, §2). Ten sam klucz przy retry tej samej operacji = ten sam wynik, bez dublowania. **Automatyczne ponowienia mieść w 14 dniach**
    od pierwszej próby — później cache już nie odpowie, a ponowienie trafi w warstwę 2. Od v0.20.0 warstwa 2 jest
    **fail-closed**: albo `409 DUPLICATE_*` (dokument istnieje), albo `201` (nie istniał), albo `503 DUPLICATE_CHECK_UNAVAILABLE`
    (most nie mógł sprawdzić — nic nie zapisano, ponów); nigdy duplikat przez niesprawdzony skan. Do v0.19.x błąd skanu
@@ -717,7 +727,7 @@ Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx =
 
 ### v0.21.0 (w przygotowaniu — edycja PZ: nagłówek)
 - **`GET /api/v1/receipts/{id}`** zwraca rozszerzony `ReceiptDetailDto` (§3.6b): dotychczasowe pola bez zmian + `original_number`,
-  `external_reference`, `warehouse_id`, `status`, `booking_status`, `period_locked`, `linked_documents` (FZ/KFS/inny), `editability`
+  `external_reference` (pełna referencja zapisana przez most, §3.6b), `warehouse_id`, `status`, `booking_status`, `period_locked`, `linked_documents` (FZ/KFS/inny), `editability`
   (fakty), `revision`, `items[]` (pozycje read-only z `issued_*`), `warnings`. `404` tylko przy pozytywnym braku dokumentu; awaria odczytu
   → `502 SUBIEKT_QUERY_FAILED`.
 - **Nowy `PATCH /api/v1/receipts/{id}`** `{ original_number, expected_revision? }` z `Idempotency-Key`: wpisanie numeru dokumentu dostawcy
@@ -727,6 +737,12 @@ Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx =
   `502 RECEIPT_UPDATE_UNVERIFIED` (wynik nieznany → `GET`, bez retry automatycznego). `UNSUPPORTED_DOCUMENT_TYPE` także dla PATCH na nie-PZ.
 - **`422 INVALID_BRIDGE_ID` także dla `sub_0`, ujemnych i `n > 2147483647`** na wszystkich endpointach z `{id}` (invoices, receipts,
   settlements, ksef) — identyfikatory Subiekta są 32-bitowe; wcześniej takie id kończyły się `404` albo błędem Subiekta.
+- **`Idempotency-Key` ważny per operacja i dokument** (§2, §5): cache trzyma `(metoda + ścieżka z id, klucz)`. Ten sam klucz na innym
+  endpoincie albo innym dokumencie wykonuje żądanie zamiast zwracać zapisaną odpowiedź innej operacji (do v0.20.x: np. `POST /receipts`
+  kluczem z `POST /invoices` dostawał FS jako „PZ”, korekta faktury 2 kluczem korekty faktury 1 dostawała KFS faktury 1). Zgodny klient
+  (stały klucz na operację, ten sam przy retry) — bez zmian. Wpisy sprzed 0.21.0 czytane przez POST-y do 14 dni po wdrożeniu (do
+  usunięcia w 0.22.0); `PATCH` ich nie czyta.
+- `POST /invoices/{id}/corrections`: `422 INVALID_BRIDGE_ID` sprawdzany przed replayem (jak `/settlements`).
 - Edycja pozycji PZ (`PUT …/items`) — planowana w v0.22.0.
 
 ### v0.20.0 (2026-10-10 — backlog 138)

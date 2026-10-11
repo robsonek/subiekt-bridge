@@ -138,7 +138,9 @@ Wszystkie wymagają `X-Bridge-Token: <secret>`. Mutujące POST (`/invoices`, `/c
    — retencja i `VACUUM`: `deploy-windows.md`). Replay zwraca zapisany response, ale najpierw weryfikuje,
    że cached `subiekt_id` wciąż istnieje (anulowana FV w Subiekcie → invalidate + nowy request). Do cache trafia
    TYLKO sukces — `503 SUBIEKT_UNAVAILABLE` z preflightu sesji (Subiekt offline przed pierwszym zapisem) nie jest
-   zapisywane, retry tym samym kluczem wykonuje pełny flow.
+   zapisywane, retry tym samym kluczem wykonuje pełny flow. **Klucz żyje w zakresie operacji** (`IdempotencyScope`, od v0.21.0):
+   wiersz = `metoda + ścieżka z id` + klucz — ten sam klucz na innym endpoincie/dokumencie to inny wpis (bez replayu cudzej
+   odpowiedzi); store nie przyjmuje klucza bez zakresu. Wpisy sprzed v0.21.0 (bez zakresu) czyta tylko 6 POST-ów — do usunięcia w v0.22.0.
 2. **Anti-duplicate w Subiekcie** — po `external_reference` w `dok_Uwagi` → 409 `DUPLICATE_*`. Od v0.20.0 **fail-closed**:
    prefiltr read-only SQL po `dok__Dokument` (wszystkie magazyny; COM `OtworzKolekcje` widzi tylko magazyn sesji) + token-check
    + duch wyłącznie `dok_Status = 2` + potwierdzenie COM; awaria skanu → `503 DUPLICATE_CHECK_UNAVAILABLE` (nic nie zapisano,

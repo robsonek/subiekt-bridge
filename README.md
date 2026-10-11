@@ -147,7 +147,7 @@ Wszystkie klucze w `appsettings.Production.json`:
 - **Token** w nagłówku `X-Bridge-Token` z constant-time compare (no timing attacks)
 - **IP whitelist** w Windows Firewall (regułę dorzuca `install-windows.ps1`)
 - **Idempotency** — powtórzony POST z tym samym `Idempotency-Key` zwraca cached response,
-  zapobiega duplikatom FV przy retry
+  zapobiega duplikatom FV przy retry (klucz ważny per operacja i dokument — od v0.21.0)
 - **Single-thread COM** — wszystkie wywołania Sfery serializowane przez globalny `lock`
   (MVP — wystarcza dla typowego ruchu kilka FV/min)
 

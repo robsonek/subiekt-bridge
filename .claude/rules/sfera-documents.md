@@ -236,3 +236,6 @@ Konsekwencja: każde wystawienie FS/KFS/PZ/MM zależy od SqlClienta (`/health` `
   komplet/32 sugestia); rozchód z `dok_MagRuch` (`mr_PozId = ob_Id`, `mr_Ilosc`, `mr_Pozostalo`, j. magazynowe; `ReceiptStockFacts.FromRows`
   z inwariantami: niespójność = `null` + warning, nie liczba). `/sfera/raw` jest jednostrzałowy — do sond łańcucha Wczytaj→set→Zapisz
   służy `deploy/probe-pz-items.ps1` (32-bit PowerShell `-STA`, tylko dokument testowy).
+- `external_reference` w `ReceiptDetailDto` = `ReceiptEditFields.ExtractExternalReference` — odwrotność `UwagiFields.Build` (wspólne stałe
+  `ReferenceMarker`/`ReferenceSeparator`): ostatni `ref: ` na początku Uwag albo po ` | `, do końca pola dosłownie (ref może mieć spacje —
+  `ValidateExternalReference` ich nie zabrania; ucinanie na pierwszej spacji gubiło słowa — Greptile PR #20).
