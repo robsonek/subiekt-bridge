@@ -78,6 +78,9 @@ public sealed class FakeSferaSession : ISferaSession
             PdfBase64: null));
     }
 
+    /// <summary>Symbol mocka z końcówki EAN; krótki EAN (1–3 zn.) w całości - wycinek [^4..] bez kontroli długości rzucał (Greptile PR #20).</summary>
+    private static string MockSymbol(string ean) => "SKU-" + (ean.Length > 4 ? ean[^4..] : ean);
+
     public Task<ProductDto?> FindProductByEanAsync(string ean, CancellationToken ct)
     {
         // Deterministyczny mock: EAN-y zaczynające się na "5901" są "znane".
@@ -88,7 +91,7 @@ public sealed class FakeSferaSession : ISferaSession
 
         return Task.FromResult<ProductDto?>(new ProductDto(
             SubiektId: HashString(ean) % 100000,
-            Symbol: $"SKU-{ean[^4..]}",
+            Symbol: MockSymbol(ean),
             Ean: ean,
             Name: $"Mock product {ean}",
             VatRate: 23m,
@@ -785,7 +788,9 @@ public sealed class FakeSferaSession : ISferaSession
             doc.Items.Add(new FakeItem
             {
                 PositionId = 9_000_000 + counter * 100 + lp, Lp = lp, ProductId = string.IsNullOrEmpty(line.Ean) ? null : HashString(line.Ean) % 100000,
-                Ean = line.Ean, Name = line.NameFallback, Kind = string.IsNullOrEmpty(line.Ean) ? ReceiptItemKind.OneOffService : ReceiptItemKind.Product,
+                // Usługa jednorazowa nie ma towaru → ean/symbol null (lustro Real: tw_* z SQL po TowarId); "" nie trafia do Ean.
+                Ean = string.IsNullOrEmpty(line.Ean) ? null : line.Ean, Name = line.NameFallback,
+                Kind = string.IsNullOrEmpty(line.Ean) ? ReceiptItemKind.OneOffService : ReceiptItemKind.Product,
                 Quantity = line.Quantity, Unit = string.IsNullOrEmpty(line.Unit) ? "szt." : line.Unit, UnitPriceNet = net, VatRate = line.VatRate,
             });
         }
@@ -832,7 +837,7 @@ public sealed class FakeSferaSession : ISferaSession
         {
             facts.TryGetValue(i.PositionId, out var fact);
             decimal net = i.Quantity * i.UnitPriceNet;
-            return new ReceiptItemDto(i.PositionId, i.Lp, i.ProductId, sqlOk ? i.Ean : null, sqlOk && i.Ean is not null ? $"SKU-{i.Ean[^4..]}" : null, i.Name,
+            return new ReceiptItemDto(i.PositionId, i.Lp, i.ProductId, sqlOk ? i.Ean : null, sqlOk && i.Ean is not null ? MockSymbol(i.Ean) : null, i.Name,
                 KindName(i.Kind), i.Quantity, i.Unit, i.Quantity, i.UnitPriceNet, 0m, i.VatRate, net, net * (1m + i.VatRate / 100m),
                 fact?.IssuedStockUnits, fact?.IssuedQuantity);
         }).ToList();

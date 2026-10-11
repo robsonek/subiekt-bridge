@@ -235,6 +235,57 @@ public class ReceiptEditTests
         Assert.Equal("test:pz:ABC supplier:42", Assert.IsType<ReceiptDetailDto>(v).ExternalReference);
     }
 
+    // ----------------------------- Greptile PR #20 (wątek 3): pusty / krótki EAN w Fake -----------------------------
+
+    private static ReceiptIssueRequestDto ReceiptWithEan(string? ean) => new("", null, Supplier(),
+        new[] { new LineDto(ean, "Pozycja testowa", 1m, "szt.", 123m, 23m, UnitPriceNet: 100m) }, $"test:pz:{Guid.NewGuid():N}", "PZ testowe", "Client:test_buyer");
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(null)]
+    public async Task G3_EmptyEan_OneOffService_GetAndPatch200(string? ean)
+    {
+        // RegisterReceipt robił z pustego EAN usługę jednorazową, ale zostawiał "" w Ean, a BuildDetail liczył "SKU-" + Ean[^4..] → wyjątek
+        // przy GET i PATCH. Lustro Real: usługa jednorazowa nie ma towaru → ean i symbol null (tw_* z SQL po TowarId).
+        var fake = new FakeSferaSession();
+        var store = NewStore();
+        var c = Controller(fake, store);
+        var (sc, vc) = Unwrap((await c.Create(ReceiptWithEan(ean), "k-g3", CancellationToken.None)).Result);
+        Assert.Equal(201, sc);
+        long id = Assert.IsType<InvoiceResponseDto>(vc).SubiektId;
+
+        var (sg, vg) = Unwrap((await c.Get($"sub_{id}", CancellationToken.None)).Result);
+        Assert.Equal(200, sg);
+        var item = Assert.Single(Assert.IsType<ReceiptDetailDto>(vg).Items);
+        Assert.Equal("one_off_service", item.Kind);
+        Assert.Null(item.ProductSubiektId);
+        Assert.Null(item.Ean);
+        Assert.Null(item.Symbol);
+
+        var (sp, vp) = Unwrap((await c.PatchHeader($"sub_{id}", Patch("FZ 1/01/2026"), "k-g3-patch", CancellationToken.None)).Result);
+        Assert.Equal(200, sp);
+        Assert.Equal("FZ 1/01/2026", Assert.IsType<ReceiptDetailDto>(vp).OriginalNumber);
+        Assert.Equal(1, FakeSferaSession.SaveCountForTests(id));
+    }
+
+    [Theory]
+    [InlineData("1", "SKU-1")]
+    [InlineData("123", "SKU-123")]
+    [InlineData("1234", "SKU-1234")]
+    [InlineData("5901234123457", "SKU-3457")]
+    public async Task G3_ShortEan_Product_SymbolWithoutOutOfRange(string ean, string symbol)
+    {
+        // Ta sama klasa dla EAN 1–3 znaki (towar): wycinek [^4..] bez kontroli długości rzucał.
+        var fake = new FakeSferaSession();
+        long id = (await fake.CreateReceiptAsync(ReceiptWithEan(ean), CancellationToken.None)).SubiektId;
+        var (s, v) = Unwrap((await Controller(fake).Get($"sub_{id}", CancellationToken.None)).Result);
+        Assert.Equal(200, s);
+        var item = Assert.Single(Assert.IsType<ReceiptDetailDto>(v).Items);
+        Assert.Equal("product", item.Kind);
+        Assert.Equal(ean, item.Ean);
+        Assert.Equal(symbol, item.Symbol);
+    }
+
     // ----------------------------- T3: revision -----------------------------
 
     [Fact]
