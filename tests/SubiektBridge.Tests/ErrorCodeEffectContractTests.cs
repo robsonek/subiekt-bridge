@@ -83,18 +83,18 @@ public class ErrorCodeEffectContractTests
     /// NIC w cache idempotencji, a po powrocie Subiekta ten sam klucz -> 201 (nie replay, bo 503 nie było zapisane).
     /// </summary>
     private static async Task AssertUnavailableKeepsKeyThenRetrySucceeds(
-        FakeSferaSession fake, IdempotencyStore store, string key, Func<string, Task<IActionResult?>> call)
+        FakeSferaSession fake, IdempotencyStore store, IdempotencyScope scope, string key, Func<string, Task<IActionResult?>> call)
     {
         fake.SferaUnavailableForTests = true;
         var (status, value) = Unwrap(await call(key));
         Assert.Equal(503, status);
         Assert.Equal("SUBIEKT_UNAVAILABLE", Assert.IsType<ErrorResponseDto>(value).Code);
-        Assert.Null(await store.TryGetAsync<object>(key, CancellationToken.None));
+        Assert.Null(await store.TryGetAsync<object>(scope, key, CancellationToken.None));
 
         fake.SferaUnavailableForTests = false;
         var retry = Unwrap(await call(key));
         Assert.Equal(201, retry.status);
-        Assert.NotNull(await store.TryGetAsync<object>(key, CancellationToken.None));
+        Assert.NotNull(await store.TryGetAsync<object>(scope, key, CancellationToken.None));
     }
 
     [Fact]
@@ -103,7 +103,7 @@ public class ErrorCodeEffectContractTests
         var fake = new FakeSferaSession(); var store = NewStore();
         var c = new InvoicesController(fake, store, NullLogger<InvoicesController>.Instance);
         var request = Invoice();
-        await AssertUnavailableKeepsKeyThenRetrySucceeds(fake, store, "k-fs-down",
+        await AssertUnavailableKeepsKeyThenRetrySucceeds(fake, store, IdempotencyScope.CreateInvoice, "k-fs-down",
             async key => (await c.Create(request, key, CancellationToken.None)).Result);
     }
 
@@ -113,7 +113,7 @@ public class ErrorCodeEffectContractTests
         var fake = new FakeSferaSession(); var store = NewStore();
         var c = new InvoicesController(fake, store, NullLogger<InvoicesController>.Instance);
         var request = Correction();
-        await AssertUnavailableKeepsKeyThenRetrySucceeds(fake, store, "k-kfs-down",
+        await AssertUnavailableKeepsKeyThenRetrySucceeds(fake, store, IdempotencyScope.CreateCorrection(1_000_001), "k-kfs-down",
             async key => (await c.CreateCorrection("fake_inv_000001", request, key, CancellationToken.None)).Result);
     }
 
@@ -123,7 +123,7 @@ public class ErrorCodeEffectContractTests
         var fake = new FakeSferaSession(); var store = NewStore();
         var c = new ReceiptsController(fake, store, NullLogger<ReceiptsController>.Instance);
         var request = Receipt();
-        await AssertUnavailableKeepsKeyThenRetrySucceeds(fake, store, "k-pz-down",
+        await AssertUnavailableKeepsKeyThenRetrySucceeds(fake, store, IdempotencyScope.CreateReceipt, "k-pz-down",
             async key => (await c.Create(request, key, CancellationToken.None)).Result);
     }
 
@@ -133,7 +133,7 @@ public class ErrorCodeEffectContractTests
         var fake = new FakeSferaSession(); var store = NewStore();
         var c = new TransfersController(fake, store, NullLogger<TransfersController>.Instance);
         var request = Transfer();
-        await AssertUnavailableKeepsKeyThenRetrySucceeds(fake, store, "k-mm-down",
+        await AssertUnavailableKeepsKeyThenRetrySucceeds(fake, store, IdempotencyScope.CreateTransfer, "k-mm-down",
             async key => (await c.Create(request, key, CancellationToken.None)).Result);
     }
 
@@ -143,7 +143,7 @@ public class ErrorCodeEffectContractTests
         var fake = new FakeSferaSession(); var store = NewStore();
         var c = new SettlementsController(fake, store, NullLogger<SettlementsController>.Instance);
         var request = Settlement();
-        await AssertUnavailableKeepsKeyThenRetrySucceeds(fake, store, "k-settle-down",
+        await AssertUnavailableKeepsKeyThenRetrySucceeds(fake, store, IdempotencyScope.CreateSettlement(1_700_001), "k-settle-down",
             async key => (await c.Create("sub_1700001", request, key, CancellationToken.None)).Result);
     }
 
@@ -152,7 +152,7 @@ public class ErrorCodeEffectContractTests
     {
         var fake = new FakeSferaSession(); var store = NewStore();
         var c = BookController(fake, store);
-        await AssertUnavailableKeepsKeyThenRetrySucceeds(fake, store, "k-book-down",
+        await AssertUnavailableKeepsKeyThenRetrySucceeds(fake, store, IdempotencyScope.BookBankTransaction(12_345), "k-book-down",
             async key => (await c.Book(12_345, new BookRequestDto(), key, CancellationToken.None)).Result);
     }
 

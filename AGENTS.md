@@ -99,8 +99,10 @@ przykłady tylko z fikcyjnymi danymi (NIP `1111111111`, EAN-y `5901...`), ZERO d
 | `POST /api/v1/invoices` | Wystaw FS |
 | `POST /api/v1/invoices/{id}/corrections` | Wystaw KFS |
 | `POST /api/v1/invoices/{id}/ksef` / `GET` | Wyślij e-Fakturę do KSeF (advance maszyny stanów) / odczyt stanu |
-| `GET /api/v1/receipts?...` / `{id}` / `{id}/pdf` | Listing / metadane / PDF PZ |
+| `GET /api/v1/receipts?...` / `{id}/pdf` | Listing / PDF PZ |
+| `GET /api/v1/receipts/{id}` | Szczegóły PZ (od v0.21.0): pozycje read-only, `linked_documents` (FZ/KFS), `editability` jako fakty, `revision`, `issued_*` z `dok_MagRuch` (SQL fail-soft) |
 | `POST /api/v1/receipts` | Wystaw PZ (dropshipping) |
+| `PATCH /api/v1/receipts/{id}` | Zmień „Dokument dostawcy” (`original_number`) istniejącego PZ (od v0.21.0) — odczyt kontrolny po `Zapisz`, kod = dowód o skutku; `expected_revision` opcjonalne |
 | `POST /api/v1/transfers` | Wystaw MM (dokument wewnętrzny, NIE KSeF) |
 | `GET /api/v1/bank-operations` | Operacje bankowe BP/BW z wyciągu |
 | `GET /api/v1/bank-transactions` | Surowy passthrough `hb_Transakcja` (read-only SQL) |
@@ -113,7 +115,7 @@ przykłady tylko z fikcyjnymi danymi (NIP `1111111111`, EAN-y `5901...`), ZERO d
 | `POST /api/v1/sfera/raw` | Escape hatch (whitelist metod w configu) |
 
 Wszystkie wymagają `X-Bridge-Token: <secret>`. Mutujące POST (`/invoices`, `/corrections`, `/receipts`,
-`/transfers`, `/settlements`, `/book`) wymagają też `Idempotency-Key`. Bez klucza: `DELETE .../settlements/{id}`
+`/transfers`, `/settlements`, `/book`) i `PATCH /receipts/{id}` wymagają też `Idempotency-Key`. Bez klucza: `DELETE .../settlements/{id}`
 (idempotentny z natury) i `POST .../ksef` (idempotencja przez `StatusKSeF` w Subiekcie).
 
 ## Krytyczne wzorce COM (każdy kosztował debug session)
@@ -136,7 +138,9 @@ Wszystkie wymagają `X-Bridge-Token: <secret>`. Mutujące POST (`/invoices`, `/c
    — retencja i `VACUUM`: `deploy-windows.md`). Replay zwraca zapisany response, ale najpierw weryfikuje,
    że cached `subiekt_id` wciąż istnieje (anulowana FV w Subiekcie → invalidate + nowy request). Do cache trafia
    TYLKO sukces — `503 SUBIEKT_UNAVAILABLE` z preflightu sesji (Subiekt offline przed pierwszym zapisem) nie jest
-   zapisywane, retry tym samym kluczem wykonuje pełny flow.
+   zapisywane, retry tym samym kluczem wykonuje pełny flow. **Klucz żyje w zakresie operacji** (`IdempotencyScope`, od v0.21.0):
+   wiersz = `metoda + ścieżka z id` + klucz — ten sam klucz na innym endpoincie/dokumencie to inny wpis (bez replayu cudzej
+   odpowiedzi); store nie przyjmuje klucza bez zakresu. Wpisy sprzed v0.21.0 (bez zakresu) czyta tylko 6 POST-ów — do usunięcia w v0.22.0.
 2. **Anti-duplicate w Subiekcie** — po `external_reference` w `dok_Uwagi` → 409 `DUPLICATE_*`. Od v0.20.0 **fail-closed**:
    prefiltr read-only SQL po `dok__Dokument` (wszystkie magazyny; COM `OtworzKolekcje` widzi tylko magazyn sesji) + token-check
    + duch wyłącznie `dok_Status = 2` + potwierdzenie COM; awaria skanu → `503 DUPLICATE_CHECK_UNAVAILABLE` (nic nie zapisano,

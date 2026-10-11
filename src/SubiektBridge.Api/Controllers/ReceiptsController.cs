@@ -66,40 +66,166 @@ public sealed class ReceiptsController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Szczegóły PZ (v0.21.0): nadzbiór dawnego InvoiceQueryItemDto + pozycje read-only, powiązania (FZ/KFS/inny), fakty edytowalności,
+    /// revision, fakty rozchodu. Bez guardów mutacji (nie-PZ i unieważnione → 200 z powodami). 404 tylko przy POZYTYWNYM braku dokumentu.
+    /// </summary>
     [HttpGet("{id}")]
-    public async Task<ActionResult<InvoiceQueryItemDto>> Get(string id, CancellationToken ct)
+    public async Task<ActionResult<ReceiptDetailDto>> Get(string id, CancellationToken ct)
     {
-        if (!TryParseSubiektIdFromBridgeId(id, out long subiektId))
+        if (!BridgeIds.TryParseSubiektId(id, out long subiektId))
         {
-            return UnprocessableEntity(new ErrorResponseDto(
-                Code: "INVALID_BRIDGE_ID",
-                Message: $"Bridge ID '{id}' ma nieznany format. Oczekiwane: 'sub_<id>'."));
+            return UnprocessableEntity(InvalidBridgeId(id));
         }
 
-        InvoiceQueryItemDto? item;
-        try { item = await _sfera.FindInvoiceByIdAsync(subiektId, ct); }
+        try
+        {
+            var dto = await _sfera.GetReceiptDetailAsync(subiektId, ct);
+            if (dto is null)
+            {
+                return NotFound(NotFoundError(subiektId));
+            }
+            return Ok(dto);
+        }
         catch (SferaUnavailableException ex)
         {
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new ErrorResponseDto(
                 Code: "SUBIEKT_UNAVAILABLE", Message: ex.Message));
         }
-        if (item == null)
+        catch (ReceiptEditException ex)
         {
-            return NotFound(new ErrorResponseDto(
-                Code: "RECEIPT_NOT_FOUND",
-                Message: $"PZ o subiekt_id={subiektId} nie istnieje w Subiekcie."));
+            var (status, error) = ReceiptEditErrorMapper.ToResult(ex);
+            return StatusCode(status, error);
         }
-        return Ok(item);
     }
+
+    /// <summary>
+    /// PATCH nagłówka PZ: `original_number` (numer dokumentu dostawcy, np. faktury z KSeF). Walidacja PRZED Sferą (422 bez dotykania
+    /// dokumentu), Idempotency-Key (replay z weryfikacją istnienia; klucz NIE kasowany przy 503/502), opcjonalne `expected_revision`
+    /// (409 RECEIPT_REVISION_MISMATCH). Odpowiedź 200 = stan po odczycie kontrolnym po Zapisz (spec §4.2/§4.4/§5.6).
+    /// </summary>
+    [HttpPatch("{id}")]
+    public async Task<ActionResult<ReceiptDetailDto>> PatchHeader(
+        string id,
+        [FromBody] ReceiptHeaderPatchDto request,
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
+        CancellationToken ct)
+    {
+        if (!BridgeIds.TryParseSubiektId(id, out long subiektId))
+        {
+            return UnprocessableEntity(InvalidBridgeId(id));
+        }
+        if (string.IsNullOrEmpty(idempotencyKey))
+        {
+            return BadRequest(new ErrorResponseDto(
+                Code: "MISSING_IDEMPOTENCY_KEY",
+                Message: "Nagłówek 'Idempotency-Key' jest wymagany."));
+        }
+        if (ReceiptEditFields.ValidateOriginalNumber(request.OriginalNumber) is { } validation)
+        {
+            var (vStatus, vError) = ReceiptEditErrorMapper.ToResult(validation);
+            return StatusCode(vStatus, vError);
+        }
+        string value = ReceiptEditFields.NormalizeOriginalNumber(request.OriginalNumber.GetString()!);
+
+        // Replay: cached 200 ma pierwszeństwo przed expected_revision (§4.4 przypadek 1). Dokument pozytywnie nieistniejący → klucz
+        // kasowany i OD RAZU 404 (bez mutacji - Codex r4 #7); pad sesji / odczytu → kod 503/502 BEZ kasowania klucza (kasacja + ponowienie
+        // = zapis bez replayu). Zakres = ten dokument: klucz z POST /receipts albo z PATCH innego PZ to inny wpis (Greptile PR #20 W1).
+        var scope = IdempotencyScope.UpdateReceiptHeader(subiektId);
+        var cached = await _idempotency.TryGetAsync<ReceiptDetailDto>(scope, idempotencyKey, ct);
+        if (cached is not null)
+        {
+            ReceiptDetailDto? stillExists;
+            try { stillExists = await _sfera.GetReceiptDetailAsync(cached.SubiektId, ct); }
+            catch (SferaUnavailableException ex)
+            {
+                return StatusCode(StatusCodes.Status503ServiceUnavailable, new ErrorResponseDto(
+                    Code: "SUBIEKT_UNAVAILABLE", Message: ex.Message));
+            }
+            catch (ReceiptEditException ex)
+            {
+                var (rStatus, rError) = ReceiptEditErrorMapper.ToResult(ex);
+                return StatusCode(rStatus, rError);
+            }
+            if (stillExists is not null)
+            {
+                _logger.LogInformation("Idempotent replay for key {Key} -> PZ {Number} (PATCH original_number)", idempotencyKey, cached.Number);
+                return Ok(cached);
+            }
+            _logger.LogWarning("Idempotent cache invalidated: subiekt_id={Id} ({Number}) nie istnieje juz w Subiekcie - klucz skasowany, 404 bez mutacji (spec 4.4)",
+                cached.SubiektId, cached.Number);
+            await _idempotency.DeleteAsync(scope, idempotencyKey, ct);
+            return NotFound(NotFoundError(cached.SubiektId));
+        }
+
+        ReceiptDetailDto response;
+        try
+        {
+            response = await _sfera.UpdateReceiptHeaderAsync(subiektId, value, request.ExpectedRevision, ct);
+        }
+        catch (SferaUnavailableException ex)
+        {
+            // Preflight sesji: nic nie zapisano, klucz zostaje poza cache, retry tym samym kluczem.
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ErrorResponseDto(
+                Code: "SUBIEKT_UNAVAILABLE", Message: ex.Message));
+        }
+        catch (ReceiptEditException ex)
+        {
+            var (status, error) = ReceiptEditErrorMapper.ToResult(ex);
+            return StatusCode(status, error);
+        }
+        catch (OperationCanceledException ex)
+        {
+            // Anulowanie w trakcie pracy COM: STA konczy delegat (RunOnStaAsync), wynik dla wolajacego NIEZNANY. Mapowanie - przy
+            // zerwanym HTTP odpowiedzi i tak nie da sie dostarczyc; nic nie trafia do cache.
+            _logger.LogWarning(ex, "PATCH PZ {Id}: zadanie anulowane w trakcie pracy COM - stan nieznany (klient: GET)", subiektId);
+            return StatusCode(StatusCodes.Status502BadGateway, new ErrorResponseDto(
+                Code: "RECEIPT_UPDATE_UNVERIFIED",
+                Message: "Zadanie anulowane w trakcie zapisu w Subiekcie - stan PZ nieznany, sprawdz GET.",
+                Details: new { saved_probably = (bool?)null, hresult = (string?)null, sfera_message = (string?)null, phase = (string?)null }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "PATCH PZ {Id} failed unexpectedly", subiektId);
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponseDto(
+                Code: "INTERNAL_ERROR",
+                Message: ex.GetType().Name + ": " + ex.Message,
+                Details: new { stack = ex.StackTrace?.Split('\n').Take(10).ToArray() }));
+        }
+
+        try
+        {
+            await _idempotency.SaveAsync(scope, idempotencyKey, response, ct);
+        }
+        catch (Exception ex)
+        {
+            // Zapis w Subiekcie JUZ WSZEDL (odczyt kontrolny potwierdzil) - tylko cache padl. Ponowienie = cache miss: trzy przypadki z kontraktu
+            // §3.6b (stare expected_revision -> 409; bez pola -> no-op TYLKO gdy wartosc biezaca == zadana, inaczej zapis).
+            _logger.LogError(ex, "PATCH PZ {Id}: zapis cache idempotencji padl PO udanym zapisie w Subiekcie (stan zapisany; ponowienie wg kontraktu 3.6b)", subiektId);
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponseDto(
+                Code: "INTERNAL_ERROR",
+                Message: "Zmiana zapisana w Subiekcie, ale zapis cache idempotencji padl: " + ex.Message,
+                Details: new { state = "saved", subiekt_id = response.SubiektId, revision = response.Revision }));
+        }
+        return Ok(response);
+    }
+
+    private static ErrorResponseDto InvalidBridgeId(string id) => new(
+        Code: "INVALID_BRIDGE_ID",
+        Message: $"Bridge ID '{id}' ma nieznany format albo id poza zakresem. Oczekiwane: 'sub_<n>', 1 <= n <= 2147483647.");
+
+    private static ErrorResponseDto NotFoundError(long subiektId) => new(
+        Code: "RECEIPT_NOT_FOUND",
+        Message: $"PZ o subiekt_id={subiektId} nie istnieje w Subiekcie.");
 
     [HttpGet("{id}/pdf")]
     public async Task<IActionResult> GetPdf(string id, CancellationToken ct)
     {
-        if (!TryParseSubiektIdFromBridgeId(id, out long subiektId))
+        if (!BridgeIds.TryParseSubiektId(id, out long subiektId))
         {
             return UnprocessableEntity(new ErrorResponseDto(
                 Code: "INVALID_BRIDGE_ID",
-                Message: $"Bridge ID '{id}' ma nieznany format. Oczekiwane: 'sub_<id>'."));
+                Message: $"Bridge ID '{id}' ma nieznany format albo id poza zakresem. Oczekiwane: 'sub_<n>', 1 <= n <= 2147483647."));
         }
 
         var bytes = await _sfera.GetInvoicePdfAsync(subiektId, ct);
@@ -110,17 +236,6 @@ public sealed class ReceiptsController : ControllerBase
                 Message: $"PDF dla subiekt_id={subiektId} niedostępny."));
         }
         return File(bytes, "application/pdf", $"receipt_{subiektId}.pdf");
-    }
-
-    private static bool TryParseSubiektIdFromBridgeId(string bridgeId, out long subiektId)
-    {
-        subiektId = 0;
-        if (string.IsNullOrEmpty(bridgeId)) return false;
-        if (bridgeId.StartsWith("sub_") && long.TryParse(bridgeId.AsSpan(4), out subiektId))
-        {
-            return true;
-        }
-        return false;
     }
 
     [HttpPost]
@@ -141,7 +256,7 @@ public sealed class ReceiptsController : ControllerBase
         // PZ w Subiekcie (a nasz Idempotency-Key zostal ten sam, np. ponowny klik 'Wystaw PZ'
         // w UI po manualnym usunieciu z Subiekta), nie chcemy zwracac danych ducha -
         // traktujemy request jako nowy. Wzorzec analogiczny do InvoicesController v0.7.23.
-        var cached = await _idempotency.TryGetAsync<InvoiceResponseDto>(idempotencyKey, ct);
+        var cached = await _idempotency.TryGetAsync<InvoiceResponseDto>(IdempotencyScope.CreateReceipt, idempotencyKey, ct);
         if (cached is not null)
         {
             InvoiceQueryItemDto? stillExists;
@@ -160,7 +275,7 @@ public sealed class ReceiptsController : ControllerBase
             }
             _logger.LogWarning("Idempotent cache invalidated: subiekt_id={Id} ({Number}) nie istnieje juz w Subiekcie - traktujemy jako nowy request",
                 cached.SubiektId, cached.Number);
-            await _idempotency.DeleteAsync(idempotencyKey, ct);
+            await _idempotency.DeleteAsync(IdempotencyScope.CreateReceipt, idempotencyKey, ct);
         }
 
         if (request.Lines.Count == 0)
@@ -194,7 +309,7 @@ public sealed class ReceiptsController : ControllerBase
         try
         {
             var response = await _sfera.CreateReceiptAsync(request, ct);
-            await _idempotency.SaveAsync(idempotencyKey, response, ct);
+            await _idempotency.SaveAsync(IdempotencyScope.CreateReceipt, idempotencyKey, response, ct);
             return StatusCode(StatusCodes.Status201Created, response);
         }
         catch (ContractorLookupUnavailableException ex)
@@ -259,6 +374,65 @@ public sealed class ReceiptsController : ControllerBase
                 Code: "INTERNAL_ERROR",
                 Message: ex.GetType().Name + ": " + ex.Message,
                 Details: new { stack = ex.StackTrace?.Split('\n').Take(10).ToArray() }));
+        }
+    }
+}
+
+/// <summary>Mapowanie ReceiptEditException -> (HTTP, ErrorResponseDto). Statyczne, testowalne bez kontrolera (spec §5.6).</summary>
+internal static class ReceiptEditErrorMapper
+{
+    internal static string LockReasonCode(ReceiptLockReason? reason) => reason switch
+    {
+        ReceiptLockReason.LockedBySession => "LOCKED_BY_SESSION",
+        ReceiptLockReason.ConcurrentModification => "CONCURRENT_MODIFICATION",
+        ReceiptLockReason.PermissionDenied => "PERMISSION_DENIED",
+        ReceiptLockReason.PeriodLocked => "PERIOD_LOCKED",
+        ReceiptLockReason.Booked => "BOOKED",
+        ReceiptLockReason.NotEditable => "NOT_EDITABLE",
+        ReceiptLockReason.NotSaved => "NOT_SAVED",
+        _ => "UNKNOWN",
+    };
+
+    internal static (int Status, ErrorResponseDto Error) ToResult(ReceiptEditException ex)
+    {
+        string? hresult = ReceiptEditException.HresultText(ex.Hresult);
+        string? phase = ex.Phase?.ToString();
+        switch (ex.Reason)
+        {
+            case ReceiptEditError.NotFound:
+                return (StatusCodes.Status404NotFound, new ErrorResponseDto("RECEIPT_NOT_FOUND", ex.Message));
+            case ReceiptEditError.NotAReceipt:
+                return (StatusCodes.Status422UnprocessableEntity, new ErrorResponseDto("UNSUPPORTED_DOCUMENT_TYPE", ex.Message, ex.Details));
+            case ReceiptEditError.Cancelled:
+                return (StatusCodes.Status409Conflict, new ErrorResponseDto("RECEIPT_CANCELLED", ex.Message));
+            case ReceiptEditError.RevisionMismatch:
+                return (StatusCodes.Status409Conflict, new ErrorResponseDto("RECEIPT_REVISION_MISMATCH", ex.Message,
+                    new { current_revision = ex.CurrentRevision }));
+            case ReceiptEditError.Locked:
+                bool transient = ex.LockReason is ReceiptLockReason.LockedBySession or ReceiptLockReason.ConcurrentModification;
+                return (StatusCodes.Status409Conflict, new ErrorResponseDto("RECEIPT_LOCKED", ex.Message,
+                    new
+                    {
+                        reason = LockReasonCode(ex.LockReason),
+                        phase,
+                        hresult,
+                        sfera_message = ex.SferaMessage,
+                        sfera_can_edit = ex.SferaCanEdit,
+                        linked_documents = ex.LinkedDocuments ?? Array.Empty<LinkedDocumentDto>(),
+                    },
+                    RetryAfterSeconds: transient ? 30 : null));
+            case ReceiptEditError.Validation:
+                return (StatusCodes.Status422UnprocessableEntity, new ErrorResponseDto(ex.Code ?? "INVALID_REQUEST", ex.Message, ex.Details));
+            case ReceiptEditError.UpdateFailed:
+                return (StatusCodes.Status500InternalServerError, new ErrorResponseDto("RECEIPT_UPDATE_FAILED", ex.Message,
+                    new { hresult, sfera_message = ex.SferaMessage, phase }));
+            case ReceiptEditError.UpdateUnverified:
+                return (StatusCodes.Status502BadGateway, new ErrorResponseDto("RECEIPT_UPDATE_UNVERIFIED", ex.Message,
+                    new { saved_probably = ex.SavedProbably, hresult, sfera_message = ex.SferaMessage, phase }));
+            case ReceiptEditError.ReadFailed:
+                return (StatusCodes.Status502BadGateway, new ErrorResponseDto("SUBIEKT_QUERY_FAILED", ex.Message));
+            default:
+                return (StatusCodes.Status500InternalServerError, new ErrorResponseDto("INTERNAL_ERROR", ex.Message));
         }
     }
 }

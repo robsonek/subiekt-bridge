@@ -8,7 +8,8 @@ namespace SubiektBridge.Api.Idempotency;
 /// Lokalny SQLite store dla idempotency keys: klucz -> zapamiętany response (JSON).
 ///
 /// Powtórny POST z tym samym <c>Idempotency-Key</c> dostaje to samo body co pierwszy
-/// - zapobiega podwójnemu wystawieniu FV przy retry po stronie Laravela.
+/// - zapobiega podwójnemu wystawieniu FV przy retry po stronie Laravela. Klucz żyje w zakresie operacji
+/// (<see cref="IdempotencyScope"/>, od v0.21.0): wiersz = "operacja\nklucz", ten sam klucz na innej operacji = inny wiersz.
 ///
 /// TTL z BridgeOptions (domyślnie 14 dni) - po przekroczeniu wpis jest ignorowany przy odczycie,
 /// a <see cref="IdempotencyCleanupService"/> raz na dobę go kasuje (<see cref="PurgeExpiredAsync"/>).
@@ -52,7 +53,7 @@ public sealed class IdempotencyStore
         EnsureSchema();
     }
 
-    public async Task<TResponse?> TryGetAsync<TResponse>(string key, CancellationToken ct)
+    public async Task<TResponse?> TryGetAsync<TResponse>(IdempotencyScope scope, string key, CancellationToken ct)
         where TResponse : class
     {
         await using var conn = new SqliteConnection(_connectionString);
@@ -60,23 +61,30 @@ public sealed class IdempotencyStore
 
         // Krok 1: pobierz JSON i timestamp. Zamykamy reader przed dalszymi operacjami,
         // bo SQLite nie pozwala na concurrent commands na tym samym connection.
+        // Wpis bez zakresu (sprzed v0.21.0) tylko dla operacji, która go czyta - wpis z zakresem ma pierwszeństwo.
+        string? storageKey = null;
         string? json = null;
         DateTimeOffset? createdAt = null;
 
         await using (var cmd = conn.CreateCommand())
         {
-            cmd.CommandText = "SELECT response_json, created_at FROM idempotency WHERE key = $key LIMIT 1";
-            cmd.Parameters.AddWithValue("$key", key);
+            cmd.CommandText = """
+                SELECT key, response_json, created_at FROM idempotency
+                WHERE key = $scoped OR ($unscoped = 1 AND key = $key)
+                ORDER BY key = $scoped DESC LIMIT 1
+                """;
+            AddKeyParameters(cmd, scope, key);
 
             await using var reader = await cmd.ExecuteReaderAsync(ct);
             if (await reader.ReadAsync(ct))
             {
-                json = reader.GetString(0);
-                createdAt = DateTimeOffset.Parse(reader.GetString(1));
+                storageKey = reader.GetString(0);
+                json = reader.GetString(1);
+                createdAt = DateTimeOffset.Parse(reader.GetString(2));
             }
         }
 
-        if (json is null || createdAt is null)
+        if (storageKey is null || json is null || createdAt is null)
         {
             return null;
         }
@@ -104,27 +112,39 @@ public sealed class IdempotencyStore
 
             await using var deleteCmd = conn.CreateCommand();
             deleteCmd.CommandText = "DELETE FROM idempotency WHERE key = $key";
-            deleteCmd.Parameters.AddWithValue("$key", key);
+            deleteCmd.Parameters.AddWithValue("$key", storageKey);
             await deleteCmd.ExecuteNonQueryAsync(ct);
 
             return null;
         }
     }
 
-    public async Task DeleteAsync(string key, CancellationToken ct)
+    /// <summary>Kasuje wpis operacji (i jej wpis bez zakresu sprzed v0.21.0 - ten sam, który zwróciłby <see cref="TryGetAsync{TResponse}"/>).</summary>
+    public async Task DeleteAsync(IdempotencyScope scope, string key, CancellationToken ct)
     {
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
 
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM idempotency WHERE key = $key";
-        cmd.Parameters.AddWithValue("$key", key);
+        cmd.CommandText = "DELETE FROM idempotency WHERE key = $scoped OR ($unscoped = 1 AND key = $key)";
+        AddKeyParameters(cmd, scope, key);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task SaveAsync<TResponse>(string key, TResponse response, CancellationToken ct)
+    private static void AddKeyParameters(SqliteCommand cmd, IdempotencyScope scope, string key)
+    {
+        cmd.Parameters.AddWithValue("$scoped", scope.StorageKey(key));
+        cmd.Parameters.AddWithValue("$unscoped", scope.ReadsUnscopedEntries ? 1 : 0);
+        cmd.Parameters.AddWithValue("$key", key);
+    }
+
+    /// <summary>Test-only: wyjątek rzucany na wejściu SaveAsync (symulacja awarii cache PO udanym zapisie w Subiekcie; spec PZ v0.21.0 T18).</summary>
+    internal Exception? FailSaveForTests { get; set; }
+
+    public async Task SaveAsync<TResponse>(IdempotencyScope scope, string key, TResponse response, CancellationToken ct)
         where TResponse : class
     {
+        if (FailSaveForTests is { } fail) throw fail;
         var json = JsonSerializer.Serialize(response);
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
@@ -134,7 +154,7 @@ public sealed class IdempotencyStore
             INSERT OR REPLACE INTO idempotency (key, response_json, created_at)
             VALUES ($key, $json, $created)
             """;
-        cmd.Parameters.AddWithValue("$key", key);
+        cmd.Parameters.AddWithValue("$key", scope.StorageKey(key));
         cmd.Parameters.AddWithValue("$json", json);
         cmd.Parameters.AddWithValue("$created", DateTimeOffset.UtcNow.ToString("O"));
 

@@ -299,7 +299,7 @@ public class SettlementsTests
     public async Task Controller_Get_DocumentNotFound_Returns404()
     {
         var controller = NewSettlementsController(new FakeSferaSession());
-        var r = await controller.GetState("sub_-1", CancellationToken.None);
+        var r = await controller.GetState($"sub_{FakeSferaSession.NotFoundIdForTests}", CancellationToken.None);
 
         var (status, value) = Unwrap(r.Result);
         Assert.Equal(404, status);

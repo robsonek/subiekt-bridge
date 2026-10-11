@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.19.1**. Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
+> **Dotyczy:** SubiektBridge **v0.21.0** (w przygotowaniu; v0.20.0 wydane 2026-10-10). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -24,6 +24,8 @@
 | Wystaw fakturę sprzedaży (FS) | `POST /api/v1/invoices` | ✅ |
 | Wystaw korektę (KFS) | `POST /api/v1/invoices/{id}/corrections` | ✅ |
 | Wystaw przyjęcie magazynowe (PZ) | `POST /api/v1/receipts` | ✅ |
+| Szczegóły PZ: pozycje, powiązania (FZ/KFS), edytowalność, `revision` (od v0.21.0) | `GET /api/v1/receipts/{id}` | — |
+| Dopisz numer dokumentu dostawcy do istniejącego PZ (`original_number`, od v0.21.0) | `PATCH /api/v1/receipts/{id}` | ✅ |
 | Wystaw przesunięcie międzymagazynowe (MM) | `POST /api/v1/transfers` | ✅ |
 | Rozlicz fakturę z przelewem z wyciągu (**FS i FZ**, nie korekty) | `POST /api/v1/invoices/{id}/settlements` | ✅ |
 | Stan rozliczenia faktury | `GET /api/v1/invoices/{id}/settlements` | — |
@@ -49,9 +51,12 @@ Dostajesz go w polach `id` / `existing_bridge_id` z response.
 ## 2. Zasady wywołań (obowiązkowe)
 
 - **Każdy request:** nagłówek `X-Bridge-Token: <sekret>`. Brak/zły → `401`.
-- **Każda operacja mutująca (POST):** nagłówek `Idempotency-Key: <uuid>`. Brak → `400 MISSING_IDEMPOTENCY_KEY`.
+- **Każda operacja mutująca (POST, PATCH):** nagłówek `Idempotency-Key: <uuid>`. Brak → `400 MISSING_IDEMPOTENCY_KEY`.
   - Klucz generujesz **Ty (klient)**, jeden stabilny klucz na (zamówienie × typ dokumentu).
     Przy retry użyj **tego samego** klucza → most zwróci zapisany wynik, nie zdubluje faktury.
+  - **Klucz jest ważny per operacja i dokument** (od v0.21.0): metoda + ścieżka z id z URL. Ten sam klucz na innym
+    endpoincie (np. `POST /receipts` i `PATCH /receipts/{id}`) albo na innym dokumencie (`/invoices/sub_1/corrections`
+    vs `/invoices/sub_2/corrections`) to osobny wpis — most nigdy nie zwróci zapisanej odpowiedzi innej operacji.
   - **Wyjątek:** `POST /invoices/{id}/ksef` NIE wymaga `Idempotency-Key` — to idempotentny
     „advance" maszyny stanów KSeF w Subiekcie; powtórny POST nic nie wyśle drugi raz (§3.12).
 - **HTTPS z self-signed certem** — most generuje własny cert. W kliencie ustaw `verify=false`
@@ -205,6 +210,52 @@ wpisane wprost, `ob_CenaBrutto` wyliczane z VAT). Masz dwie opcje:
 Błędy specyficzne (od v0.20.0) jak dla FS: `422 INVALID_EXTERNAL_REFERENCE`, `503 DUPLICATE_CHECK_UNAVAILABLE` (§4;
 `details.document_type` = `"PZ"`).
 
+### 3.6b `GET /api/v1/receipts/{id}` i `PATCH /api/v1/receipts/{id}` — istniejące PZ (od v0.21.0)
+
+**GET** zwraca `ReceiptDetailDto` — nadzbiór dawnego wiersza listingu (pola `subiekt_id, number, type, issue_date, contractor_*, *_amount,
+notes` bez zmian) plus:
+
+```jsonc
+{
+  "original_number": "Client:test_buyer",              // „Dokument dostawcy” (SuDokument.NumerOryginalny, max 30 zn.)
+  "external_reference": "nowysystem:order:ABC:supplier:42", // pełna referencja z Uwag (reguła niżej); null, gdy brak markera
+  "warehouse_id": 4, "status": 1, "booking_status": 0, "period_locked": false,   // status = dok_Status; booking_status = status księgowy (0..7)
+  "linked_documents": [ { "relation": "linked", "type": "FZ", "subiekt_id": 60001, "number": "FZ 7/2026" } ],  // FZ/KFS/…; [] = brak
+  "editability": { "sfera_can_edit": true, "reasons": [] },  // FAKTY: CANCELLED | NOT_A_RECEIPT | PERIOD_LOCKED | BOOKED | EXPORTED_TO_ACCOUNTING | LINKED_DOCUMENT | SFERA_NOT_EDITABLE
+  "revision": "r1:7f3a0b2c9d4e5f61",                      // opaque; do expected_revision
+  "items": [ { "position_id": 910001, "lp": 1, "product_subiekt_id": 6931, "ean": "5901234567890", "symbol": "SKU-7890", "name": "Towar testowy",
+               "kind": "product", "quantity": 35, "unit": "szt.", "quantity_in_stock_units": 35, "unit_price_net": 24.39, "discount_percent": 0,
+               "vat_rate": 23, "value_net": 853.65, "value_gross": 1049.99, "issued_stock_units": 12, "issued_quantity": 12 } ],
+  "warnings": []                                           // "SQL_FACTS_UNAVAILABLE" | "STOCK_FACTS_INCONSISTENT"
+}
+```
+- `editability` to informacja, nie decyzja mostu: most NIE odmawia edycji na podstawie powiązania czy `sfera_can_edit` — o odmowie
+  decyduje Sfera przy zapisie (409 `RECEIPT_LOCKED` z powodem). Dokument innego typu niż PZ i dokument unieważniony też dają `200`
+  (z powodem w `reasons`). `404` tylko, gdy Subiekt POZYTYWNIE potwierdzi brak dokumentu; awaria odczytu → `502 SUBIEKT_QUERY_FAILED`.
+- `external_reference` = tekst po **ostatnim** znaczniku `ref: ` (na początku Uwag albo po separatorze ` | `) **do końca pola,
+  dosłownie** (ze spacjami) — tak most zapisuje referencję przy `POST` (zawsze na końcu Uwag). `null`, gdy Uwagi nie mają znacznika
+  (np. referencja była już w `notes` i most jej nie dopisał). Granica: referencja zawierająca ` | ref: ` jest nieodróżnialna od notatek
+  z markerem — wygrywa ostatni znacznik.
+- `issued_stock_units` / `issued_quantity` = ile z dostawy tej pozycji już wydano (jednostki magazynowe / jednostki dokumentu);
+  `null` + ostrzeżenie, gdy most nie mógł tego odczytać albo dane są niespójne. Pola z bazy (`warehouse_id`, `period_locked`, `ean`,
+  `symbol`, `linked_documents[].type`, `issued_*`) są **fail-soft**: `null` + `warnings: ["SQL_FACTS_UNAVAILABLE"]`.
+
+**PATCH** (wymaga `Idempotency-Key`): `{ "original_number": "FZ 1/01/2026", "expected_revision": "r1:…" }` (`expected_revision`
+opcjonalne). Zasady:
+- `Idempotency-Key` jest ważny dla **tego PZ i tej operacji** (§2): klucz użyty wcześniej w `POST /receipts` albo w PATCH innego PZ
+  nie daje replayu. **Każda odrębna zmiana = nowy klucz** (np. `…:original_number:<wartość>`) — ten sam klucz z innym body na tym
+  samym PZ zwraca zapisany wynik pierwszej zmiany (replay).
+- walidacja PRZED Sferą: brak pola → `422 EMPTY_UPDATE`; `null`, nie-string, pusty → `422 INVALID_ORIGINAL_NUMBER` (`details.reason`);
+  po przycięciu spacji > 30 znaków → `422 ORIGINAL_NUMBER_TOO_LONG` (`details.max_length`, `details.length`). **Bez cichego ucięcia**
+  (POST `/receipts` nadal tnie `original_number` do 30 — tam nic się nie zmienia).
+- ta sama wartość co w dokumencie → `200` bez zapisu (no-op, bez blokowania dokumentu w Subiekcie).
+- `200` = stan dokumentu **po odczycie kontrolnym po zapisie** (`ReceiptDetailDto`), nie echo requestu.
+- `expected_revision`: niezgodna z bieżącym `revision` → `409 RECEIPT_REVISION_MISMATCH` (`details.current_revision`) PRZED jakąkolwiek
+  zmianą. Ponowienie po udanym zapisie: **cache hit** (ten sam `Idempotency-Key`) → `200` z cache niezależnie od `expected_revision`;
+  **cache miss + stare `expected_revision`** → `409` **celowo** (sprawdź `GET`); **cache miss bez `expected_revision`** → no-op tylko gdy
+  bieżąca wartość równa żądanej, inaczej zapis (nadpisze zmianę operatora — świadomie nie podałeś `expected_revision`).
+- edycja pozycji PZ (`PUT …/items`) — planowana w v0.22.0, poza tym kontraktem.
+
 ### 3.7 `POST /api/v1/transfers` — MM (przesunięcie międzymagazynowe)
 
 Przenosi stan towaru między magazynami. **Dokument wewnętrzny magazynowy — NIE idzie do KSeF**
@@ -240,6 +291,7 @@ wówczas tylko stan, nie ruszając dokumentu.
 o tym NIP jest nabywcą (porównanie bez kresek i spacji); brak takiego kontrahenta = pusta tablica. Zwraca tablicę pozycji z
 `subiekt_id, number, type, issue_date, contractor_*, *_amount, notes`.
 `GET /api/v1/invoices/{id}/pdf` → strumień `application/pdf` (retro generacja).
+`GET /api/v1/receipts/{id}` od v0.21.0 zwraca rozszerzony `ReceiptDetailDto` (§3.6b) — dotychczasowe pola bez zmian.
 
 ### 3.9 Rozliczenia — spinanie faktur z przelewami z wyciągu (**FS i FZ**)
 
@@ -444,7 +496,8 @@ Limit czekania mostu konfiguruje `Bridge:KsefSendTimeoutSeconds` (default 90 s).
 Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reguły:
 
 - **2xx** → sukces.
-- **4xx** → błąd danych po Twojej stronie → **NIE retry'uj**, popraw request / zgłoś operatorowi.
+- **4xx** → błąd danych po Twojej stronie → **NIE retry'uj**, popraw request / zgłoś operatorowi. **Jedyny wyjątek:** `409 RECEIPT_LOCKED`
+  z `retry_after_seconds` (PATCH PZ; powód `LOCKED_BY_SESSION` / `CONCURRENT_MODIFICATION`) — ponów po odczekaniu.
 - **5xx / 502 / 503** → ponawiaj (z backoffem, **tym samym `Idempotency-Key`**) **wyłącznie kody z listy retry**:
   - **„nic nie zapisano”**: `SUBIEKT_UNAVAILABLE`, `SUBIEKT_QUERY_FAILED`, `BRIDGE_DEGRADED`,
     `CONTRACTOR_LOOKUP_UNAVAILABLE`, `DUPLICATE_CHECK_UNAVAILABLE` (od v0.20.0), `HB_BOOKING_FAILED` — gwarancja mostu:
@@ -455,7 +508,11 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 
   Kody spoza listy
   (`HB_BOOKING_ORPHAN`, `INTERNAL_ERROR`) = wynik nieznany albo twardy błąd → **nie ponawiaj automatycznie**,
-  eskaluj do operatora (na FS/KFS/PZ/MM ręczne ponowienie jest bezpieczne — chroni anti-duplicate `409`).
+  eskaluj do operatora (na FS/KFS/PZ/MM ręczne ponowienie jest bezpieczne — chroni anti-duplicate `409`; na PATCH PZ ręczne
+  ponowienie = trzy przypadki z §3.6b: cache hit → cached `200`, stare `expected_revision` → `409`, bez `expected_revision` → no-op
+  **tylko gdy** bieżąca wartość równa żądanej, inaczej zapis).
+- **`502 RECEIPT_UPDATE_UNVERIFIED`** (PATCH PZ, od v0.21.0) = wynik nieznany (most nie potwierdził stanu po zapisie) → **nie ponawiaj
+  automatycznie**: zrób `GET`, porównaj `original_number`/`revision` i zdecyduj; `details.saved_probably` (`true`/`false`/`null`).
 - **202 (tylko KSeF)** → wysyłka w toku — ponów `POST .../ksef` po 30–60 s. To NIE jest błąd.
 - **409 `DUPLICATE_INVOICE` / `DUPLICATE_RECEIPT` / `DUPLICATE_TRANSFER`** → dokument z tym
   `external_reference` już istnieje → **auto-recovery**: pobierz `details.existing_subiekt_id` /
@@ -480,7 +537,13 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 422 | `NOTES_TOO_LONG` | `notes` (FS/PZ/MM) lub `reason` (KFS) nie mieści się z doklejanym `ref: <external_reference>` w 500 znakach Uwag Subiekta (`details.max_length`) — skróć (§7.7) |
 | 422 | `INVALID_CORRECTION` | (KFS) linia korekty bez pasującej pozycji FS, dwie linie na tę samą pozycję albo zwrot większy niż ilość na pozycji — popraw linie, nie retry |
 | 422 | `INVALID_EXTERNAL_REFERENCE` | (FS/KFS/PZ/MM, od v0.20.0) `external_reference` pusty/biały albo dłuższy niż 495 znaków (`details.max_length`) — bez niego most nie może sprawdzić duplikatu, a dłuższy nie mieści się w Uwagach z `ref: `; sprawdzane PRZED `NOTES_TOO_LONG` — popraw, nie retry |
-| 404 | `INVOICE_NOT_FOUND` / `RECEIPT_NOT_FOUND` | zły `{id}` |
+| 404 | `INVOICE_NOT_FOUND` / `RECEIPT_NOT_FOUND` | zły `{id}` (od v0.21.0 dla PZ: tylko gdy Subiekt pozytywnie potwierdził brak dokumentu) |
+| 422 | `EMPTY_UPDATE` / `INVALID_ORIGINAL_NUMBER` / `ORIGINAL_NUMBER_TOO_LONG` | (PATCH PZ, od v0.21.0) brak pola / `null`, nie-string, pusty (`details.reason`) / > 30 znaków (`details.max_length`, `details.length`); `INVALID_ORIGINAL_NUMBER` może też przyjść PO zapisie, gdy Sfera odrzuci wartość (`details.source = "sfera"`, `details.hresult`) — stan bez zmian; nie retry |
+| 409 | `RECEIPT_CANCELLED` | (PATCH PZ) dokument unieważniony w Subiekcie — nie retry |
+| 409 | `RECEIPT_REVISION_MISMATCH` | (PATCH PZ) `expected_revision` ≠ bieżący `revision` (`details.current_revision`) — `GET` i decyzja |
+| 409 | `RECEIPT_LOCKED` | (PATCH PZ) Sfera odmówiła edycji, stan bez zmian; `details.reason` ∈ {`LOCKED_BY_SESSION` (otwarty w GUI), `CONCURRENT_MODIFICATION`, `PERMISSION_DENIED`, `PERIOD_LOCKED`, `BOOKED`, `NOT_EDITABLE` (np. dokument powiązany), `NOT_SAVED`}, `details.hresult`, `details.sfera_message`, `details.phase`, `details.sfera_can_edit`, `details.linked_documents`; `retry_after_seconds` tylko dla dwóch pierwszych powodów |
+| 500 | `RECEIPT_UPDATE_FAILED` | (PATCH PZ) zapis padł z niesklasyfikowanym błędem, odczyt kontrolny potwierdza stan sprzed (`details.hresult`, `details.sfera_message`, `details.phase`) — nie retry automatycznie; ręcznie bezpiecznie |
+| 502 | `RECEIPT_UPDATE_UNVERIFIED` | (PATCH PZ) wynik nieznany po zapisie (sesja zresetowana, zamknięcie niepotwierdzone, odczyt kontrolny padł, stan rozjechany, żądanie anulowane) — **`GET`, nie retry automatyczny**; `details.saved_probably` |
 | 404 | `SETTLEMENT_NOT_FOUND` | (DELETE) rozliczenie nie istnieje / już cofnięte |
 | 501 | `HB_BOOKING_NOT_SUPPORTED` | (book) księgowanie wyłączone serwerowo (`EnableHbBooking=false`) — księguj w module Bankowość, potem `/settlements` |
 | 422 | `UNSUPPORTED_FOREIGN_ACCOUNT` / `UNSUPPORTED_HB_STATUS` | (book) rachunek wyciągu nie-PLN lub linia w nietypowym `hb_Status` — nie retry |
@@ -488,9 +551,9 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 422 | `NO_BANK_ACCOUNT` / `INVALID_DIRECTION` | (book) linia bez konta wyciągu lub `hb_Oznaczenie` ∉ {C,D} — nie retry |
 | 500 | `HB_BOOKING_FAILED` | (book) **wyłącznie** gdy nic nie zapisano albo operacja została czysto cofnięta (odrzucenie przez Sferę przed/na zapisie, nieudany link z udanym rollbackiem) — **bezpieczny retry** tym samym kluczem |
 | 500 | `HB_BOOKING_ORPHAN` | (book) stan niespójny: operacja powstała (lub mogła powstać) bez linku — **NIE retry** (drugi BP), zgłoś do ręcznego usunięcia w Subiekcie; `details.bank_operation_subiekt_id` (`int \| null`, `null` = wyjątek z/po zapisie, id nieodczytane) + `details.hb_id` |
-| 422 | `INVALID_BRIDGE_ID` | `{id}` nie w formacie `sub_<n>` |
+| 422 | `INVALID_BRIDGE_ID` | `{id}` nie w formacie `sub_<n>` albo `n` poza zakresem `1 ≤ n ≤ 2147483647` (od v0.21.0 na wszystkich endpointach z `{id}`; identyfikatory Subiekta są 32-bitowe — wcześniej takie id dawały `404` albo błąd Subiekta) |
 | 422 | `SETTLEMENT_NOT_SUPPORTED` | dokument bez rozrachunku (goły PZ/MM) lub rozrachunek na centrum kart/rat — nie retry |
-| 422 | `UNSUPPORTED_DOCUMENT_TYPE` | settlements obsługują tylko FS/FZ; korekty (KFS/KFZ) i inne typy odrzucane — nie retry |
+| 422 | `UNSUPPORTED_DOCUMENT_TYPE` | settlements obsługują tylko FS/FZ; korekty (KFS/KFZ) i inne typy odrzucane; PATCH `/receipts/{id}` na dokumencie, który nie jest PZ (`details.document_type`) — nie retry |
 | 422 | `ALREADY_SETTLED` | rozrachunek już rozliczony (np. faktura gotówkowa) — nie retry. Retry **tego samego** przelewu po pełnym rozliczeniu daje `409 DUPLICATE_SETTLEMENT` (auto-recovery), nie 422 |
 | 422 | `UNSUPPORTED_BANK_OPERATION_TYPE` | `bank_operation_subiekt_id` nie wskazuje operacji bankowej BP/BW (np. podano `hb_id` zamiast `bank_operation_subiekt_id`, albo id KP/KW) — popraw id |
 | 422 | `INVALID_HB_AMOUNT` | (book) linia wyciągu ma pustą/zerową kwotę w Subiekcie — nie księguj |
@@ -508,7 +571,7 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 | 503 | `CONTRACTOR_LOOKUP_UNAVAILABLE` | (FS/PZ z NIP-em) most nie mógł sprawdzić kontrahenta po NIP w bazie — dokument NIE powstał, **retry z backoff** (`details.nip`) |
 | 503 | `DUPLICATE_CHECK_UNAVAILABLE` | (FS/KFS/PZ/MM, od v0.20.0) most nie mógł sprawdzić w Subiekcie, czy dokument z tym `external_reference` już istnieje (baza, przekroczony czas skanu albo weryfikacja dokumentu) — dokument NIE powstał w tym żądaniu, **retry z backoff tym samym kluczem** (`details.external_reference`, `details.document_type` ∈ {`FS`,`KFS`,`PZ`,`MM`}). Do v0.19.x awaria skanu była fail-open (dokument powstawał) |
 | 503 | `SUBIEKT_UNAVAILABLE` | Subiekt/Sfera offline: przy odczycie (`GET /invoices/{id}`, weryfikacja replay) albo **przed pierwszym zapisem** mutacji (FS/KFS/PZ/MM, settlements, book — most sonduje sesję na starcie) — **nic nie zapisano, retry z backoff tym samym kluczem**; klucz idempotencji zostaje. Do v0.18.0 kod nazywał się `SFERA_UNAVAILABLE` i dotyczył tylko odczytów |
-| 500 | `INTERNAL_ERROR` | nieoczekiwany błąd (`details.stack`) — **nie ponawiaj automatycznie** (kod spoza listy retry) + alert. FS/KFS/PZ/MM: ręczne ponowienie bezpieczne (anti-duplicate `409`). book: od v0.19.0 nigdy nie oznacza niepowiązanej operacji — pojawia się tylko **przed** utworzeniem BP albo po **domkniętym** linku (np. błąd zapisu cache idempotencji; ponowienie zwraca `already_booked`), błędy po zapisie BP idą jako `HB_BOOKING_ORPHAN` |
+| 500 | `INTERNAL_ERROR` | nieoczekiwany błąd (`details.stack`) — **nie ponawiaj automatycznie** (kod spoza listy retry) + alert. FS/KFS/PZ/MM: ręczne ponowienie bezpieczne (anti-duplicate `409`). PATCH PZ: `details.state = "saved"` = zmiana ZAPISANA, padł tylko cache idempotencji — ponowienie to cache miss, czyli przypadki 2–3 z §3.6b (bez `expected_revision` i ta sama wartość → `200` no-op; stare `expected_revision` → `409`). book: od v0.19.0 nigdy nie oznacza niepowiązanej operacji — pojawia się tylko **przed** utworzeniem BP albo po **domkniętym** linku (np. błąd zapisu cache idempotencji; ponowienie zwraca `already_booked`), błędy po zapisie BP idą jako `HB_BOOKING_ORPHAN` |
 
 `DUPLICATE_INVOICE.details`:
 ```json
@@ -540,8 +603,8 @@ Format błędu: `{ "code", "message", "details"?, "retry_after_seconds"? }`. Reg
 
 Most ma dwie warstwy zabezpieczeń; obie zależą od tego, **co Ty wyślesz**:
 
-1. **`Idempotency-Key` (header)** — most cache'uje `klucz → response` (TTL 14 dni).
-   Ten sam klucz przy retry = ten sam wynik, bez dublowania. **Automatyczne ponowienia mieść w 14 dniach**
+1. **`Idempotency-Key` (header)** — most cache'uje `(operacja, klucz) → response` (TTL 14 dni); operacja = metoda + ścieżka
+   z id dokumentu (od v0.21.0, §2). Ten sam klucz przy retry tej samej operacji = ten sam wynik, bez dublowania. **Automatyczne ponowienia mieść w 14 dniach**
    od pierwszej próby — później cache już nie odpowie, a ponowienie trafi w warstwę 2. Od v0.20.0 warstwa 2 jest
    **fail-closed**: albo `409 DUPLICATE_*` (dokument istnieje), albo `201` (nie istniał), albo `503 DUPLICATE_CHECK_UNAVAILABLE`
    (most nie mógł sprawdzić — nic nie zapisano, ponów); nigdy duplikat przez niesprawdzony skan. Do v0.19.x błąd skanu
@@ -662,7 +725,27 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
 
-### v0.20.0 (w przygotowaniu — backlog 138)
+### v0.21.0 (w przygotowaniu — edycja PZ: nagłówek)
+- **`GET /api/v1/receipts/{id}`** zwraca rozszerzony `ReceiptDetailDto` (§3.6b): dotychczasowe pola bez zmian + `original_number`,
+  `external_reference` (pełna referencja zapisana przez most, §3.6b), `warehouse_id`, `status`, `booking_status`, `period_locked`, `linked_documents` (FZ/KFS/inny), `editability`
+  (fakty), `revision`, `items[]` (pozycje read-only z `issued_*`), `warnings`. `404` tylko przy pozytywnym braku dokumentu; awaria odczytu
+  → `502 SUBIEKT_QUERY_FAILED`.
+- **Nowy `PATCH /api/v1/receipts/{id}`** `{ original_number, expected_revision? }` z `Idempotency-Key`: wpisanie numeru dokumentu dostawcy
+  (np. faktury z KSeF) do istniejącego PZ. `200` = stan po odczycie kontrolnym po zapisie; ta sama wartość = no-op.
+- **Nowe kody:** `422 EMPTY_UPDATE` / `INVALID_ORIGINAL_NUMBER` / `ORIGINAL_NUMBER_TOO_LONG`; `409 RECEIPT_CANCELLED` /
+  `RECEIPT_REVISION_MISMATCH` / `RECEIPT_LOCKED` (jedyny 4xx z `retry_after_seconds`); `500 RECEIPT_UPDATE_FAILED`;
+  `502 RECEIPT_UPDATE_UNVERIFIED` (wynik nieznany → `GET`, bez retry automatycznego). `UNSUPPORTED_DOCUMENT_TYPE` także dla PATCH na nie-PZ.
+- **`422 INVALID_BRIDGE_ID` także dla `sub_0`, ujemnych i `n > 2147483647`** na wszystkich endpointach z `{id}` (invoices, receipts,
+  settlements, ksef) — identyfikatory Subiekta są 32-bitowe; wcześniej takie id kończyły się `404` albo błędem Subiekta.
+- **`Idempotency-Key` ważny per operacja i dokument** (§2, §5): cache trzyma `(metoda + ścieżka z id, klucz)`. Ten sam klucz na innym
+  endpoincie albo innym dokumencie wykonuje żądanie zamiast zwracać zapisaną odpowiedź innej operacji (do v0.20.x: np. `POST /receipts`
+  kluczem z `POST /invoices` dostawał FS jako „PZ”, korekta faktury 2 kluczem korekty faktury 1 dostawała KFS faktury 1). Zgodny klient
+  (stały klucz na operację, ten sam przy retry) — bez zmian. Wpisy sprzed 0.21.0 czytane przez POST-y do 14 dni po wdrożeniu (do
+  usunięcia w 0.22.0); `PATCH` ich nie czyta.
+- `POST /invoices/{id}/corrections`: `422 INVALID_BRIDGE_ID` sprawdzany przed replayem (jak `/settlements`).
+- Edycja pozycji PZ (`PUT …/items`) — planowana w v0.22.0.
+
+### v0.20.0 (2026-10-10 — backlog 138)
 - **Nowy kod `503 DUPLICATE_CHECK_UNAVAILABLE`** (FS/KFS/PZ/MM): most nie mógł sprawdzić w Subiekcie, czy dokument z tym
   `external_reference` już istnieje — dokument NIE powstał w tym żądaniu, **retry z backoffem tym samym kluczem**
   (`details.external_reference`, `details.document_type`). Kod wchodzi na listę retry „nic nie zapisano” (§4).

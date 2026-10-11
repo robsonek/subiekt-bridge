@@ -466,27 +466,7 @@ public sealed class RealSferaSession : ISferaSession
         // NIP/Nazwa kontrahenta - NabywcaInfo na SuDokument bywa pusty.
         // Lookup do Kontrahenci.Wczytaj(KontrahentId) jest niezbedny do uzyskania
         // pelnych metadanych. N+1 (200 lookupow per listing) ale Sfera dziala lokalnie.
-        string? nip = null, nazwa = null;
-        if (contractorId.HasValue)
-        {
-            try
-            {
-                dynamic kontr = Session.Kontrahenci.Wczytaj(contractorId.Value);
-                try
-                {
-                    nip = TryGetString(kontr, "NIP");
-                    nazwa = TryGetString(kontr, "Nazwa");
-                }
-                finally
-                {
-                    try { kontr.Zamknij(); } catch { /* best-effort */ }
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "MapDokumentToQueryItem: Kontrahenci.Wczytaj({Id}) failed", contractorId.Value);
-            }
-        }
+        var (nip, nazwa) = contractorId is { } cid ? ReadContractorNipName(cid, nameof(MapDokumentToQueryItem)) : (null, null);
 
         return new InvoiceQueryItemDto(
             SubiektId: subiektId,
@@ -500,6 +480,34 @@ public sealed class RealSferaSession : ISferaSession
             VatAmount: vat,
             GrossAmount: gross,
             Notes: notes);
+    }
+
+    /// <summary>
+    /// [STA] NIP + Nazwa kontrahenta (Kontrahenci.Wczytaj) z deterministycznym zwolnieniem RCW: Zamknij + Marshal.ReleaseComObject w finally
+    /// (takze gdy Zamknij rzuci - Codex r4 #5); uchwyt jako object (bez dynamic do prywatnych helperow). Best-effort: blad -> (null, null).
+    /// </summary>
+    private (string? Nip, string? Name) ReadContractorNipName(long contractorId, string caller)
+    {
+        object? kontr = null;
+        try
+        {
+            kontr = (object?)Session.Kontrahenci.Wczytaj(contractorId);
+            if (kontr is null) return (null, null);
+            return (TryGetString(kontr, "NIP"), TryGetString(kontr, "Nazwa"));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "{Caller}: Kontrahenci.Wczytaj({Id}) failed", caller, contractorId);
+            return (null, null);
+        }
+        finally
+        {
+            if (kontr is not null)
+            {
+                try { ((dynamic)kontr).Zamknij(); } catch { /* best-effort */ }
+                try { Marshal.ReleaseComObject(kontr); } catch { /* RCW already released */ }
+            }
+        }
     }
 
     /// <summary>
@@ -615,6 +623,445 @@ public sealed class RealSferaSession : ISferaSession
             }
         }, ct);
     }
+
+    // ----------------------------- Receipt detail / PATCH (v0.21.0) -----------------------------
+    // Spec docs/specs/2026-10-11-receipts-edit-pz-0.21-design.md §5.4. Decyzje (revision, komparator, klasyfikacja, Decide) w ReceiptEdit.cs -
+    // wspólne z Fake; tu wyłącznie COM (STA, RCW) i read-only SQL (fail-soft). Pierwszy SetComProperty otwiera lock Sfery na dokumencie
+    // (CHM start_FAQ „Blokowanie obiektów": 0x80040F19 przy kolizji z GUI) - dlatego TrySet jest tu ZAKAZANY (połknąłby odmowę).
+
+    private sealed record ReceiptLoad(
+        ReceiptStateSnapshot Snapshot, long SubiektId, string Number, int DokTyp, string? IssueDate, long? ContractorId,
+        string? ContractorNip, string? ContractorName, decimal? Net, decimal? Vat, decimal? Gross, string? Uwagi,
+        long? LinkedId, string? LinkedNumber, bool? SferaCanEdit, int? BookingStatus,
+        IReadOnlyDictionary<long, (string? Symbol, string? Name, decimal? ValueNet, decimal? ValueGross)> Presentation);
+
+    private sealed record ReceiptSqlFacts(int? MagId, bool? StatusBlok, string? LinkedType,
+        IReadOnlyDictionary<long, (string? Ean, string? Symbol)> Products, IReadOnlyList<StockRow> Stock);
+
+    public Task<ReceiptDetailDto?> GetReceiptDetailAsync(long subiektId, CancellationToken ct)
+    {
+        return RunOnStaAsync<ReceiptDetailDto?>(() =>
+        {
+            object? dok = null;
+            ReceiptLoad load;
+            try
+            {
+                (dok, load) = LoadReceiptSnapshot(subiektId);
+            }
+            catch (ReceiptEditException ex) when (ex.Reason == ReceiptEditError.NotFound)
+            {
+                return null;
+            }
+            finally
+            {
+                if (dok is not null) TryClose(dok);
+            }
+            var sql = ReadReceiptSqlFactsSoft(load, out var warnings);
+            return BuildReceiptDetail(load, sql, warnings);
+        }, ct);
+    }
+
+    public Task<ReceiptDetailDto> UpdateReceiptHeaderAsync(long subiektId, string originalNumber, string? expectedRevision, CancellationToken ct)
+    {
+        return RunMutationOnStaAsync(() => UpdateReceiptHeaderCore(subiektId, originalNumber, expectedRevision), ct);
+    }
+
+    /// <summary>
+    /// [STA] PATCH nagłówka: guardy (typ, unieważniony, expected_revision) → no-op → Modify (SetComProperty = lock) → Save (Zapisz) →
+    /// CloseVerified → ReadBack (świeży WczytajDokument, komparator po ob_Id) → ReceiptEditOutcome.Decide. Kod HTTP po Zapisz
+    /// powstaje WYŁĄCZNIE z odczytu kontrolnego (kod = dowód o skutku).
+    /// </summary>
+    private ReceiptDetailDto UpdateReceiptHeaderCore(long id, string value, string? expectedRevision)
+    {
+        var (dok, load) = LoadReceiptSnapshot(id);
+        var before = load.Snapshot;
+        var intended = before with { OriginalNumber = value };
+        object? sessionBefore = (object?)_subiekt;
+        Exception? saveEx = null;
+        bool closeConfirmed = false;
+        bool saveAttempted = false;
+        try
+        {
+            if (load.DokTyp != DokTyp.PZ)
+            {
+                throw Enrich(new ReceiptEditException(ReceiptEditError.NotAReceipt,
+                    $"Dokument {id} nie jest PZ (dok_Typ={load.DokTyp}) - PATCH obsluguje tylko PZ.",
+                    details: new { document_type = DokTyp.NameOrUnknown(load.DokTyp) }), load);
+            }
+            if (before.Status == DuplicateScan.StatusAnulowany)
+            {
+                throw Enrich(new ReceiptEditException(ReceiptEditError.Cancelled, $"PZ {id} jest uniewazniony (dok_Status=2) - edycja niemozliwa."), load);
+            }
+            string currentRevision = ReceiptRevision.Compute(before);
+            if (expectedRevision is not null && !string.Equals(expectedRevision, currentRevision, StringComparison.Ordinal))
+            {
+                throw Enrich(new ReceiptEditException(ReceiptEditError.RevisionMismatch,
+                    "expected_revision nie zgadza sie z biezacym stanem PZ - pobierz GET i zdecyduj ponownie.") { CurrentRevision = currentRevision }, load);
+            }
+            if (string.Equals(value, before.OriginalNumber, StringComparison.Ordinal))
+            {
+                _logger.LogInformation("PATCH PZ {Id}: NumerOryginalny bez zmian (no-op, bez locka)", id);
+                var sqlNoop = ReadReceiptSqlFactsSoft(load, out var w0);
+                return BuildReceiptDetail(load, sqlNoop, w0);
+            }
+
+            _logger.LogInformation("PATCH PZ {Id}: NumerOryginalny len={Len} sha8={Sha} revision={Rev} phase=Modify", id, value.Length, Sha8(value), currentRevision);
+            try
+            {
+                SetComProperty(dok, "NumerOryginalny", value);
+            }
+            catch (Exception ex)
+            {
+                var (hr, msg) = ReceiptSaveFailureClassifier.Describe(ex);
+                _logger.LogWarning(ex, "PATCH PZ {Id}: SetComProperty(NumerOryginalny) rzucil HRESULT={Hr} msg={Msg} phase=Modify - nic nie zapisano", id, ReceiptEditException.HresultText(hr), msg);
+                throw Enrich(ReceiptEditOutcome.Decide(ReceiptSavePhase.Modify, ex, null, true, false, null)!, load);
+            }
+
+            saveAttempted = true;
+            try
+            {
+                ((dynamic)dok).Zapisz();
+                _logger.LogInformation("PATCH PZ {Id}: Zapisz() OK phase=Save", id);
+            }
+            catch (Exception ex)
+            {
+                saveEx = ex;
+                var (hr, msg) = ReceiptSaveFailureClassifier.Describe(ex);
+                _logger.LogError(ex, "PATCH PZ {Id}: Zapisz() rzucil HRESULT={Hr} msg={Msg} phase=Save - decyzja po odczycie kontrolnym", id, ReceiptEditException.HresultText(hr), msg);
+            }
+        }
+        finally
+        {
+            // Lock Sfery zwalniany ZAWSZE (takze przy wyjatku z guardow); wynik Zamknij liczy sie tylko po probie zapisu.
+            closeConfirmed = CloseVerified(dok);
+        }
+
+        bool sessionReset = !ReferenceEquals((object?)_subiekt, sessionBefore);
+        ReceiptStateMatch? match = null;
+        bool? existsAfter = null;
+        ReceiptLoad? afterLoad = null;
+        if (!sessionReset)
+        {
+            object? dok2 = null;
+            try
+            {
+                (dok2, afterLoad) = LoadReceiptSnapshot(id);
+                match = ReceiptStateComparer.Compare(before, intended, afterLoad.Snapshot);
+                existsAfter = true;
+            }
+            catch (ReceiptEditException ex) when (ex.Reason == ReceiptEditError.NotFound)
+            {
+                existsAfter = false;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "PATCH PZ {Id}: odczyt kontrolny padl phase=ReadBack - wynik nieznany", id);
+                match = null;
+                sessionReset = !ReferenceEquals((object?)_subiekt, sessionBefore);
+            }
+            finally
+            {
+                if (dok2 is not null) TryClose(dok2);
+            }
+        }
+
+        var decision = ReceiptEditOutcome.Decide(saveEx is not null ? ReceiptSavePhase.Save : ReceiptSavePhase.ReadBack,
+            saveEx, match, closeConfirmed, sessionReset, existsAfter);
+        if (decision is not null)
+        {
+            _logger.LogWarning("PATCH PZ {Id}: decyzja {Reason} ({Lock}) saveAttempted={Attempted} match={Match} close={Close} reset={Reset} exists={Exists}",
+                id, decision.Reason, decision.LockReason, saveAttempted, match, closeConfirmed, sessionReset, existsAfter);
+            throw Enrich(decision, afterLoad ?? load);
+        }
+        if (saveEx is not null)
+        {
+            _logger.LogWarning("PATCH PZ {Id}: Zapisz rzucil, ale odczyt kontrolny = stan docelowy - 200", id);
+        }
+        var sqlAfter = ReadReceiptSqlFactsSoft(afterLoad!, out var warnings);
+        return BuildReceiptDetail(afterLoad!, sqlAfter, warnings);
+    }
+
+    /// <summary>
+    /// [STA] Wczytanie + snapshot (bez locka - same odczyty). Wyjątek WczytajDokument: martwa sesja → SferaUnavailableException;
+    /// żywa → Dokumenty.Istnieje(id): false → NotFound (404 TYLKO przy pozytywnym braku), true/wyjątek → ReadFailed (502).
+    /// Uchwyt dokumentu zwraca do wołającego (TryClose/CloseVerified po stronie wołającego).
+    /// </summary>
+    private (object Dok, ReceiptLoad Load) LoadReceiptSnapshot(long id)
+    {
+        object? dok;
+        try
+        {
+            dok = (object?)Session.SuDokumentyManager.WczytajDokument(id);
+        }
+        catch (Exception ex)
+        {
+            throw ClassifyLoadFailure(id, ex);
+        }
+        if (dok is null)
+        {
+            throw ClassifyLoadFailure(id, null);
+        }
+
+        try
+        {
+            return (dok, ReadReceipt(dok, id));
+        }
+        catch (ReceiptEditException)
+        {
+            TryClose(dok);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            TryClose(dok);
+            var inner = ReceiptSaveFailureClassifier.Unwrap(ex);
+            throw new ReceiptEditException(ReceiptEditError.ReadFailed,
+                $"Odczyt atrybutow dokumentu {id} padl przy zywej sesji: {inner.Message} - ponow pozniej.", inner: ex);
+        }
+    }
+
+    // Sonda sesji -> Istnieje (checked: BridgeIds gwarantuje 1..int.MaxValue) -> NotFound/ReadFailed: logika w ReceiptLoadFailure (testy adaptera).
+    private Exception ClassifyLoadFailure(long id, Exception? ex)
+        => ReceiptLoadFailure.Classify(id, ex, IsSessionAlive, () => Convert.ToBoolean((object)Session.Dokumenty.Istnieje(checked((int)id))));
+
+    // [STA] Snapshot chroniony przez ReceiptSnapshotReader (adapter na delegatach: wyjatek albo null w polu wymaganym = ReadFailed, nic nie jest
+    // podstawiane - Codex r4 #1, klasa N4/N7); pola prezentacyjne (kontrahent, kwoty, data, MoznaEdytowac, StatusKsiegowyDokumentu, symbol/nazwa/
+    // wartosci pozycji) TryRead -> null. Prezentacja pozycji zbierana w kolejnosci enumeracji i mapowana po indeksie na snapshot.Items.
+    private ReceiptLoad ReadReceipt(object dok, long id)
+    {
+        var presentation = new List<(string? Symbol, string? Name, decimal? ValueNet, decimal? ValueGross)>();
+        var read = ReceiptSnapshotReader.Read(id, name => ReadRequiredCom(dok, name), () =>
+        {
+            object? pozycje = (object?)((dynamic)dok).Pozycje;
+            return pozycje is null ? null : EnumerateReceiptPositions(pozycje, presentation);
+        });
+
+        int? booking = TryReadInt32(dok, "StatusKsiegowyDokumentu");
+        string? linkedNumber = read.LinkedId is null ? null : TryReadString(dok, "DoDokumentuNumerPelny");
+        bool? canEdit = TryReadBool(dok, "MoznaEdytowac");
+        string? issueDate = TryReadDateString(dok, "DataWystawienia");
+        long? contractorId = TryReadInt64(dok, "KontrahentId");
+        decimal? net = TryReadDecimal(dok, "WartoscNetto");
+        decimal? vat = TryReadDecimal(dok, "WartoscVat");
+        decimal? gross = TryReadDecimal(dok, "WartoscBrutto") ?? TryReadDecimal(dok, "KwotaDoZaplaty");
+        var (nip, nazwa) = contractorId is { } cid ? ReadContractorNipName(cid, nameof(ReadReceipt)) : (null, null);
+
+        var byPosition = new Dictionary<long, (string? Symbol, string? Name, decimal? ValueNet, decimal? ValueGross)>();
+        for (int i = 0; i < read.Snapshot.Items.Count && i < presentation.Count; i++)
+        {
+            byPosition[read.Snapshot.Items[i].PositionId] = presentation[i];
+        }
+        var snapshot = read.Snapshot with { BookingStatus = booking };
+        return new ReceiptLoad(snapshot, id, read.Number, read.DokTyp, issueDate, contractorId, nip, nazwa, net, vat, gross, read.Uwagi,
+            read.LinkedId, linkedNumber, canEdit, booking, byPosition);
+    }
+
+    /// <summary>
+    /// [STA] Element(1..Liczba) z wlasnoscia RCW: kazdy SuPozycja zwalniany po zuzyciu akcesora przez reader (yield w try/finally), kolekcja
+    /// w finally. Prezentacja (TryRead) zbierana PRZED oddaniem akcesora. Brak Element(i)/Liczba = wyjatek (reader -> ReadFailed), nie pominiecie.
+    /// </summary>
+    private static IEnumerable<Func<string, object?>> EnumerateReceiptPositions(object pozycje,
+        List<(string? Symbol, string? Name, decimal? ValueNet, decimal? ValueGross)> presentation)
+    {
+        try
+        {
+            int count = Convert.ToInt32(ReadRequiredCom(pozycje, "Liczba") ?? throw new InvalidOperationException("Pozycje.Liczba zwrocilo null"));
+            for (int i = 1; i <= count; i++)
+            {
+                object poz = (object?)((dynamic)pozycje).Element(i) ?? throw new InvalidOperationException($"Pozycje.Element({i}) zwrocilo null");
+                try
+                {
+                    presentation.Add((TryReadString(poz, "TowarSymbol"), TryReadString(poz, "TowarNazwa"),
+                        TryReadDecimal(poz, "WartoscNettoPoRabacie"), TryReadDecimal(poz, "WartoscBruttoPoRabacie")));
+                    yield return name => ReadRequiredCom(poz, name);
+                }
+                finally
+                {
+                    try { Marshal.ReleaseComObject(poz); } catch { /* cleanup */ }
+                }
+            }
+        }
+        finally
+        {
+            try { Marshal.ReleaseComObject(pozycje); } catch { /* cleanup */ }
+        }
+    }
+
+    private static string KindName(ReceiptItemKind kind) => kind switch
+    {
+        ReceiptItemKind.Product => "product",
+        ReceiptItemKind.Service => "service",
+        ReceiptItemKind.OneOffService => "one_off_service",
+        ReceiptItemKind.Package => "package",
+        ReceiptItemKind.Bundle => "bundle",
+        ReceiptItemKind.Suggestion => "suggestion",
+        _ => "unknown",
+    };
+
+    // Read-only SQL (wlasny SqlConnection jak FetchDuplicateCandidates): dok_MagId, dok_StatusBlok, typ dokumentu powiazanego,
+    // EAN/symbol towarow pozycji, agregaty dok_MagRuch (fakty rozchodu). Kolumny potwierdzone na prod 1.89 (sonda S6 2026-10-11).
+    private ReceiptSqlFacts ReadReceiptSqlFacts(ReceiptLoad load)
+    {
+        using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlConnStr());
+        conn.Open();
+
+        int? magId = null; bool? blok = null; string? linkedType = null;
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT d.dok_MagId, d.dok_StatusBlok, l.dok_Typ AS linked_typ FROM dok__Dokument d "
+                            + "LEFT JOIN dok__Dokument l ON l.dok_Id = d.dok_DoDokId WHERE d.dok_Id = @id";
+            cmd.CommandTimeout = 10;
+            cmd.Parameters.AddWithValue("@id", load.SubiektId);
+            using var r = cmd.ExecuteReader();
+            if (r.Read())
+            {
+                magId = r["dok_MagId"] is DBNull ? null : Convert.ToInt32(r["dok_MagId"]);
+                blok = r["dok_StatusBlok"] is DBNull ? null : Convert.ToBoolean(r["dok_StatusBlok"]);
+                linkedType = r["linked_typ"] is DBNull ? null : DokTyp.NameOrUnknown(Convert.ToInt32(r["linked_typ"]));
+            }
+        }
+
+        var products = new Dictionary<long, (string? Ean, string? Symbol)>();
+        var stock = new List<StockRow>();
+        var ids = load.Snapshot.Items.Select(i => i.PositionId).Distinct().ToList();
+        if (ids.Count > 0)
+        {
+            string inList = string.Join(",", ids.Select((_, i) => "@p" + i));
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT p.ob_Id, t.tw_PodstKodKresk, t.tw_Symbol FROM dok_Pozycja p "
+                                + $"LEFT JOIN tw__Towar t ON t.tw_Id = p.ob_TowId WHERE p.ob_Id IN ({inList})";
+                cmd.CommandTimeout = 10;
+                for (int i = 0; i < ids.Count; i++) cmd.Parameters.AddWithValue("@p" + i, ids[i]);
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    string? ean = r["tw_PodstKodKresk"] is DBNull ? null : (r["tw_PodstKodKresk"] as string)?.Trim();
+                    string? symbol = r["tw_Symbol"] is DBNull ? null : (r["tw_Symbol"] as string)?.Trim();
+                    products[Convert.ToInt64(r["ob_Id"])] = (string.IsNullOrEmpty(ean) ? null : ean, string.IsNullOrEmpty(symbol) ? null : symbol);
+                }
+            }
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT mr_PozId, SUM(mr_Ilosc) AS ilosc, SUM(mr_Pozostalo) AS pozostalo, COUNT(*) AS n "
+                                + $"FROM dok_MagRuch WHERE mr_PozId IN ({inList}) GROUP BY mr_PozId";
+                cmd.CommandTimeout = 10;
+                for (int i = 0; i < ids.Count; i++) cmd.Parameters.AddWithValue("@p" + i, ids[i]);
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    stock.Add(new StockRow(Convert.ToInt64(r["mr_PozId"]), Convert.ToDecimal(r["ilosc"]), Convert.ToDecimal(r["pozostalo"]), Convert.ToInt32(r["n"])));
+                }
+            }
+        }
+        return new ReceiptSqlFacts(magId, blok, linkedType, products, stock);
+    }
+
+    // Fail-soft: GET i odpowiedz PATCH nie zaleza od SqlClienta - brak faktow = null + warning SQL_FACTS_UNAVAILABLE.
+    private ReceiptSqlFacts? ReadReceiptSqlFactsSoft(ReceiptLoad load, out List<string> warnings)
+    {
+        warnings = new List<string>();
+        try
+        {
+            return ReadReceiptSqlFacts(load);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "ReceiptDetail {Id}: fakty SQL niedostepne (fail-soft)", load.SubiektId);
+            warnings.Add("SQL_FACTS_UNAVAILABLE");
+            return null;
+        }
+    }
+
+    private static ReceiptDetailDto BuildReceiptDetail(ReceiptLoad load, ReceiptSqlFacts? sql, List<string> warnings)
+    {
+        IReadOnlyDictionary<long, StockFact?> facts = new Dictionary<long, StockFact?>();
+        if (sql is not null)
+        {
+            var (f, inconsistent) = ReceiptStockFacts.FromRows(sql.Stock, load.Snapshot);
+            facts = f;
+            if (inconsistent) warnings.Add("STOCK_FACTS_INCONSISTENT");
+        }
+
+        var items = load.Snapshot.Items.OrderBy(i => i.Lp).Select(i =>
+        {
+            facts.TryGetValue(i.PositionId, out var fact);
+            load.Presentation.TryGetValue(i.PositionId, out var pres);
+            (string? Ean, string? Symbol) prod = default;
+            sql?.Products.TryGetValue(i.PositionId, out prod);
+            return new ReceiptItemDto(i.PositionId, i.Lp, i.ProductId, prod.Ean, prod.Symbol ?? pres.Symbol, pres.Name, KindName(i.Kind),
+                i.Quantity, i.Unit, i.QuantityInStockUnits, i.UnitPriceNet, i.DiscountPercent, i.VatRate, pres.ValueNet, pres.ValueGross,
+                fact?.IssuedStockUnits, fact?.IssuedQuantity);
+        }).ToList();
+
+        var linked = load.LinkedId is { } lid
+            ? new[] { new LinkedDocumentDto("linked", sql?.LinkedType, lid, load.LinkedNumber) }
+            : Array.Empty<LinkedDocumentDto>();
+        var reasons = ReceiptEditability.Reasons(load.DokTyp, load.Snapshot.Status, sql?.StatusBlok, load.BookingStatus, load.LinkedId, load.SferaCanEdit);
+
+        return new ReceiptDetailDto(
+            SubiektId: load.SubiektId, Number: load.Number, Type: DokTyp.NameOrUnknown(load.DokTyp), IssueDate: load.IssueDate,
+            ContractorId: load.ContractorId, ContractorNip: load.ContractorNip, ContractorName: load.ContractorName,
+            NetAmount: load.Net, VatAmount: load.Vat, GrossAmount: load.Gross, Notes: load.Uwagi,
+            OriginalNumber: load.Snapshot.OriginalNumber, ExternalReference: ReceiptEditFields.ExtractExternalReference(load.Uwagi),
+            WarehouseId: sql?.MagId, Status: load.Snapshot.Status, BookingStatus: load.BookingStatus, PeriodLocked: sql?.StatusBlok,
+            LinkedDocuments: linked, Editability: new ReceiptEditabilityDto(load.SferaCanEdit, reasons),
+            Revision: ReceiptRevision.Compute(load.Snapshot), Items: items, Warnings: warnings);
+    }
+
+    private static ReceiptEditException Enrich(ReceiptEditException ex, ReceiptLoad load)
+    {
+        ex.SferaCanEdit = load.SferaCanEdit;
+        ex.LinkedDocuments = load.LinkedId is { } lid ? new[] { new LinkedDocumentDto("linked", null, lid, load.LinkedNumber) } : Array.Empty<LinkedDocumentDto>();
+        return ex;
+    }
+
+    /// <summary>
+    /// [STA] Zamknij + ReleaseComObject z RAPORTEM wyniku (ReceiptCloseGuard; TryClose polyka blad). Porazka = dokument MUTOWANY mogl zostac z lockiem
+    /// w sesji → licznik + ResetSessionOnSta OD RAZU (Codex r4 #2): biezace zadanie dostaje 502 przez sessionReset (bez odczytu kontrolnego starym
+    /// uchwytem), kolejne otwiera sesje od nowa.
+    /// </summary>
+    private bool CloseVerified(object? dok)
+    {
+        if (dok is null) return false;
+        bool ok = ReceiptCloseGuard.CloseVerified(
+            () => ((dynamic)dok).Zamknij(),
+            () => Marshal.ReleaseComObject(dok),
+            () =>
+            {
+                _consecutiveCloseFailures++;
+                _logger.LogError("Zamknij() PZ po edycji niepotwierdzone ({Count}/{Threshold}) - resetuje sesje Sfery (dokument mutowany, lock moze wisiec)",
+                    _consecutiveCloseFailures, CloseFailureThreshold);
+                ResetSessionOnSta();
+                _consecutiveCloseFailures = 0;
+            },
+            _logger);
+        if (ok) _consecutiveCloseFailures = 0;
+        return ok;
+    }
+
+    private static object? ReadRequiredCom(object target, string propName)
+    {
+        object? raw = target.GetType().InvokeMember(propName,
+            BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public,
+            null, target, Array.Empty<object>());
+        return raw is DBNull ? null : raw;
+    }
+
+    private static int? TryReadInt32(object target, string propName)
+    {
+        try
+        {
+            object? raw = target.GetType().InvokeMember(propName,
+                BindingFlags.GetProperty | BindingFlags.Instance | BindingFlags.Public,
+                null, target, Array.Empty<object>());
+            return raw is null || raw is DBNull ? null : Convert.ToInt32(raw);
+        }
+        catch { return null; }
+    }
+
+    private static string Sha8(string value)
+        => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value)), 0, 4).ToLowerInvariant();
 
     public Task<byte[]?> GetInvoicePdfAsync(long subiektId, CancellationToken ct)
     {
@@ -2719,22 +3166,10 @@ public sealed class RealSferaSession : ISferaSession
     private (string? Name, string? Nip) ResolveContractor(long? contractorId)
     {
         if (!contractorId.HasValue) return (null, null);
-        try
-        {
-            dynamic kontr = Session.Kontrahenci.Wczytaj(contractorId.Value);
-            try
-            {
-                // NIP normalizowany ''->null (B2C) przez OpenReceivableFields.NormalizeNip - logika wydzielona
-                // i pokryta testem jednostkowym (ta metoda jest COM/windows-only, wiec nietestowalna na CI).
-                return (TryGetString(kontr, "Nazwa"), OpenReceivableFields.NormalizeNip(TryGetString(kontr, "NIP")));
-            }
-            finally { try { kontr.Zamknij(); } catch { /* best-effort */ } }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "QueryOpenReceivables: Kontrahenci.Wczytaj({Id}) failed", contractorId.Value);
-            return (null, null);
-        }
+        // Jeden Wczytaj z Zamknij + ReleaseComObject w finally (ReadContractorNipName); NIP normalizowany ''->null (B2C) przez
+        // OpenReceivableFields.NormalizeNip - logika wydzielona i pokryta testem jednostkowym (metoda COM/windows-only).
+        var (nip, name) = ReadContractorNipName(contractorId.Value, "QueryOpenReceivables");
+        return (name, OpenReceivableFields.NormalizeNip(nip));
     }
 
     private static bool IsIsoDate(string? date) =>

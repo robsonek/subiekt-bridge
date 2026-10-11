@@ -7,6 +7,7 @@ namespace SubiektBridge.Api.Sfera;
 /// </summary>
 public static class DokTyp
 {
+    public const int FZ = 1;
     public const int FS = 2;
     public const int KFS = 6;
     public const int MM = 9;
@@ -20,5 +21,16 @@ public static class DokTyp
         MM => "MM",
         PZ => "PZ",
         _ => throw new ArgumentOutOfRangeException(nameof(dokTyp), dokTyp, "Nieobslugiwany dok_Typ (oczekiwane 2/6/9/10)."),
+    };
+
+    /// <summary>Nazwa typu dokumentu powiązanego (linked_documents[].type): FZ/FS/KFS/MM/PZ, inaczej "TYP_&lt;n&gt;" - nigdy nie rzuca.</summary>
+    public static string NameOrUnknown(int dokTyp) => dokTyp switch
+    {
+        FZ => "FZ",
+        FS => "FS",
+        KFS => "KFS",
+        MM => "MM",
+        PZ => "PZ",
+        _ => $"TYP_{dokTyp}",
     };
 }

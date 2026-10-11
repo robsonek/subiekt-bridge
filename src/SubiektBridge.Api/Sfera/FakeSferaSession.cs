@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.InteropServices;
 using SubiektBridge.Api.Models;
 
 namespace SubiektBridge.Api.Sfera;
@@ -12,6 +13,13 @@ namespace SubiektBridge.Api.Sfera;
 public sealed class FakeSferaSession : ISferaSession
 {
     private static int _invoiceCounter = 0;
+
+    /// <summary>
+    /// Test-only: id dokumentu, ktorego Fake "pozytywnie nie zna" (404). Ujemne id tez, ale od v0.21.0 nie przechodza przez
+    /// BridgeIds (1..int.MaxValue, 422 INVALID_BRIDGE_ID) - testy kontrolerow uzywaja tego sentinela.
+    /// </summary>
+    internal const long NotFoundIdForTests = 999_999_999;
+    private static bool IsMissingDocument(long id) => id < 0 || id == NotFoundIdForTests;
     private DateTimeOffset? _lastInvoiceAt;
 
     public Task<InvoiceResponseDto> CreateInvoiceAsync(InvoiceRequestDto request, CancellationToken ct)
@@ -70,6 +78,9 @@ public sealed class FakeSferaSession : ISferaSession
             PdfBase64: null));
     }
 
+    /// <summary>Symbol mocka z końcówki EAN; krótki EAN (1–3 zn.) w całości - wycinek [^4..] bez kontroli długości rzucał (Greptile PR #20).</summary>
+    private static string MockSymbol(string ean) => "SKU-" + (ean.Length > 4 ? ean[^4..] : ean);
+
     public Task<ProductDto?> FindProductByEanAsync(string ean, CancellationToken ct)
     {
         // Deterministyczny mock: EAN-y zaczynające się na "5901" są "znane".
@@ -80,7 +91,7 @@ public sealed class FakeSferaSession : ISferaSession
 
         return Task.FromResult<ProductDto?>(new ProductDto(
             SubiektId: HashString(ean) % 100000,
-            Symbol: $"SKU-{ean[^4..]}",
+            Symbol: MockSymbol(ean),
             Ean: ean,
             Name: $"Mock product {ean}",
             VatRate: 23m,
@@ -109,12 +120,15 @@ public sealed class FakeSferaSession : ISferaSession
             grossSum += lineGross * line.Quantity;
         }
 
+        long contractorId = HashString(request.Supplier.Symbol) % 100000;
+        RegisterReceipt(3_000_000 + counter, request, counter, $"PZ {counter}/{year}", contractorId);
+
         return Task.FromResult(new InvoiceResponseDto(
             Id: $"fake_pz_{counter:D6}",
             SubiektId: 3_000_000 + counter,
             Number: $"PZ {counter}/{year}",
             IssuedAt: _lastInvoiceAt.Value,
-            ContractorSubiektId: HashString(request.Supplier.Symbol) % 100000,
+            ContractorSubiektId: contractorId,
             Totals: new InvoiceTotalsDto(Net: grossSum, Vat: 0m, Gross: grossSum),
             PdfUrl: $"/api/v1/receipts/fake_pz_{counter:D6}/pdf",
             PdfBase64: null));
@@ -451,7 +465,7 @@ public sealed class FakeSferaSession : ISferaSession
         if (request.Amount <= 0m) throw new SettlementException(SettlementError.InvalidAmount, "amount musi byc > 0");
         decimal amount = Math.Round(request.Amount, 2, MidpointRounding.AwayFromZero);
 
-        if (documentSubiektId < 0) throw new SettlementException(SettlementError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje");
+        if (IsMissingDocument(documentSubiektId)) throw new SettlementException(SettlementError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje");
         if (documentSubiektId >= 3_000_000) throw new SettlementException(SettlementError.NoRozrachunek, "Dokument bez rozrachunku (PZ magazynowy)");
         if (documentSubiektId is >= 2_000_000 and < 3_000_000) throw new SettlementException(SettlementError.UnsupportedDocumentType, "Typ nieobslugiwany (np. korekta)");
         // 1_900_002: duplikat wykryty po SplataId, ale RozliczenieId linii nieodczytany -> existing_rozliczenie_id = null (W5).
@@ -506,7 +520,7 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<SettlementStateResponseDto?> GetSettlementsAsync(long documentSubiektId, CancellationToken ct)
     {
-        if (documentSubiektId < 0) return Task.FromResult<SettlementStateResponseDto?>(null);
+        if (IsMissingDocument(documentSubiektId)) return Task.FromResult<SettlementStateResponseDto?>(null);
         if (documentSubiektId >= 3_000_000) throw new SettlementException(SettlementError.NoRozrachunek, "Dokument bez rozrachunku");
 
         if (!_settlements.TryGetValue(documentSubiektId, out var r))
@@ -530,7 +544,7 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task DeleteSettlementAsync(long documentSubiektId, long rozliczenieId, CancellationToken ct)
     {
-        if (documentSubiektId < 0) throw new SettlementException(SettlementError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje");
+        if (IsMissingDocument(documentSubiektId)) throw new SettlementException(SettlementError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje");
         if (documentSubiektId >= 3_000_000) throw new SettlementException(SettlementError.NoRozrachunek, "Dokument bez rozrachunku");
 
         if (!_settlements.TryGetValue(documentSubiektId, out var r))
@@ -651,7 +665,7 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<KsefStatusResponseDto> SendInvoiceToKsefAsync(long documentSubiektId, CancellationToken ct)
     {
-        if (documentSubiektId < 0)
+        if (IsMissingDocument(documentSubiektId))
             throw new KsefException(KsefError.DocumentNotFound, $"Dokument {documentSubiektId} nie istnieje");
         if (documentSubiektId >= 3_000_000)
             throw new KsefException(KsefError.UnsupportedDocumentType,
@@ -701,9 +715,264 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<KsefStatusResponseDto?> GetKsefStatusAsync(long documentSubiektId, CancellationToken ct)
     {
-        if (documentSubiektId < 0) return Task.FromResult<KsefStatusResponseDto?>(null);
+        if (IsMissingDocument(documentSubiektId)) return Task.FromResult<KsefStatusResponseDto?>(null);
         var st = _ksefStates.GetOrAdd(documentSubiektId, _ => new FakeKsefState());
         lock (st) { return Task.FromResult<KsefStatusResponseDto?>(KsefSnapshot(documentSubiektId, st)); }
+    }
+
+    // ----------------------------- Receipt detail / PATCH (v0.21.0) -----------------------------
+    // Pamięć dokumentów (PZ z CreateReceiptAsync + seed innych typów) i haki odtwarzające zachowania Sfery wg specu §5.5.
+    // Fake przechodzi przez TE SAME ReceiptRevision/ReceiptStockFacts/ReceiptStateComparer/ReceiptEditOutcome co Real.
+
+    private sealed class FakeItem
+    {
+        public long PositionId; public int Lp; public long? ProductId; public string? Ean; public string Name = ""; public ReceiptItemKind Kind = ReceiptItemKind.Product;
+        public decimal Quantity; public string Unit = "szt."; public decimal UnitPriceNet; public decimal VatRate = 23m;
+    }
+
+    private sealed class FakeDocument
+    {
+        public long Id; public int DokTyp = Sfera.DokTyp.PZ; public int Status = 1; public string Number = ""; public string IssueDate = "2026-01-15";
+        public long ContractorId; public string? ContractorNip; public string? ContractorName; public string OriginalNumber = ""; public string Uwagi = "";
+        public List<FakeItem> Items = new(); public FakeReceiptFacts Facts = new(); public int SaveCount; public int LoadCount;
+    }
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, FakeDocument> _documents = new();
+    private static int _seedCounter = 0;
+
+    internal static void ResetReceiptsForTests() { _documents.Clear(); SessionResetCountForTests = 0; }
+    /// <summary>Liczba resetów sesji Fake (lustro ResetSessionOnSta po niepotwierdzonym Zamknij / SessionResetAfterSave).</summary>
+    internal static int SessionResetCountForTests;
+    internal static Task? StaWorkForTests(long id) => Doc(id).Facts.StaWork;
+
+    internal static long SeedDocumentForTests(int dokTyp, int status = 1, string originalNumber = "", int items = 1)
+    {
+        int n = Interlocked.Increment(ref _seedCounter);
+        long id = 7_000_000 + n;
+        var doc = new FakeDocument
+        {
+            Id = id, DokTyp = dokTyp, Status = status, Number = $"{Sfera.DokTyp.NameOrUnknown(dokTyp)} {n}/2026",
+            ContractorId = 1, ContractorNip = "1111111111", ContractorName = "Mock Kontrahent", OriginalNumber = originalNumber, Uwagi = "seed",
+        };
+        for (int i = 1; i <= items; i++)
+        {
+            doc.Items.Add(new FakeItem { PositionId = 9_500_000 + n * 100 + i, Lp = i, ProductId = 1000 + i, Ean = $"590100000000{i}", Name = $"Seed {i}", Quantity = 1m, UnitPriceNet = 10m });
+        }
+        _documents[id] = doc;
+        return id;
+    }
+
+    private static FakeDocument Doc(long id) => _documents.TryGetValue(id, out var d) ? d : throw new InvalidOperationException($"Fake: brak dokumentu {id} (uzyj CreateReceiptAsync/SeedDocumentForTests)");
+    internal static void SetReceiptFactsForTests(long id, Action<FakeReceiptFacts> configure) => configure(Doc(id).Facts);
+    internal static int SaveCountForTests(long id) => Doc(id).SaveCount;
+    internal static int LoadCountForTests(long id) => Doc(id).LoadCount;
+    internal static void DeleteDocumentForTests(long id) => _documents.TryRemove(id, out _);
+    internal static string OriginalNumberForTests(long id) => Doc(id).OriginalNumber;
+    internal static void SetOriginalNumberForTests(long id, string value) => Doc(id).OriginalNumber = value;
+
+    private static void RegisterReceipt(long id, ReceiptIssueRequestDto request, int counter, string number, long contractorId)
+    {
+        var doc = new FakeDocument
+        {
+            Id = id, DokTyp = Sfera.DokTyp.PZ, Number = number, ContractorId = contractorId, ContractorNip = request.Supplier.Nip,
+            ContractorName = request.Supplier.Name, Uwagi = UwagiFields.Build(request.Notes, request.ExternalReference),
+            // Lustro Real: NumerOryginalny przy POST wciaz ciety do 30 (TrySet) - edycja idzie przez PATCH z 422.
+            OriginalNumber = request.OriginalNumber is { Length: > 30 } o ? o.Substring(0, 30) : request.OriginalNumber ?? string.Empty,
+            IssueDate = string.IsNullOrWhiteSpace(request.IssueDate) ? DateTime.UtcNow.ToString("yyyy-MM-dd") : request.IssueDate,
+        };
+        int lp = 0;
+        foreach (var line in request.Lines)
+        {
+            lp++;
+            decimal net = line.UnitPriceNet ?? Math.Round(line.UnitPriceGross / (1m + line.VatRate / 100m), 4);
+            doc.Items.Add(new FakeItem
+            {
+                PositionId = 9_000_000 + counter * 100 + lp, Lp = lp, ProductId = string.IsNullOrEmpty(line.Ean) ? null : HashString(line.Ean) % 100000,
+                // Usługa jednorazowa nie ma towaru → ean/symbol null (lustro Real: tw_* z SQL po TowarId); "" nie trafia do Ean.
+                Ean = string.IsNullOrEmpty(line.Ean) ? null : line.Ean, Name = line.NameFallback,
+                Kind = string.IsNullOrEmpty(line.Ean) ? ReceiptItemKind.OneOffService : ReceiptItemKind.Product,
+                Quantity = line.Quantity, Unit = string.IsNullOrEmpty(line.Unit) ? "szt." : line.Unit, UnitPriceNet = net, VatRate = line.VatRate,
+            });
+        }
+        _documents[id] = doc;
+    }
+
+    private static int EffectiveStatus(FakeDocument d) => d.Facts.Cancelled ? DuplicateScan.StatusAnulowany : d.Status;
+
+    private static ReceiptStateSnapshot Snapshot(FakeDocument d) => new(
+        d.OriginalNumber, EffectiveStatus(d), d.Facts.BookingStatus,
+        d.Items.Select(i => new ReceiptItemSnapshot(i.PositionId, i.Lp, i.ProductId, i.Kind, i.Quantity, i.Quantity, i.Unit, i.UnitPriceNet, 0m, i.VatRate)).ToList());
+
+    /// <summary>Wspólny odczyt (GET i PATCH): preflight sesji, istnienie, haki awarii odczytu, dopisanie zmiany odłożonej przez CancelWhileWaiting.</summary>
+    private FakeDocument? LoadDocument(long id)
+    {
+        if (SferaUnavailableForTests) throw new SferaUnavailableException("Sesja Sfery niedostepna (fake)");
+        if (!_documents.TryGetValue(id, out var doc)) return null;
+        if (doc.Facts.ReadFails) throw new ReceiptEditException(ReceiptEditError.ReadFailed, $"Fake: odczyt dokumentu {id} padl przy zywej sesji (Istnieje=true).");
+        if (doc.Facts.LinkedIdReadFails) throw new ReceiptEditException(ReceiptEditError.ReadFailed, $"Fake: odczyt DoDokumentuId dokumentu {id} padl - nie zgadujemy braku linku.");
+        doc.LoadCount++;
+        return doc;
+    }
+
+    private static IReadOnlyList<LinkedDocumentDto> LinkedDocuments(FakeDocument d, bool sqlOk)
+        => d.Facts.LinkedDocument is { } l ? new[] { new LinkedDocumentDto("linked", sqlOk ? l.Type : null, l.Id, l.Number) } : Array.Empty<LinkedDocumentDto>();
+
+    private static ReceiptDetailDto BuildDetail(FakeDocument d)
+    {
+        var snapshot = Snapshot(d);
+        var warnings = new List<string>();
+        bool sqlOk = !d.Facts.FailSql;
+        if (!sqlOk) warnings.Add("SQL_FACTS_UNAVAILABLE");
+
+        IReadOnlyDictionary<long, StockFact?> facts = new Dictionary<long, StockFact?>();
+        if (sqlOk)
+        {
+            var rows = d.Facts.StockRows ?? d.Items.Where(i => i.Kind == ReceiptItemKind.Product).Select(i => new StockRow(i.PositionId, i.Quantity, i.Quantity, 1)).ToList();
+            var (f, inconsistent) = ReceiptStockFacts.FromRows(rows, snapshot);
+            facts = f;
+            if (inconsistent) warnings.Add("STOCK_FACTS_INCONSISTENT");
+        }
+
+        var items = d.Items.Select(i =>
+        {
+            facts.TryGetValue(i.PositionId, out var fact);
+            decimal net = i.Quantity * i.UnitPriceNet;
+            return new ReceiptItemDto(i.PositionId, i.Lp, i.ProductId, sqlOk ? i.Ean : null, sqlOk && i.Ean is not null ? MockSymbol(i.Ean) : null, i.Name,
+                KindName(i.Kind), i.Quantity, i.Unit, i.Quantity, i.UnitPriceNet, 0m, i.VatRate, net, net * (1m + i.VatRate / 100m),
+                fact?.IssuedStockUnits, fact?.IssuedQuantity);
+        }).ToList();
+
+        decimal netAmount = d.Items.Sum(i => i.Quantity * i.UnitPriceNet);
+        decimal vatAmount = d.Items.Sum(i => i.Quantity * i.UnitPriceNet * i.VatRate / 100m);
+        bool? periodLocked = sqlOk ? (d.Facts.PeriodLocked ?? false) : null;
+        var linked = LinkedDocuments(d, sqlOk);
+        var reasons = ReceiptEditability.Reasons(d.DokTyp, EffectiveStatus(d), periodLocked, d.Facts.BookingStatus, d.Facts.LinkedDocument?.Id, d.Facts.SferaCanEdit);
+
+        return new ReceiptDetailDto(
+            SubiektId: d.Id, Number: d.Number, Type: Sfera.DokTyp.NameOrUnknown(d.DokTyp), IssueDate: d.IssueDate,
+            ContractorId: d.ContractorId, ContractorNip: d.ContractorNip, ContractorName: d.ContractorName,
+            NetAmount: netAmount, VatAmount: vatAmount, GrossAmount: netAmount + vatAmount, Notes: d.Uwagi,
+            OriginalNumber: d.OriginalNumber, ExternalReference: ReceiptEditFields.ExtractExternalReference(d.Uwagi),
+            WarehouseId: sqlOk ? 1 : null, Status: EffectiveStatus(d), BookingStatus: d.Facts.BookingStatus, PeriodLocked: periodLocked,
+            LinkedDocuments: linked, Editability: new ReceiptEditabilityDto(d.Facts.SferaCanEdit, reasons),
+            Revision: ReceiptRevision.Compute(snapshot), Items: items, Warnings: warnings);
+    }
+
+    private static string KindName(ReceiptItemKind kind) => kind switch
+    {
+        ReceiptItemKind.Product => "product",
+        ReceiptItemKind.Service => "service",
+        ReceiptItemKind.OneOffService => "one_off_service",
+        ReceiptItemKind.Package => "package",
+        ReceiptItemKind.Bundle => "bundle",
+        ReceiptItemKind.Suggestion => "suggestion",
+        _ => "unknown",
+    };
+
+    public Task<ReceiptDetailDto?> GetReceiptDetailAsync(long subiektId, CancellationToken ct)
+        => EnqueueOnFakeSta(() => Task.FromResult(LoadDocument(subiektId) is { } doc ? BuildDetail(doc) : null), ct).Caller;
+
+    // Lustro RunOnStaAsync (Codex r5 P2 - czas zycia pracy STA): jeden job naraz (semafor = watek STA); job KONCZY SIE niezaleznie od anulowania
+    // wolajacego, semafor zwalniany dopiero po zakonczeniu pracy; anulowanie (ct) przerywa TYLKO oczekiwanie wolajacego (Real: rejestracja tokenu na tcs),
+    // a anulowanie PRZED startem jobu pomija go (Real: if (ct.IsCancellationRequested) tcs.TrySetCanceled). GET i PATCH ida przez TE SAMA kolejke.
+    private static readonly SemaphoreSlim _staQueue = new(1, 1);
+
+    private static (Task<T> Work, Task<T> Caller) EnqueueOnFakeSta<T>(Func<Task<T>> job, CancellationToken ct)
+    {
+        var work = Task.Run(async () =>
+        {
+            await _staQueue.WaitAsync(CancellationToken.None);
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+                return await job();
+            }
+            finally { _staQueue.Release(); }
+        });
+        // Po anulowaniu wolajacego nikt nie odbiera wyniku jobu - obserwujemy wyjatek (jak log z fazami w Real).
+        _ = work.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+        return (work, work.WaitAsync(ct));
+    }
+
+    public Task<ReceiptDetailDto> UpdateReceiptHeaderAsync(long subiektId, string originalNumber, string? expectedRevision, CancellationToken ct)
+    {
+        // Anulowanie wolajacego modelowane WYLACZNIE przez bramke StaGate (praca zaparkowana przed Zapisz, test anuluje token): deterministyczne.
+        // Anulowanie "w trakcie" bez bramki (dawny hak CancelDuringApply) usuniete - wyscig obserwacji anulowania (Codex r6) nie daje dowodu.
+        var (work, caller) = EnqueueOnFakeSta(() => UpdateReceiptHeaderCore(subiektId, originalNumber, expectedRevision), ct);
+        if (_documents.TryGetValue(subiektId, out var d)) d.Facts.StaWork = work;
+        return caller;
+    }
+
+    private async Task<ReceiptDetailDto> UpdateReceiptHeaderCore(long subiektId, string originalNumber, string? expectedRevision)
+    {
+        // Preflight sesji (Real: EnsureSessionForMutation) - nic nie zapisano.
+        var doc = LoadDocument(subiektId) ?? throw new ReceiptEditException(ReceiptEditError.NotFound, $"PZ o subiekt_id={subiektId} nie istnieje w Subiekcie.");
+        var facts = doc.Facts;
+        var before = Snapshot(doc);
+
+        if (doc.DokTyp != Sfera.DokTyp.PZ)
+            throw Enrich(new ReceiptEditException(ReceiptEditError.NotAReceipt, $"Dokument {subiektId} nie jest PZ (dok_Typ={doc.DokTyp}).", details: new { document_type = Sfera.DokTyp.NameOrUnknown(doc.DokTyp) }), doc);
+        if (before.Status == DuplicateScan.StatusAnulowany)
+            throw Enrich(new ReceiptEditException(ReceiptEditError.Cancelled, $"PZ {subiektId} jest uniewazniony (dok_Status=2) - edycja niemozliwa."), doc);
+        string currentRevision = ReceiptRevision.Compute(before);
+        if (expectedRevision is not null && !string.Equals(expectedRevision, currentRevision, StringComparison.Ordinal))
+            throw Enrich(new ReceiptEditException(ReceiptEditError.RevisionMismatch, "expected_revision nie zgadza sie z biezacym stanem PZ - pobierz GET i zdecyduj.") { CurrentRevision = currentRevision }, doc);
+        if (string.Equals(originalNumber, before.OriginalNumber, StringComparison.Ordinal))
+            return BuildDetail(doc); // no-op: bez locka, bez zapisu
+
+        var intended = before with { OriginalNumber = originalNumber };
+
+        // Faza Modify: pierwszy SetComProperty otwiera lock Sfery; wyjatek = nic nie utrwalono.
+        if (facts.GuiLocked)
+        {
+            var locked = new COMException("Nie mozna zablokowac obiektu do edycji (otwarty w GUI).", unchecked((int)0x80040F19));
+            throw Enrich(ReceiptEditOutcome.Decide(ReceiptSavePhase.Modify, locked, null, true, false, null)!, doc);
+        }
+
+        // Faza Save. Bramka STA (T16b/T17*): praca stoi PRZED Zapisz, az test ja otworzy; anulowanie wolajacego jej nie przerywa (kolejka trzymana),
+        // a Zapisz/odmowa/Zamknij/reset/odczyt kontrolny/Decide wykonuja sie w calosci po bramce - takze gdy nikt juz nie czeka na wynik.
+        if (facts.StaGate is { } gate)
+        {
+            facts.StaStarted?.TrySetResult(true);
+            await gate.Task;
+        }
+        Exception? saveEx = null;
+        if (facts.ZapiszThrows is { } zt)
+        {
+            if (zt.Commits) Apply(doc, originalNumber);
+            saveEx = new COMException(zt.Message, zt.Hresult);
+        }
+        else if (!facts.RefuseSaveSilently)
+        {
+            Apply(doc, originalNumber);
+        }
+
+        // CloseVerified (ReceiptCloseGuard w Real): niepotwierdzone Zamknij = reset sesji -> sessionReset, bez odczytu kontrolnego, 502.
+        bool closeConfirmed = !facts.CloseFails;
+        bool sessionReset = facts.SessionResetAfterSave || !closeConfirmed;
+        if (sessionReset) SessionResetCountForTests++;
+
+        // Faza ReadBack: swiezy odczyt -> komparator po ob_Id.
+        ReceiptStateMatch? match = null;
+        bool? existsAfter = null;
+        if (!sessionReset && !facts.ReadBackFails)
+        {
+            match = ReceiptStateComparer.Compare(before, intended, Snapshot(doc));
+            existsAfter = true;
+        }
+        var phase = saveEx is not null ? ReceiptSavePhase.Save : ReceiptSavePhase.ReadBack;
+        var decision = ReceiptEditOutcome.Decide(phase, saveEx, match, closeConfirmed, sessionReset, existsAfter);
+        if (decision is not null) throw Enrich(decision, doc);
+        return BuildDetail(doc);
+
+        static void Apply(FakeDocument d, string value) { d.OriginalNumber = value; d.SaveCount++; }
+    }
+
+    private static ReceiptEditException Enrich(ReceiptEditException ex, FakeDocument doc)
+    {
+        ex.SferaCanEdit = doc.Facts.SferaCanEdit;
+        ex.LinkedDocuments = LinkedDocuments(doc, !doc.Facts.FailSql);
+        return ex;
     }
 
     private static int HashString(string value)
@@ -715,4 +984,29 @@ public sealed class FakeSferaSession : ISferaSession
         }
         return Math.Abs(hash);
     }
+}
+
+/// <summary>Fakty i haki testowe PZ w Fake (lustro zachowań Sfery wg specu §5.5). Ustawiane przez SetReceiptFactsForTests.</summary>
+internal sealed class FakeReceiptFacts
+{
+    public bool Cancelled;
+    public bool? PeriodLocked;
+    public int? BookingStatus = 0;
+    public (long Id, string? Number, string? Type)? LinkedDocument;
+    public bool? SferaCanEdit = true;
+    public bool GuiLocked;
+    public List<StockRow>? StockRows;
+    public bool FailSql;
+    public bool ReadFails;
+    public bool LinkedIdReadFails;
+    public (int Hresult, string Message, bool Commits)? ZapiszThrows;
+    public bool ReadBackFails;
+    public bool CloseFails;
+    public bool SessionResetAfterSave;
+    public bool RefuseSaveSilently;
+    /// <summary>Bramka STA (T16b/T17*): praca na STA staje PRZED Zapisz do otwarcia StaGate; StaStarted sygnalizuje dojście do bramki; StaWork = ostatni job
+    /// PATCH tego dokumentu (kończy się wynikiem albo wyjątkiem decyzji także po anulowaniu wołającego).</summary>
+    public TaskCompletionSource<bool>? StaGate;
+    public TaskCompletionSource<bool>? StaStarted;
+    public Task? StaWork;
 }

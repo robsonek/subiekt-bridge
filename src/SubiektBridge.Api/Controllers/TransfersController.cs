@@ -47,7 +47,7 @@ public sealed class TransfersController : ControllerBase
 
         // Idempotency: replay na ten sam klucz, z weryfikacją że cached subiekt_id wciąż
         // istnieje (gdyby MM usunięto w Subiekcie). Wzorzec jak InvoicesController v0.7.23.
-        var cached = await _idempotency.TryGetAsync<TransferResponseDto>(idempotencyKey, ct);
+        var cached = await _idempotency.TryGetAsync<TransferResponseDto>(IdempotencyScope.CreateTransfer, idempotencyKey, ct);
         if (cached is not null)
         {
             InvoiceQueryItemDto? stillExists;
@@ -66,7 +66,7 @@ public sealed class TransfersController : ControllerBase
             }
             _logger.LogWarning("Idempotent cache invalidated: MM subiekt_id={Id} ({Number}) nie istnieje juz w Subiekcie - traktujemy jako nowy request",
                 cached.SubiektId, cached.Number);
-            await _idempotency.DeleteAsync(idempotencyKey, ct);
+            await _idempotency.DeleteAsync(IdempotencyScope.CreateTransfer, idempotencyKey, ct);
         }
 
         if (request.Lines.Count == 0)
@@ -100,7 +100,7 @@ public sealed class TransfersController : ControllerBase
         try
         {
             var response = await _sfera.CreateTransferAsync(request, ct);
-            await _idempotency.SaveAsync(idempotencyKey, response, ct);
+            await _idempotency.SaveAsync(IdempotencyScope.CreateTransfer, idempotencyKey, response, ct);
             return StatusCode(StatusCodes.Status201Created, response);
         }
         catch (DuplicateCheckUnavailableException ex)

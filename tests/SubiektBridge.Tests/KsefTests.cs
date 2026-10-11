@@ -177,7 +177,7 @@ public class KsefTests
     public async Task Post_NotFound_Returns404()
     {
         var ctrl = NewController(new FakeSferaSession());
-        var (status, value) = Unwrap((await ctrl.Send("sub_-5", CancellationToken.None)).Result);
+        var (status, value) = Unwrap((await ctrl.Send($"sub_{FakeSferaSession.NotFoundIdForTests}", CancellationToken.None)).Result);
 
         Assert.Equal(404, status);
         Assert.Equal("INVOICE_NOT_FOUND", Assert.IsType<ErrorResponseDto>(value).Code);
@@ -234,7 +234,7 @@ public class KsefTests
     public async Task Get_NotFound_Returns404()
     {
         var ctrl = NewController(new FakeSferaSession());
-        var (status, value) = Unwrap((await ctrl.GetStatus("sub_-5", CancellationToken.None)).Result);
+        var (status, value) = Unwrap((await ctrl.GetStatus($"sub_{FakeSferaSession.NotFoundIdForTests}", CancellationToken.None)).Result);
 
         Assert.Equal(404, status);
         Assert.Equal("INVOICE_NOT_FOUND", Assert.IsType<ErrorResponseDto>(value).Code);

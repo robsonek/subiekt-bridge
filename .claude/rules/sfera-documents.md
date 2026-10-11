@@ -210,3 +210,32 @@ na delegatach, testowalny bez COM; spec `docs/superpowers/specs/2026-10-10-booki
   `ValidateNotes` → `422 INVALID_EXTERNAL_REFERENCE`, limit 495 = 500 − `"ref: "`; dłuższy ref `Build` obcinał i skan go nie znajdował).
 Konsekwencja: każde wystawienie FS/KFS/PZ/MM zależy od SqlClienta (`/health` `sql_connection`). Przed wydaniem potwierdź
 `dok_Status`/`dok_Uwagi` na prod read-only (`INFORMATION_SCHEMA.COLUMNS`).
+
+## Edycja wczytanego dokumentu — PZ nagłówek (od v0.21.0, `PATCH /receipts/{id}`)
+
+- **Lock Sfery otwiera się przy PIERWSZEJ zmianie atrybutu** (CHM `start_FAQ.htm` „Blokowanie obiektów”); kolizja z GUI =
+  `0x80040F19 INS_E_CANNOTLOCKOBJECT` rzucany przy `SetComProperty`, PRZED `Zapisz` → nic nie utrwalono. **`TrySet` jest w edycji
+  ZAKAZANY** (połknąłby odmowę). Sam odczyt (`WczytajDokument` + atrybuty) nie blokuje. Lock trzymany do `Zamknij` → `CloseVerified` w
+  `finally` (`ReceiptCloseGuard`: raportuje wynik, `TryClose` go połyka). **Niepotwierdzone `Zamknij` po mutacji = natychmiastowy
+  `ResetSessionOnSta`** (lock może wisieć w sesji; bieżące żądanie 502 przez `sessionReset`, kolejne otwiera sesję od nowa).
+- **Kod po `Zapisz` wyłącznie z odczytu kontrolnego** (`ReceiptEditOutcome.Decide` R1–R8, komparator po `ob_Id` ze wszystkimi polami,
+  równość dokładna po normalizacji 4 dp): stan docelowy → 200 (także gdy `Zapisz` rzucił); stan sprzed → 409/422/500 wg klasy wyjątku;
+  rozjazd / brak odczytu / `Zamknij` niepotwierdzone / reset sesji → 502 `RECEIPT_UPDATE_UNVERIFIED`.
+- **Lista błędów `start_Lista_bledow.htm` jest autorytatywna, strony per-metoda nie** (`SuDokument_Usun.htm` podaje `0x80040F5F` dla
+  „dostawy zmodyfikowane”, lista: `0x80040F61`). Klasyfikacja = HRESULT ma pierwszeństwo nad frazami, także nad walidacją (`0x80040F8A`)
+  i brakiem (`0x80040F62`); frazy całe z granicą słowa („niezaksięgowany” ≠ „zaksięgowany”).
+- **404 tylko po pozytywnym `Dokumenty.Istnieje(id) == false`**; wyjątek `WczytajDokument` przy żywej sesji i `Istnieje == true` →
+  502 `SUBIEKT_QUERY_FAILED` (nie zgadujemy ducha). Cały chroniony snapshot (typ, status, `NumerOryginalny`, `DoDokumentuId`, pola pozycji z `TowarId`/`UslugaJednorazowa`/`TowarRodzaj`) czyta
+  `ReceiptSnapshotReader` — adapter na delegatach testowany bez COM: wyjątek albo `null` w kolumnie NOT NULL = `ReadFailed`, **nic nie jest
+  podstawiane** (awaria odczytu ≠ „brak linku”/„usługa jednorazowa”/„ilość 0”); legalne nulle tylko `Uwagi`, `DoDokumentuId`, `TowarId`, `Jm`.
+  Id z URL przechodzi przez `BridgeIds` (`1..int.MaxValue` — COM Long; `(int)4294967297 == 1`).
+- Powiązanie PZ↔FZ/KFS = `dok_DoDokId` (link TYLKO po stronie PZ; prod: 12 561 → FZ, 1 320 → KFS) **i wspólne wiersze `dok_Pozycja`**
+  (`ob_DokHanId` + `ob_DokMagId`); nagłówek `dok_NrPelnyOryg` operator edytuje w GUI także po linku. Most NIE odmawia z linku (polityka A) —
+  raportuje `linked_documents`, Sfera orzeka. `DoDokumentuId` jest read-only (powiązania istniejącego FZ z PZ nie ma w Sferze).
+- `SuPozycja.TowarId` tylko do odczytu (zmiana towaru = `Usun` + `Dodaj`, nowe `ob_Id`); `TowarRodzaj` (1 towar/2 usługa/4 opakowanie/8
+  komplet/32 sugestia); rozchód z `dok_MagRuch` (`mr_PozId = ob_Id`, `mr_Ilosc`, `mr_Pozostalo`, j. magazynowe; `ReceiptStockFacts.FromRows`
+  z inwariantami: niespójność = `null` + warning, nie liczba). `/sfera/raw` jest jednostrzałowy — do sond łańcucha Wczytaj→set→Zapisz
+  służy `deploy/probe-pz-items.ps1` (32-bit PowerShell `-STA`, tylko dokument testowy).
+- `external_reference` w `ReceiptDetailDto` = `ReceiptEditFields.ExtractExternalReference` — odwrotność `UwagiFields.Build` (wspólne stałe
+  `ReferenceMarker`/`ReferenceSeparator`): ostatni `ref: ` na początku Uwag albo po ` | `, do końca pola dosłownie (ref może mieć spacje —
+  `ValidateExternalReference` ich nie zabrania; ucinanie na pierwszej spacji gubiło słowa — Greptile PR #20).

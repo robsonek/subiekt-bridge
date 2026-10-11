@@ -175,7 +175,7 @@ public sealed class InvoicesController : ControllerBase
         {
             return UnprocessableEntity(new ErrorResponseDto(
                 Code: "INVALID_BRIDGE_ID",
-                Message: $"Bridge ID '{id}' ma nieznany format. Oczekiwane: 'sub_<id>'."));
+                Message: $"Bridge ID '{id}' ma nieznany format albo id poza zakresem. Oczekiwane: 'sub_<n>', 1 <= n <= 2147483647."));
         }
 
         InvoiceQueryItemDto? item;
@@ -202,7 +202,7 @@ public sealed class InvoicesController : ControllerBase
         {
             return UnprocessableEntity(new ErrorResponseDto(
                 Code: "INVALID_BRIDGE_ID",
-                Message: $"Bridge ID '{id}' ma nieznany format. Oczekiwane: 'sub_<id>'."));
+                Message: $"Bridge ID '{id}' ma nieznany format albo id poza zakresem. Oczekiwane: 'sub_<n>', 1 <= n <= 2147483647."));
         }
 
         var bytes = await _sfera.GetInvoicePdfAsync(subiektId, ct);
@@ -232,7 +232,7 @@ public sealed class InvoicesController : ControllerBase
         // ALE: weryfikujemy ze cached subiekt_id wciaz istnieje. Jesli user anulowal/usunal
         // FV w Subiekcie (a nasz Idempotency-Key zostal ten sam, np. ponowny klik 'Wystaw FV'
         // w UI), nie chcemy zwracac danych ducha - traktujemy request jako nowy.
-        var cached = await _idempotency.TryGetAsync<InvoiceResponseDto>(idempotencyKey, ct);
+        var cached = await _idempotency.TryGetAsync<InvoiceResponseDto>(IdempotencyScope.CreateInvoice, idempotencyKey, ct);
         if (cached is not null)
         {
             InvoiceQueryItemDto? stillExists;
@@ -251,7 +251,7 @@ public sealed class InvoicesController : ControllerBase
             }
             _logger.LogWarning("Idempotent cache invalidated: subiekt_id={Id} ({Number}) nie istnieje juz w Subiekcie - traktujemy jako nowy request",
                 cached.SubiektId, cached.Number);
-            await _idempotency.DeleteAsync(idempotencyKey, ct);
+            await _idempotency.DeleteAsync(IdempotencyScope.CreateInvoice, idempotencyKey, ct);
         }
 
         // Walidacja totalsum vs Σ(line.qty * line.price_gross + shipping).
@@ -264,7 +264,7 @@ public sealed class InvoicesController : ControllerBase
         try
         {
             var response = await _sfera.CreateInvoiceAsync(request, ct);
-            await _idempotency.SaveAsync(idempotencyKey, response, ct);
+            await _idempotency.SaveAsync(IdempotencyScope.CreateInvoice, idempotencyKey, response, ct);
             return StatusCode(StatusCodes.Status201Created, response);
         }
         catch (ContractorLookupUnavailableException ex)
@@ -346,12 +346,21 @@ public sealed class InvoicesController : ControllerBase
                 Message: "Nagłówek 'Idempotency-Key' jest wymagany."));
         }
 
+        // Id FS przed replayem (jak /settlements): klucz zyje w zakresie tej faktury - KFS faktury 1 nie wraca jako korekta faktury 2.
+        if (!TryParseSubiektIdFromBridgeId(id, out long sourceSubiektId))
+        {
+            return UnprocessableEntity(new ErrorResponseDto(
+                Code: "INVALID_BRIDGE_ID",
+                Message: $"Bridge ID '{id}' ma nieznany format albo id poza zakresem. Oczekiwane: 'sub_<n>' (real Sfera, 1 <= n <= 2147483647) lub 'fake_inv_<id>' (dev mock)."));
+        }
+
         // Idempotency replay z weryfikacja istnienia dokumentu (jak CreateInvoice).
         // Bez tego ponowne klikniecie 'Wystaw KFS' w UI po recznym usunieciu KFS-a z
         // Subiekta zwraca starego ducha (HTTP 200 + cached subiekt_id) zamiast wystawic
         // nowy dokument. Bug fix v0.7.48 (regresja: v0.7.23 dodal weryfikacje tylko dla
         // CreateInvoice, pominal CreateCorrection).
-        var cached = await _idempotency.TryGetAsync<InvoiceResponseDto>(idempotencyKey, ct);
+        var scope = IdempotencyScope.CreateCorrection(sourceSubiektId);
+        var cached = await _idempotency.TryGetAsync<InvoiceResponseDto>(scope, idempotencyKey, ct);
         if (cached is not null)
         {
             InvoiceQueryItemDto? stillExists;
@@ -370,14 +379,7 @@ public sealed class InvoicesController : ControllerBase
             }
             _logger.LogWarning("Idempotent cache invalidated: KFS subiekt_id={Id} ({Number}) nie istnieje juz w Subiekcie - traktujemy jako nowy request",
                 cached.SubiektId, cached.Number);
-            await _idempotency.DeleteAsync(idempotencyKey, ct);
-        }
-
-        if (!TryParseSubiektIdFromBridgeId(id, out long sourceSubiektId))
-        {
-            return UnprocessableEntity(new ErrorResponseDto(
-                Code: "INVALID_BRIDGE_ID",
-                Message: $"Bridge ID '{id}' ma nieznany format. Oczekiwane: 'sub_<id>' (real Sfera) lub 'fake_inv_<id>' (dev mock)."));
+            await _idempotency.DeleteAsync(scope, idempotencyKey, ct);
         }
 
         if (!IsIsoDateOrEmpty(request.IssueDate) || !IsIsoDateOrEmpty(request.SourceInvoiceDate))
@@ -405,7 +407,7 @@ public sealed class InvoicesController : ControllerBase
         try
         {
             var response = await _sfera.CreateCorrectionAsync(sourceSubiektId, request, ct);
-            await _idempotency.SaveAsync(idempotencyKey, response, ct);
+            await _idempotency.SaveAsync(scope, idempotencyKey, response, ct);
             return StatusCode(StatusCodes.Status201Created, response);
         }
         catch (DuplicateCheckUnavailableException ex)
@@ -589,11 +591,9 @@ public sealed class InvoicesController : ControllerBase
     {
         subiektId = 0;
 
-        const string realPrefix = "sub_";
-        if (bridgeId.StartsWith(realPrefix, StringComparison.Ordinal) &&
-            long.TryParse(bridgeId.AsSpan(realPrefix.Length), out var realId))
+        // "sub_<id>" z zakresem 1..int.MaxValue (COM Long) - wspolny BridgeIds (Codex r4 #6: (int)4294967297 == 1).
+        if (BridgeIds.TryParseSubiektId(bridgeId, out subiektId))
         {
-            subiektId = realId;
             return true;
         }
 
