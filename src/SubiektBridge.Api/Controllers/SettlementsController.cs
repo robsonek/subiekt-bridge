@@ -46,7 +46,7 @@ public sealed class SettlementsController : ControllerBase
         {
             return UnprocessableEntity(new ErrorResponseDto(
                 Code: "INVALID_BRIDGE_ID",
-                Message: $"Bridge ID '{id}' ma nieznany format. Oczekiwane: 'sub_<id>' (real Sfera) lub 'fake_inv_<id>' (dev mock)."));
+                Message: $"Bridge ID '{id}' ma nieznany format albo id poza zakresem. Oczekiwane: 'sub_<n>' (real Sfera, 1 <= n <= 2147483647) lub 'fake_inv_<id>' (dev mock)."));
         }
 
         if (string.IsNullOrEmpty(idempotencyKey))
@@ -141,7 +141,7 @@ public sealed class SettlementsController : ControllerBase
         {
             return UnprocessableEntity(new ErrorResponseDto(
                 Code: "INVALID_BRIDGE_ID",
-                Message: $"Bridge ID '{id}' ma nieznany format. Oczekiwane: 'sub_<id>'."));
+                Message: $"Bridge ID '{id}' ma nieznany format albo id poza zakresem. Oczekiwane: 'sub_<n>', 1 <= n <= 2147483647."));
         }
 
         try
@@ -175,7 +175,7 @@ public sealed class SettlementsController : ControllerBase
         {
             return UnprocessableEntity(new ErrorResponseDto(
                 Code: "INVALID_BRIDGE_ID",
-                Message: $"Bridge ID '{id}' ma nieznany format. Oczekiwane: 'sub_<id>'."));
+                Message: $"Bridge ID '{id}' ma nieznany format albo id poza zakresem. Oczekiwane: 'sub_<n>', 1 <= n <= 2147483647."));
         }
 
         try
@@ -224,11 +224,9 @@ public sealed class SettlementsController : ControllerBase
     {
         subiektId = 0;
 
-        const string realPrefix = "sub_";
-        if (bridgeId.StartsWith(realPrefix, StringComparison.Ordinal) &&
-            long.TryParse(bridgeId.AsSpan(realPrefix.Length), out var realId))
+        // "sub_<id>" z zakresem 1..int.MaxValue (COM Long) - wspolny BridgeIds (Codex r4 #6: (int)4294967297 == 1).
+        if (BridgeIds.TryParseSubiektId(bridgeId, out subiektId))
         {
-            subiektId = realId;
             return true;
         }
 

@@ -122,9 +122,13 @@ public sealed class IdempotencyStore
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>Test-only: wyjątek rzucany na wejściu SaveAsync (symulacja awarii cache PO udanym zapisie w Subiekcie; spec PZ v0.21.0 T18).</summary>
+    internal Exception? FailSaveForTests { get; set; }
+
     public async Task SaveAsync<TResponse>(string key, TResponse response, CancellationToken ct)
         where TResponse : class
     {
+        if (FailSaveForTests is { } fail) throw fail;
         var json = JsonSerializer.Serialize(response);
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);

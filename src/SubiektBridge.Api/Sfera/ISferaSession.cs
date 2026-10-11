@@ -48,6 +48,18 @@ public interface ISferaSession : IAsyncDisposable
     Task<InvoiceQueryItemDto?> FindInvoiceByIdAsync(long subiektId, CancellationToken ct);
 
     /// <summary>
+    /// Szczegóły PZ (v0.21.0): nagłówek, pozycje read-only, powiązania, fakty edytowalności, revision. Null = dokument POZYTYWNIE
+    /// nie istnieje (Dokumenty.Istnieje == false). Rzuca ReceiptEditException(ReadFailed) gdy odczyt padł przy żywej sesji.
+    /// </summary>
+    Task<ReceiptDetailDto?> GetReceiptDetailAsync(long subiektId, CancellationToken ct);
+
+    /// <summary>
+    /// PATCH nagłówka PZ: NumerOryginalny (znormalizowany, ≤ 30 zn.). Ta sama wartość = 200 bez zapisu. Odpowiedź = stan po odczycie
+    /// kontrolnym po Zapisz. Rzuca ReceiptEditException (404/409/422/500/502 wg Reason), SferaUnavailableException (503).
+    /// </summary>
+    Task<ReceiptDetailDto> UpdateReceiptHeaderAsync(long subiektId, string originalNumber, string? expectedRevision, CancellationToken ct);
+
+    /// <summary>
     /// Lista otwartych naleznosci (rozrachunki sprzedazy nzf_Typ=39 z WartoscBiezaca&gt;0) w oknie kwoty
     /// - kandydaci do dopasowania z przychodzacym przelewem. Read-only, przez COM (FinManager.OtworzKolekcje
     /// + atrybuty FinDokument), NIE raw SQL. Most NIE matchuje - zwraca okno, dopasowanie robi klient.
