@@ -58,7 +58,8 @@ public sealed class SettlementsController : ControllerBase
 
         // Replay-with-verify: weryfikujemy po RozliczenieId (NIE po istnieniu dokumentu - ten
         // zawsze istnieje). Operator cofnal rozliczenie -> cache invalidate -> nowy flow.
-        var cached = await _idempotency.TryGetAsync<SettlementResponseDto>(idempotencyKey, ct);
+        var scope = IdempotencyScope.CreateSettlement(documentSubiektId);
+        var cached = await _idempotency.TryGetAsync<SettlementResponseDto>(scope, idempotencyKey, ct);
         if (cached is not null)
         {
             bool stillExists = false;
@@ -83,13 +84,13 @@ public sealed class SettlementsController : ControllerBase
                 return Ok(cached);
             }
             _logger.LogWarning("Idempotent cache invalidated: rozliczenie_id={RozId} nie istnieje juz - traktujemy jako nowy request", cached.RozliczenieId);
-            await _idempotency.DeleteAsync(idempotencyKey, ct);
+            await _idempotency.DeleteAsync(scope, idempotencyKey, ct);
         }
 
         try
         {
             var response = await _sfera.CreateSettlementAsync(documentSubiektId, request, ct);
-            await _idempotency.SaveAsync(idempotencyKey, response, ct);
+            await _idempotency.SaveAsync(scope, idempotencyKey, response, ct);
             return StatusCode(StatusCodes.Status201Created, response);
         }
         catch (DuplicateSettlementException ex)

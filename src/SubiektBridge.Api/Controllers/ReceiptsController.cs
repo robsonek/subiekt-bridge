@@ -130,8 +130,9 @@ public sealed class ReceiptsController : ControllerBase
 
         // Replay: cached 200 ma pierwszeństwo przed expected_revision (§4.4 przypadek 1). Dokument pozytywnie nieistniejący → klucz
         // kasowany i OD RAZU 404 (bez mutacji - Codex r4 #7); pad sesji / odczytu → kod 503/502 BEZ kasowania klucza (kasacja + ponowienie
-        // = zapis bez replayu).
-        var cached = await _idempotency.TryGetAsync<ReceiptDetailDto>(idempotencyKey, ct);
+        // = zapis bez replayu). Zakres = ten dokument: klucz z POST /receipts albo z PATCH innego PZ to inny wpis (Greptile PR #20 W1).
+        var scope = IdempotencyScope.UpdateReceiptHeader(subiektId);
+        var cached = await _idempotency.TryGetAsync<ReceiptDetailDto>(scope, idempotencyKey, ct);
         if (cached is not null)
         {
             ReceiptDetailDto? stillExists;
@@ -153,7 +154,7 @@ public sealed class ReceiptsController : ControllerBase
             }
             _logger.LogWarning("Idempotent cache invalidated: subiekt_id={Id} ({Number}) nie istnieje juz w Subiekcie - klucz skasowany, 404 bez mutacji (spec 4.4)",
                 cached.SubiektId, cached.Number);
-            await _idempotency.DeleteAsync(idempotencyKey, ct);
+            await _idempotency.DeleteAsync(scope, idempotencyKey, ct);
             return NotFound(NotFoundError(cached.SubiektId));
         }
 
@@ -194,7 +195,7 @@ public sealed class ReceiptsController : ControllerBase
 
         try
         {
-            await _idempotency.SaveAsync(idempotencyKey, response, ct);
+            await _idempotency.SaveAsync(scope, idempotencyKey, response, ct);
         }
         catch (Exception ex)
         {
@@ -255,7 +256,7 @@ public sealed class ReceiptsController : ControllerBase
         // PZ w Subiekcie (a nasz Idempotency-Key zostal ten sam, np. ponowny klik 'Wystaw PZ'
         // w UI po manualnym usunieciu z Subiekta), nie chcemy zwracac danych ducha -
         // traktujemy request jako nowy. Wzorzec analogiczny do InvoicesController v0.7.23.
-        var cached = await _idempotency.TryGetAsync<InvoiceResponseDto>(idempotencyKey, ct);
+        var cached = await _idempotency.TryGetAsync<InvoiceResponseDto>(IdempotencyScope.CreateReceipt, idempotencyKey, ct);
         if (cached is not null)
         {
             InvoiceQueryItemDto? stillExists;
@@ -274,7 +275,7 @@ public sealed class ReceiptsController : ControllerBase
             }
             _logger.LogWarning("Idempotent cache invalidated: subiekt_id={Id} ({Number}) nie istnieje juz w Subiekcie - traktujemy jako nowy request",
                 cached.SubiektId, cached.Number);
-            await _idempotency.DeleteAsync(idempotencyKey, ct);
+            await _idempotency.DeleteAsync(IdempotencyScope.CreateReceipt, idempotencyKey, ct);
         }
 
         if (request.Lines.Count == 0)
@@ -308,7 +309,7 @@ public sealed class ReceiptsController : ControllerBase
         try
         {
             var response = await _sfera.CreateReceiptAsync(request, ct);
-            await _idempotency.SaveAsync(idempotencyKey, response, ct);
+            await _idempotency.SaveAsync(IdempotencyScope.CreateReceipt, idempotencyKey, response, ct);
             return StatusCode(StatusCodes.Status201Created, response);
         }
         catch (ContractorLookupUnavailableException ex)

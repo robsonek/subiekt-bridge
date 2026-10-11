@@ -127,19 +127,20 @@ public static class ReceiptEditFields
     }
 
     /// <summary>
-    /// Token external_reference z Uwag - TYLKO gdy Uwagi zawierają marker "ref:" (UwagiFields.ReferenceSuffix); pierwszy marker,
-    /// token do białego znaku. Bez markera → null (nie zgadujemy z notatek).
+    /// external_reference z Uwag = odwrotność UwagiFields.Build, który dopisuje "ref: X" ZAWSZE na końcu (całe Uwagi albo po " | "):
+    /// OSTATNI marker na początku Uwag albo po separatorze, wartość do końca pola dosłownie - ze spacjami, bez przycinania (Greptile PR #20 W2:
+    /// token do białego znaku ucinał "order:ABC supplier:42" do "order:ABC"). Bez markera → null (nie zgadujemy z notatek). Granica:
+    /// referencja zawierająca " | ref: " jest nieodróżnialna od notatek z markerem - wygrywa ostatni marker (kontrakt §3.6b).
     /// </summary>
     public static string? ExtractExternalReference(string? uwagi)
     {
         if (string.IsNullOrEmpty(uwagi)) return null;
-        int idx = uwagi.IndexOf("ref:", StringComparison.OrdinalIgnoreCase);
-        if (idx < 0) return null;
-        int i = idx + 4;
-        while (i < uwagi.Length && char.IsWhiteSpace(uwagi[i])) i++;
-        int start = i;
-        while (i < uwagi.Length && !char.IsWhiteSpace(uwagi[i])) i++;
-        return i > start ? uwagi[start..i] : null;
+        const string afterNotes = UwagiFields.ReferenceSeparator + UwagiFields.ReferenceMarker;
+        int idx = uwagi.LastIndexOf(afterNotes, StringComparison.Ordinal);
+        int start = idx >= 0 ? idx + afterNotes.Length
+            : uwagi.StartsWith(UwagiFields.ReferenceMarker, StringComparison.Ordinal) ? UwagiFields.ReferenceMarker.Length
+            : -1;
+        return start >= 0 && start < uwagi.Length ? uwagi[start..] : null;
     }
 }
 

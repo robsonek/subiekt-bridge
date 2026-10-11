@@ -58,7 +58,7 @@ public class ReviewFixesSessionTests
         Assert.Equal(503, status);
         Assert.Equal("SUBIEKT_UNAVAILABLE", Assert.IsType<ErrorResponseDto>(value).Code);
         // Klucz przetrwał: po powrocie sesji replay zwróci pierwotny dokument, nie wystawi drugiego.
-        Assert.NotNull(await store.TryGetAsync<InvoiceResponseDto>(key, CancellationToken.None));
+        Assert.NotNull(await store.TryGetAsync<InvoiceResponseDto>(IdempotencyScope.CreateInvoice, key, CancellationToken.None));
 
         fake.SferaUnavailableForTests = false;
         var replay = Unwrap((await controller.Create(Invoice(), key, CancellationToken.None)).Result);

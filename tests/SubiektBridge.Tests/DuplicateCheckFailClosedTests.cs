@@ -72,7 +72,7 @@ public class DuplicateCheckFailClosedTests
     /// Mutant: catch-all -> 500 INTERNAL_ERROR (kod spoza listy retry); Mutant: SaveAsync przed try -> replay 503.
     /// </summary>
     private static async Task AssertDuplicateCheckUnavailableKeepsKeyThenRetrySucceeds(
-        FakeSferaSession fake, IdempotencyStore store, string key, string reference, string expectedType,
+        FakeSferaSession fake, IdempotencyStore store, IdempotencyScope scope, string key, string reference, string expectedType,
         Func<string, Task<IActionResult?>> call)
     {
         fake.FailDuplicateCheckForTests = true;
@@ -82,12 +82,12 @@ public class DuplicateCheckFailClosedTests
         var details = DetailsOf(value);
         Assert.Equal(reference, details.GetProperty("external_reference").GetString());
         Assert.Equal(expectedType, details.GetProperty("document_type").GetString());
-        Assert.Null(await store.TryGetAsync<object>(key, CancellationToken.None));
+        Assert.Null(await store.TryGetAsync<object>(scope, key, CancellationToken.None));
 
         fake.FailDuplicateCheckForTests = false;
         var retry = Unwrap(await call(key));
         Assert.Equal(201, retry.status);
-        Assert.NotNull(await store.TryGetAsync<object>(key, CancellationToken.None));
+        Assert.NotNull(await store.TryGetAsync<object>(scope, key, CancellationToken.None));
     }
 
     [Fact]
@@ -96,7 +96,7 @@ public class DuplicateCheckFailClosedTests
         var fake = new FakeSferaSession(); var store = NewStore();
         var c = new InvoicesController(fake, store, NullLogger<InvoicesController>.Instance);
         var reference = NewRef();
-        await AssertDuplicateCheckUnavailableKeepsKeyThenRetrySucceeds(fake, store, "k-fs-dup", reference, "FS",
+        await AssertDuplicateCheckUnavailableKeepsKeyThenRetrySucceeds(fake, store, IdempotencyScope.CreateInvoice, "k-fs-dup", reference, "FS",
             async key => (await c.Create(Invoice(reference), key, CancellationToken.None)).Result);
     }
 
@@ -106,7 +106,7 @@ public class DuplicateCheckFailClosedTests
         var fake = new FakeSferaSession(); var store = NewStore();
         var c = new InvoicesController(fake, store, NullLogger<InvoicesController>.Instance);
         var reference = NewRef();
-        await AssertDuplicateCheckUnavailableKeepsKeyThenRetrySucceeds(fake, store, "k-kfs-dup", reference, "KFS",
+        await AssertDuplicateCheckUnavailableKeepsKeyThenRetrySucceeds(fake, store, IdempotencyScope.CreateCorrection(1_000_001), "k-kfs-dup", reference, "KFS",
             async key => (await c.CreateCorrection("fake_inv_000001", Correction(reference), key, CancellationToken.None)).Result);
     }
 
@@ -116,7 +116,7 @@ public class DuplicateCheckFailClosedTests
         var fake = new FakeSferaSession(); var store = NewStore();
         var c = new ReceiptsController(fake, store, NullLogger<ReceiptsController>.Instance);
         var reference = NewRef();
-        await AssertDuplicateCheckUnavailableKeepsKeyThenRetrySucceeds(fake, store, "k-pz-dup", reference, "PZ",
+        await AssertDuplicateCheckUnavailableKeepsKeyThenRetrySucceeds(fake, store, IdempotencyScope.CreateReceipt, "k-pz-dup", reference, "PZ",
             async key => (await c.Create(Receipt(reference), key, CancellationToken.None)).Result);
     }
 
@@ -126,7 +126,7 @@ public class DuplicateCheckFailClosedTests
         var fake = new FakeSferaSession(); var store = NewStore();
         var c = new TransfersController(fake, store, NullLogger<TransfersController>.Instance);
         var reference = NewRef();
-        await AssertDuplicateCheckUnavailableKeepsKeyThenRetrySucceeds(fake, store, "k-mm-dup", reference, "MM",
+        await AssertDuplicateCheckUnavailableKeepsKeyThenRetrySucceeds(fake, store, IdempotencyScope.CreateTransfer, "k-mm-dup", reference, "MM",
             async key => (await c.Create(Transfer(reference), key, CancellationToken.None)).Result);
     }
 

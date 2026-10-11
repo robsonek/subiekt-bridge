@@ -57,6 +57,10 @@ public class ReceiptEditTests
     private static ReceiptsController Controller(FakeSferaSession fake, IdempotencyStore? store = null)
         => new(fake, store ?? NewStore(), NullLogger<ReceiptsController>.Instance);
 
+    /// <summary>Wpis cache PATCH tego PZ (zakres = dokument; Greptile PR #20 W1).</summary>
+    private static Task<ReceiptDetailDto?> Cached(IdempotencyStore store, long id, string key)
+        => store.TryGetAsync<ReceiptDetailDto>(IdempotencyScope.UpdateReceiptHeader(id), key, CancellationToken.None);
+
     private static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
     private static ReceiptHeaderPatchDto Patch(string value, string? rev = null) => new(Json(JsonSerializer.Serialize(value)), rev);
     private static ReceiptHeaderPatchDto PatchNull() => new(Json("null"), null);
@@ -167,7 +171,14 @@ public class ReceiptEditTests
     [InlineData("a | ref: sys:o:1", "sys:o:1")]
     [InlineData("ref: x", "x")]
     [InlineData("sys:o:1", null)]                 // brak markera - NIE zgadujemy
-    [InlineData("ref: a | ref: b", "a")]          // pierwszy marker
+    [InlineData("ref: a | ref: b", "b")]          // OSTATNI marker: Build dopisuje ref zawsze na końcu, "ref: a" to notatki klienta
+    [InlineData("x | ref: stary | ref: nowy", "nowy")]  // dwa separatory z markerem - nadal ostatni
+    [InlineData("ref: order:ABC supplier:42", "order:ABC supplier:42")]               // Greptile W2: spacja w referencji
+    [InlineData("notatka | ref: order:ABC supplier:42", "order:ABC supplier:42")]
+    [InlineData("Pref: x | ref: S1/abc", "S1/abc")]  // "ref:" w środku słowa notatki to nie marker
+    [InlineData("Pref: x", null)]
+    [InlineData("ref:x", null)]                   // Build zawsze pisze "ref: " (ze spacją)
+    [InlineData("notatka | ref: ", null)]         // marker bez wartości
     [InlineData("", null)]
     [InlineData(null, null)]
     public void T2_ExtractExternalReference(string? uwagi, string? expected)
@@ -179,6 +190,49 @@ public class ReceiptEditTests
         Assert.Equal("sys:o:1", ReceiptEditFields.ExtractExternalReference(UwagiFields.Build("notatka", "sys:o:1")));
         // Build nie dokleja sufiksu, gdy token już jest w notatkach bez "ref:" - wtedy ekstraktor zwraca null (świadomie)
         Assert.Null(ReceiptEditFields.ExtractExternalReference(UwagiFields.Build("sys:o:1", "sys:o:1")));
+    }
+
+    public static TheoryData<string?, string> T2_RoundTripCases() => new()
+    {
+        { null, "order:ABC supplier:42" },
+        { "", "order:ABC supplier:42" },
+        { "notatka", "order:ABC supplier:42" },
+        { "PZ testowe", "S12/Zamowienie 7  z dwiema spacjami" },
+        { "ref: stary", "nowysystem:order:1" },          // notatki z markerem - ref mostu i tak jest ostatni
+        { "x | ref: stary", "nowysystem:order:1" },
+        { "Pref: x", "S1/abc" },
+        { "notatka", "a | b" },                          // separator wewnątrz referencji (bez "ref: " po nim)
+        { "notatka", "ref:x" },
+        { null, " wiodąca spacja" },
+        { "notatka", "spacja na końcu " },
+    };
+
+    [Theory]
+    [MemberData(nameof(T2_RoundTripCases))]
+    public void T2_RoundTrip_FullReference_AsWrittenByBuild(string? notes, string reference)
+    {
+        // Greptile W2: ValidateExternalReference przyjmuje spacje, Build zapisuje ref w całości na KOŃCU Uwag - odczyt musi zwrócić to samo.
+        Assert.Null(UwagiFields.ValidateExternalReference(reference));
+        Assert.Equal(reference, ReceiptEditFields.ExtractExternalReference(UwagiFields.Build(notes, reference)));
+    }
+
+    [Fact]
+    public void T2_Boundary_ReferenceContainingMarker_ReadFromLastMarker()
+    {
+        // Granica reguły (kontrakt §3.6b): referencja zawierająca " | ref: " jest nieodróżnialna od notatek z markerem - wygrywa ostatni marker.
+        Assert.Equal("b", ReceiptEditFields.ExtractExternalReference(UwagiFields.Build(null, "a | ref: b")));
+    }
+
+    [Fact]
+    public async Task T2_Get_ReturnsFullExternalReference_WithSpaces()
+    {
+        var fake = new FakeSferaSession();
+        var c = Controller(fake);
+        var request = Receipt() with { ExternalReference = "test:pz:ABC supplier:42" };
+        long id = (await fake.CreateReceiptAsync(request, CancellationToken.None)).SubiektId;
+        var (s, v) = Unwrap((await c.Get($"sub_{id}", CancellationToken.None)).Result);
+        Assert.Equal(200, s);
+        Assert.Equal("test:pz:ABC supplier:42", Assert.IsType<ReceiptDetailDto>(v).ExternalReference);
     }
 
     // ----------------------------- T3: revision -----------------------------
@@ -708,7 +762,7 @@ public class ReceiptEditTests
         var (s2, v2) = Unwrap((await c2.PatchHeader($"sub_{id2}", Patch("X"), "k15-2", CancellationToken.None)).Result);
         Assert.Equal(502, s2); Assert.Equal("RECEIPT_UPDATE_UNVERIFIED", Err(v2).Code);
         Assert.True(DetailsOf(v2).GetProperty("saved_probably").GetBoolean());
-        Assert.Null(await store2.TryGetAsync<ReceiptDetailDto>("k15-2", CancellationToken.None));
+        Assert.Null(await Cached(store2, id2, "k15-2"));
         FakeSferaSession.SetReceiptFactsForTests(id2, f => f.ReadBackFails = false);
         Assert.Equal("X", ((ReceiptDetailDto)Unwrap((await c2.Get($"sub_{id2}", CancellationToken.None)).Result).value!).OriginalNumber);
         var (s2b, v2b) = Unwrap((await c2.PatchHeader($"sub_{id2}", Patch("X"), "k15-2", CancellationToken.None)).Result);
@@ -783,19 +837,19 @@ public class ReceiptEditTests
         fake.SferaUnavailableForTests = true;
         var (s4, v4) = Unwrap((await c.PatchHeader($"sub_{id}", Patch("X"), "k16", CancellationToken.None)).Result);
         Assert.Equal(503, s4); Assert.Equal("SUBIEKT_UNAVAILABLE", Err(v4).Code);
-        Assert.NotNull(await store.TryGetAsync<ReceiptDetailDto>("k16", CancellationToken.None));
+        Assert.NotNull(await Cached(store, id, "k16"));
         fake.SferaUnavailableForTests = false;
         // odczyt pada przy replay -> 502, klucz zostaje
         FakeSferaSession.SetReceiptFactsForTests(id, f => f.ReadFails = true);
         var (s5, v5) = Unwrap((await c.PatchHeader($"sub_{id}", Patch("X"), "k16", CancellationToken.None)).Result);
         Assert.Equal(502, s5); Assert.Equal("SUBIEKT_QUERY_FAILED", Err(v5).Code);
-        Assert.NotNull(await store.TryGetAsync<ReceiptDetailDto>("k16", CancellationToken.None));
+        Assert.NotNull(await Cached(store, id, "k16"));
         FakeSferaSession.SetReceiptFactsForTests(id, f => f.ReadFails = false);
         // dokument usunięty -> klucz skasowany -> 404
         FakeSferaSession.DeleteDocumentForTests(id);
         var (s6, v6) = Unwrap((await c.PatchHeader($"sub_{id}", Patch("X"), "k16", CancellationToken.None)).Result);
         Assert.Equal(404, s6); Assert.Equal("RECEIPT_NOT_FOUND", Err(v6).Code);
-        Assert.Null(await store.TryGetAsync<ReceiptDetailDto>("k16", CancellationToken.None));
+        Assert.Null(await Cached(store, id, "k16"));
     }
 
     [Fact]
@@ -820,21 +874,24 @@ public class ReceiptEditTests
         Assert.Equal(200, s1); Assert.Equal("X", Assert.IsType<ReceiptDetailDto>(v1).OriginalNumber);
         Assert.Equal(200, s2); Assert.Equal("X", Assert.IsType<ReceiptDetailDto>(v2).OriginalNumber);
         Assert.Equal(1, FakeSferaSession.SaveCountForTests(id));
-        Assert.NotNull(await store.TryGetAsync<ReceiptDetailDto>("k16b", CancellationToken.None));
+        Assert.NotNull(await Cached(store, id, "k16b"));
     }
 
     [Fact]
     public async Task T16c_Replay_CachedDocumentGone_404_WithoutTouchingMutation()
     {
-        // Spec §4.4: cached dokument pozytywnie nie istnieje -> DeleteAsync + 404 OD RAZU. Klucz z cache wskazuje dokument A; URL wskazuje B.
+        // Spec §4.4: cached dokument pozytywnie nie istnieje -> DeleteAsync + 404 OD RAZU. Od v0.21.0 zakres klucza = PZ z URL (Greptile PR #20 W1),
+        // więc w normalnym przepływie wpis wskazuje dokument z URL, a mutacja usuniętego dokumentu i tak dałaby 404 - mutant r4 #7 byłby
+        // nieobserwowalny po HTTP. Test wstrzykuje do zakresu B wpis wskazujący A (gałąź „cached.SubiektId pozytywnie nie istnieje”).
         // Mutant (r4 #7): po DeleteAsync kontroler idzie dalej do UpdateReceiptHeaderAsync(B) -> 200 i SaveCount(B)=1 -> pada.
         var fake = new FakeSferaSession();
         var store = NewStore();
         var c = Controller(fake, store);
         long a = await CreatePz(fake);
         long b = await CreatePz(fake);
-        var (sa, _) = Unwrap((await c.PatchHeader($"sub_{a}", Patch("X"), "k16c", CancellationToken.None)).Result);
+        var (sa, va) = Unwrap((await c.PatchHeader($"sub_{a}", Patch("X"), "k16c", CancellationToken.None)).Result);
         Assert.Equal(200, sa);
+        await store.SaveAsync(IdempotencyScope.UpdateReceiptHeader(b), "k16c", Assert.IsType<ReceiptDetailDto>(va), CancellationToken.None);
         FakeSferaSession.DeleteDocumentForTests(a);
         int loadsB = FakeSferaSession.LoadCountForTests(b);
         var (sb, vb) = Unwrap((await c.PatchHeader($"sub_{b}", Patch("X"), "k16c", CancellationToken.None)).Result);
@@ -842,7 +899,11 @@ public class ReceiptEditTests
         Assert.Equal(0, FakeSferaSession.SaveCountForTests(b));
         Assert.Equal(loadsB, FakeSferaSession.LoadCountForTests(b));
         Assert.Equal("Client:test_buyer", FakeSferaSession.OriginalNumberForTests(b));
-        Assert.Null(await store.TryGetAsync<ReceiptDetailDto>("k16c", CancellationToken.None));
+        Assert.Null(await Cached(store, b, "k16c"));
+        // Przepływ naturalny: ten sam URL (A usunięty) -> 404 i wpis A skasowany.
+        var (sa2, va2) = Unwrap((await c.PatchHeader($"sub_{a}", Patch("X"), "k16c", CancellationToken.None)).Result);
+        Assert.Equal(404, sa2); Assert.Equal("RECEIPT_NOT_FOUND", Err(va2).Code);
+        Assert.Null(await Cached(store, a, "k16c"));
     }
 
     [Fact]
@@ -867,7 +928,7 @@ public class ReceiptEditTests
         var (s3, v3) = Unwrap((await pending.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)).Result);
         Assert.Equal(502, s3); Assert.Equal("RECEIPT_UPDATE_UNVERIFIED", Err(v3).Code);
         Assert.Equal(JsonValueKind.Null, DetailsOf(v3).GetProperty("saved_probably").ValueKind);
-        Assert.Null(await store.TryGetAsync<ReceiptDetailDto>("k17-b", CancellationToken.None));
+        Assert.Null(await Cached(store, id2, "k17-b"));
         Assert.Equal(0, FakeSferaSession.SaveCountForTests(id2)); // STA jeszcze nie doszedł do Zapisz
         gate.SetResult(true);
         await FakeSferaSession.StaWorkForTests(id2)!.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -1094,12 +1155,12 @@ public class ReceiptEditTests
         fake.SferaUnavailableForTests = true;
         var (s, v) = Unwrap((await c.PatchHeader($"sub_{id}", Patch("X"), "k21", CancellationToken.None)).Result);
         Assert.Equal(503, s); Assert.Equal("SUBIEKT_UNAVAILABLE", Err(v).Code);
-        Assert.Null(await store.TryGetAsync<ReceiptDetailDto>("k21", CancellationToken.None));
+        Assert.Null(await Cached(store, id, "k21"));
         Assert.Equal(0, FakeSferaSession.SaveCountForTests(id));
         fake.SferaUnavailableForTests = false;
         var (s2, _) = Unwrap((await c.PatchHeader($"sub_{id}", Patch("X"), "k21", CancellationToken.None)).Result);
         Assert.Equal(200, s2);
-        Assert.NotNull(await store.TryGetAsync<ReceiptDetailDto>("k21", CancellationToken.None));
+        Assert.NotNull(await Cached(store, id, "k21"));
         var (sg, vg) = Unwrap((await Controller(new FakeSferaSession { SferaUnavailableForTests = true }).Get($"sub_{id}", CancellationToken.None)).Result);
         Assert.Equal(503, sg); Assert.Equal("SUBIEKT_UNAVAILABLE", Err(vg).Code);
     }

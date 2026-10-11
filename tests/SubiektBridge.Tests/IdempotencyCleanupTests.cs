@@ -77,13 +77,14 @@ public class IdempotencyCleanupTests
     {
         var path = NewDbPath();
         var store = NewStore(path, ttlDays: 30);
-        await store.SaveAsync("k1", new { subiekt_id = 1 }, CancellationToken.None);
+        await store.SaveAsync(IdempotencyScope.CreateInvoice, "k1", new { subiekt_id = 1 }, CancellationToken.None);
+        string row = IdempotencyScope.CreateInvoice.StorageKey("k1");
 
         Assert.Equal(0, await store.PurgeExpiredAsync(DateTimeOffset.UtcNow.AddDays(29), CancellationToken.None));
-        Assert.True(KeyExists(path, "k1"));
+        Assert.True(KeyExists(path, row));
 
         Assert.Equal(1, await store.PurgeExpiredAsync(DateTimeOffset.UtcNow.AddDays(31), CancellationToken.None));
-        Assert.False(KeyExists(path, "k1"));
+        Assert.False(KeyExists(path, row));
     }
 
     [Fact]

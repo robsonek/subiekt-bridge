@@ -99,8 +99,12 @@ public static class UwagiFields
     /// <summary>dok_Uwagi = TUwagi = varchar(500) (zrzut schematu 1.88).</summary>
     public const int MaxLength = 500;
 
+    /// <summary>Marker referencji w Uwagach i separator od notatek - <see cref="Build"/> pisze, ReceiptEditFields.ExtractExternalReference czyta.</summary>
+    public const string ReferenceMarker = "ref: ";
+    public const string ReferenceSeparator = " | ";
+
     /// <summary>Sufiks doklejany do notatek klienta (anti-duplicate szuka go w dok_Uwagi).</summary>
-    public static string ReferenceSuffix(string externalReference) => $"ref: {externalReference}";
+    public static string ReferenceSuffix(string externalReference) => ReferenceMarker + externalReference;
 
     /// <summary>
     /// Czy <paramref name="uwagi"/> zawiera <paramref name="reference"/> jako CAŁY token (nie podciąg):
@@ -144,7 +148,7 @@ public static class UwagiFields
         int room = MaxLength - suffix.Length - 3; // " | "
         if (room < 0) return suffix.Length > MaxLength ? suffix[..MaxLength] : suffix;
         if (baseNotes.Length > room) baseNotes = baseNotes[..room];
-        return $"{baseNotes} | {suffix}";
+        return baseNotes + ReferenceSeparator + suffix;
     }
 
     /// <summary>Ile znaków notatek zmieści się obok doklejanego " | ref: X" (do details.max_length w 422).</summary>

@@ -98,7 +98,8 @@ public sealed class BankTransactionsController : ControllerBase
 
         // Replay z weryfikacja: gdy cache mowi linked+op, sprawdz ze operacja WCIAZ powiazana (mogla zostac usunieta
         // recznie w Subiekcie). Jak znikla -> invaliduj cache i wykonaj pelny flow (jak w endpointach faktur/rozrachunkow).
-        var cached = await _idempotency.TryGetAsync<BookResultDto>(idempotencyKey, ct);
+        var scope = IdempotencyScope.BookBankTransaction(hbId);
+        var cached = await _idempotency.TryGetAsync<BookResultDto>(scope, idempotencyKey, ct);
         if (cached is not null)
         {
             bool stale = false;
@@ -124,13 +125,13 @@ public sealed class BankTransactionsController : ControllerBase
                 return StatusCode(StatusForBook(cached), cached);
             }
             _logger.LogWarning("Book idempotent cache invalidated: hb_id={HbId}, operacja {Op} zniknela - nowy flow", hbId, cached.BankOperationSubiektId);
-            await _idempotency.DeleteAsync(idempotencyKey, ct);
+            await _idempotency.DeleteAsync(scope, idempotencyKey, ct);
         }
 
         try
         {
             var result = await _sfera.BookBankTransactionAsync(hbId, request?.ContractorSubiektId, ct);
-            await _idempotency.SaveAsync(idempotencyKey, result, ct);
+            await _idempotency.SaveAsync(scope, idempotencyKey, result, ct);
             return StatusCode(StatusForBook(result), result);
         }
         catch (BankBookingException ex) when (ex.Reason == BookError.TransactionNotFound)
