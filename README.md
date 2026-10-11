@@ -28,6 +28,8 @@ REST API (główne endpointy + escape hatch):
 | `GET /api/v1/invoices/open-receivables?...` | Otwarte należności — kandydaci do dopasowania z wpłatą (matching robi konsument) |
 | `GET /api/v1/invoices/open-payables?...` | Otwarte zobowiązania (FZ) — kandydaci do dopasowania z wypłatą |
 | `POST /api/v1/receipts` | Wystaw PZ — przyjęcie magazynowe (dropshipping) |
+| `GET /api/v1/receipts/{id}` | Szczegóły PZ: pozycje read-only, powiązania (FZ/KFS), edytowalność jako fakty, `revision` |
+| `PATCH /api/v1/receipts/{id}` | Dopisz numer dokumentu dostawcy (`original_number`) do istniejącego PZ (z `Idempotency-Key`; 200 = stan po odczycie kontrolnym) |
 | `POST /api/v1/transfers` | Wystaw MM — przesunięcie międzymagazynowe (dokument wewnętrzny, nie KSeF) |
 | `GET /api/v1/bank-operations?from&to&direction&unsettled_only` | Lista operacji bankowych (BP/BW) z wyciągu |
 | `GET /api/v1/bank-transactions?direction&unbooked_only&from&to` | Surowy passthrough przelewów z wyciągu (read-only); matching robi konsument |
