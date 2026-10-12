@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.21.0** (w przygotowaniu; v0.20.0 wydane 2026-10-10). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
+> **Dotyczy:** SubiektBridge **v0.21.1** (w przygotowaniu; v0.21.0 wydane 2026-10-11). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -206,6 +206,27 @@ wpisane wprost, `ob_CenaBrutto` wyliczane z VAT). Masz dwie opcje:
   `vat_rate` nadal podawaj (Subiekt z niego wyliczy brutto).
 
 `unit_price_net` działa **tylko dla PZ**. Dla FS/KFS jest ignorowane (te dokumenty liczą od brutto).
+
+**Response `201 Created`** — ten sam kształt co FS (§3.1):
+
+```jsonc
+{
+  "id": "sub_98765",
+  "subiekt_id": 98765,
+  "number": "PZ 57/2026",
+  "issued_at": "2026-06-01T10:22:00+02:00",
+  "contractor_subiekt_id": 4410,
+  "totals": { "net": 200.00, "vat": 46.00, "gross": 246.00 },
+  "pdf_url": null,
+  "pdf_base64": null
+}
+```
+
+`totals` most **odczytuje z zapisanego PZ** (kwoty wyliczone przez Subiekt, nie z Twojego payloadu) — te same wartości co
+`net_amount` / `vat_amount` / `gross_amount` w `GET /receipts/{id}` (§3.6b). **Od v0.21.1 `net` i `vat` są wypełnione**
+(do v0.21.0 zawsze `null`). `null` w `net`/`vat` tylko, gdy Subiekt nie udostępni tej kwoty (nigdy zastępcze `0`) — wtedy
+zostaw u siebie dotychczasową wartość albo dociągnij ją przez `GET /receipts/{id}`. `gross` jest zawsze liczbą: gdy Subiekt
+nie poda brutto, most liczy je z linii.
 
 Błędy specyficzne (od v0.20.0) jak dla FS: `422 INVALID_EXTERNAL_REFERENCE`, `503 DUPLICATE_CHECK_UNAVAILABLE` (§4;
 `details.document_type` = `"PZ"`).
@@ -725,7 +746,14 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
 
-### v0.21.0 (w przygotowaniu — edycja PZ: nagłówek)
+### v0.21.1 (w przygotowaniu — kwoty PZ w odpowiedzi `POST /receipts`)
+- **`POST /api/v1/receipts`: `totals.net` i `totals.vat` wypełnione** kwotami odczytanymi z zapisanego PZ (§3.6) — do v0.21.0
+  zawsze `null`, więc klient nie znał netto/VAT przyjęcia bez osobnego `GET`. Wartości = `net_amount` / `vat_amount` /
+  `gross_amount` z `GET /receipts/{id}` (wspólny odczyt). `null` już tylko, gdy Subiekt nie udostępni kwoty (bez zastępczego `0`).
+- `totals.gross` bez zmian (z dokumentu; z linii tylko, gdy Subiekt nie poda brutto). FS/KFS bez zmian — ich `totals.net`/`vat`
+  były wypełnione już wcześniej.
+
+### v0.21.0 (2026-10-11 — edycja PZ: nagłówek)
 - **`GET /api/v1/receipts/{id}`** zwraca rozszerzony `ReceiptDetailDto` (§3.6b): dotychczasowe pola bez zmian + `original_number`,
   `external_reference` (pełna referencja zapisana przez most, §3.6b), `warehouse_id`, `status`, `booking_status`, `period_locked`, `linked_documents` (FZ/KFS/inny), `editability`
   (fakty), `revision`, `items[]` (pozycje read-only z `issued_*`), `warnings`. `404` tylko przy pozytywnym braku dokumentu; awaria odczytu
