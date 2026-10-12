@@ -169,4 +169,46 @@ public class ReceiptTotalsTests
         Assert.Equal(detail.VatAmount, created.Totals.Vat);
         Assert.Equal(detail.GrossAmount, created.Totals.Gross);
     }
+
+    private static async Task<ReceiptDetailDto> PostThenGet(IReadOnlyList<LineDto> lines, string key)
+    {
+        var c = Controller(new FakeSferaSession());
+        var (sc, vc) = Unwrap((await c.Create(Receipt(lines), key, CancellationToken.None)).Result);
+        Assert.Equal(201, sc);
+        var (sg, vg) = Unwrap((await c.Get($"sub_{Assert.IsType<InvoiceResponseDto>(vc).SubiektId}", CancellationToken.None)).Result);
+        Assert.Equal(200, sg);
+        return Assert.IsType<ReceiptDetailDto>(vg);
+    }
+
+    [Theory]
+    [InlineData("net_price")]
+    [InlineData("gross_price")]
+    [InlineData("one_off_service")]
+    [InlineData("two_vat_rates")]
+    public async Task P3_Get_ItemValuesInGrosze_SumOfValueNetEqualsNetAmount(string name)
+    {
+        // Greptile PR #21: GET dawał net_amount 81.30 przy value_net pozycji 81.3008. Wartości pozycji jak ob_WartNetto/ob_WartBrutto
+        // (do groszy), Σ value_net = net_amount. Mutant: value_net = ilość × cena bez zaokrąglenia -> asercja dla gross_price.
+        var (lines, net, _, _) = Case(name);
+        var detail = await PostThenGet(lines, $"k-p3-{name}");
+        Assert.All(detail.Items, i =>
+        {
+            Assert.Equal(Math.Round(i.ValueNet!.Value, 2), i.ValueNet);
+            Assert.Equal(Math.Round(i.ValueGross!.Value, 2), i.ValueGross);
+        });
+        Assert.Equal(net, detail.Items.Sum(i => i.ValueNet));
+        Assert.Equal(detail.NetAmount, detail.Items.Sum(i => i.ValueNet));
+    }
+
+    [Fact]
+    public async Task P4_Get_GrossPriceLine_ItemValueNet81_30_ValueGross100()
+    {
+        // Przykład z wątku: 1 × 100 brutto przy 23% -> pozycja 81.30 netto / 100.00 brutto, jak net_amount / gross_amount dokumentu.
+        var detail = await PostThenGet(Case("gross_price").Lines, "k-p4-gross-price");
+        var item = Assert.Single(detail.Items);
+        Assert.Equal(81.30m, item.ValueNet);
+        Assert.Equal(100.00m, item.ValueGross);
+        Assert.Equal(detail.NetAmount, item.ValueNet);
+        Assert.Equal(detail.GrossAmount, item.ValueGross);
+    }
 }

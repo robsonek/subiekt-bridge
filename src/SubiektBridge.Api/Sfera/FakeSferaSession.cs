@@ -790,15 +790,22 @@ public sealed class FakeSferaSession : ISferaSession
 
     private static int EffectiveStatus(FakeDocument d) => d.Facts.Cancelled ? DuplicateScan.StatusAnulowany : d.Status;
 
+    private static decimal Grosze(decimal v) => Math.Round(v, 2, MidpointRounding.AwayFromZero);
+
+    /// <summary>Wartość netto pozycji jak ob_WartNetto (SuPozycja.WartoscNettoPoRabacie, rabat 0): do groszy. Jedno źródło dla kwot dokumentu i items[] w GET.</summary>
+    private static decimal LineNet(FakeItem i) => Grosze(i.Quantity * i.UnitPriceNet);
+
+    /// <summary>Wartość brutto pozycji jak ob_WartBrutto (PZ liczony od netto): netto pozycji + VAT pozycji, do groszy.</summary>
+    private static decimal LineGross(FakeItem i) => Grosze(LineNet(i) * (1m + i.VatRate / 100m));
+
     /// <summary>
     /// Atrybuty kwot SuDokument jak liczy je Sfera (rabat w Fake = 0): netto = Σ wartości netto pozycji do groszy, VAT z tabelki stawek
     /// (Σ netto stawki × stawka, do groszy), brutto = netto + VAT. Inne atrybuty nieczytelne (null) - jak TryReadDecimal w Real.
     /// </summary>
     private static Func<string, decimal?> TotalsAttributes(FakeDocument d)
     {
-        static decimal Grosze(decimal v) => Math.Round(v, 2, MidpointRounding.AwayFromZero);
-        decimal net = d.Items.Sum(i => Grosze(i.Quantity * i.UnitPriceNet));
-        decimal vat = d.Items.GroupBy(i => i.VatRate).Sum(g => Grosze(g.Sum(i => Grosze(i.Quantity * i.UnitPriceNet)) * g.Key / 100m));
+        decimal net = d.Items.Sum(LineNet);
+        decimal vat = d.Items.GroupBy(i => i.VatRate).Sum(g => Grosze(g.Sum(LineNet) * g.Key / 100m));
         return name => name switch
         {
             "WartoscNetto" => net,
@@ -845,9 +852,8 @@ public sealed class FakeSferaSession : ISferaSession
         var items = d.Items.Select(i =>
         {
             facts.TryGetValue(i.PositionId, out var fact);
-            decimal net = i.Quantity * i.UnitPriceNet;
             return new ReceiptItemDto(i.PositionId, i.Lp, i.ProductId, sqlOk ? i.Ean : null, sqlOk && i.Ean is not null ? MockSymbol(i.Ean) : null, i.Name,
-                KindName(i.Kind), i.Quantity, i.Unit, i.Quantity, i.UnitPriceNet, 0m, i.VatRate, net, net * (1m + i.VatRate / 100m),
+                KindName(i.Kind), i.Quantity, i.Unit, i.Quantity, i.UnitPriceNet, 0m, i.VatRate, LineNet(i), LineGross(i),
                 fact?.IssuedStockUnits, fact?.IssuedQuantity);
         }).ToList();
 
