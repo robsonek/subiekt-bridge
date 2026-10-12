@@ -109,27 +109,18 @@ public sealed class FakeSferaSession : ISferaSession
         var year = DateTimeOffset.UtcNow.Year;
         _lastInvoiceAt = DateTimeOffset.UtcNow;
 
-        decimal grossSum = 0m;
-        foreach (var line in request.Lines)
-        {
-            // Gdy klient podal cene netto wprost (opcja PZ), liczymy brutto z niej + VAT;
-            // inaczej bierzemy unit_price_gross. Lustro logiki RealSferaSession dla PZ.
-            decimal lineGross = line.UnitPriceNet.HasValue
-                ? line.UnitPriceNet.Value * (1m + line.VatRate / 100m)
-                : line.UnitPriceGross;
-            grossSum += lineGross * line.Quantity;
-        }
-
         long contractorId = HashString(request.Supplier.Symbol) % 100000;
-        RegisterReceipt(3_000_000 + counter, request, counter, $"PZ {counter}/{year}", contractorId);
+        long id = 3_000_000 + counter;
+        RegisterReceipt(id, request, counter, $"PZ {counter}/{year}", contractorId);
 
         return Task.FromResult(new InvoiceResponseDto(
             Id: $"fake_pz_{counter:D6}",
-            SubiektId: 3_000_000 + counter,
+            SubiektId: id,
             Number: $"PZ {counter}/{year}",
             IssuedAt: _lastInvoiceAt.Value,
             ContractorSubiektId: contractorId,
-            Totals: new InvoiceTotalsDto(Net: grossSum, Vat: 0m, Gross: grossSum),
+            // Lustro Real: kwoty z zapisanego dokumentu tą samą ścieżką co GET (DocumentTotals).
+            Totals: DocumentTotals.ForIssuedReceipt(DocumentTotals.Read(TotalsAttributes(Doc(id))), request.Lines),
             PdfUrl: $"/api/v1/receipts/fake_pz_{counter:D6}/pdf",
             PdfBase64: null));
     }
@@ -799,6 +790,31 @@ public sealed class FakeSferaSession : ISferaSession
 
     private static int EffectiveStatus(FakeDocument d) => d.Facts.Cancelled ? DuplicateScan.StatusAnulowany : d.Status;
 
+    private static decimal Grosze(decimal v) => Math.Round(v, 2, MidpointRounding.AwayFromZero);
+
+    /// <summary>Wartość netto pozycji jak ob_WartNetto (SuPozycja.WartoscNettoPoRabacie, rabat 0): do groszy. Jedno źródło dla kwot dokumentu i items[] w GET.</summary>
+    private static decimal LineNet(FakeItem i) => Grosze(i.Quantity * i.UnitPriceNet);
+
+    /// <summary>Wartość brutto pozycji jak ob_WartBrutto (PZ liczony od netto): netto pozycji + VAT pozycji, do groszy.</summary>
+    private static decimal LineGross(FakeItem i) => Grosze(LineNet(i) * (1m + i.VatRate / 100m));
+
+    /// <summary>
+    /// Atrybuty kwot SuDokument jak liczy je Sfera (rabat w Fake = 0): netto = Σ wartości netto pozycji do groszy, VAT z tabelki stawek
+    /// (Σ netto stawki × stawka, do groszy), brutto = netto + VAT. Inne atrybuty nieczytelne (null) - jak TryReadDecimal w Real.
+    /// </summary>
+    private static Func<string, decimal?> TotalsAttributes(FakeDocument d)
+    {
+        decimal net = d.Items.Sum(LineNet);
+        decimal vat = d.Items.GroupBy(i => i.VatRate).Sum(g => Grosze(g.Sum(LineNet) * g.Key / 100m));
+        return name => name switch
+        {
+            "WartoscNetto" => net,
+            "WartoscVat" => vat,
+            "WartoscBrutto" => net + vat,
+            _ => null,
+        };
+    }
+
     private static ReceiptStateSnapshot Snapshot(FakeDocument d) => new(
         d.OriginalNumber, EffectiveStatus(d), d.Facts.BookingStatus,
         d.Items.Select(i => new ReceiptItemSnapshot(i.PositionId, i.Lp, i.ProductId, i.Kind, i.Quantity, i.Quantity, i.Unit, i.UnitPriceNet, 0m, i.VatRate)).ToList());
@@ -836,14 +852,12 @@ public sealed class FakeSferaSession : ISferaSession
         var items = d.Items.Select(i =>
         {
             facts.TryGetValue(i.PositionId, out var fact);
-            decimal net = i.Quantity * i.UnitPriceNet;
             return new ReceiptItemDto(i.PositionId, i.Lp, i.ProductId, sqlOk ? i.Ean : null, sqlOk && i.Ean is not null ? MockSymbol(i.Ean) : null, i.Name,
-                KindName(i.Kind), i.Quantity, i.Unit, i.Quantity, i.UnitPriceNet, 0m, i.VatRate, net, net * (1m + i.VatRate / 100m),
+                KindName(i.Kind), i.Quantity, i.Unit, i.Quantity, i.UnitPriceNet, 0m, i.VatRate, LineNet(i), LineGross(i),
                 fact?.IssuedStockUnits, fact?.IssuedQuantity);
         }).ToList();
 
-        decimal netAmount = d.Items.Sum(i => i.Quantity * i.UnitPriceNet);
-        decimal vatAmount = d.Items.Sum(i => i.Quantity * i.UnitPriceNet * i.VatRate / 100m);
+        var (netAmount, vatAmount, grossAmount) = DocumentTotals.Read(TotalsAttributes(d));
         bool? periodLocked = sqlOk ? (d.Facts.PeriodLocked ?? false) : null;
         var linked = LinkedDocuments(d, sqlOk);
         var reasons = ReceiptEditability.Reasons(d.DokTyp, EffectiveStatus(d), periodLocked, d.Facts.BookingStatus, d.Facts.LinkedDocument?.Id, d.Facts.SferaCanEdit);
@@ -851,7 +865,7 @@ public sealed class FakeSferaSession : ISferaSession
         return new ReceiptDetailDto(
             SubiektId: d.Id, Number: d.Number, Type: Sfera.DokTyp.NameOrUnknown(d.DokTyp), IssueDate: d.IssueDate,
             ContractorId: d.ContractorId, ContractorNip: d.ContractorNip, ContractorName: d.ContractorName,
-            NetAmount: netAmount, VatAmount: vatAmount, GrossAmount: netAmount + vatAmount, Notes: d.Uwagi,
+            NetAmount: netAmount, VatAmount: vatAmount, GrossAmount: grossAmount, Notes: d.Uwagi,
             OriginalNumber: d.OriginalNumber, ExternalReference: ReceiptEditFields.ExtractExternalReference(d.Uwagi),
             WarehouseId: sqlOk ? 1 : null, Status: EffectiveStatus(d), BookingStatus: d.Facts.BookingStatus, PeriodLocked: periodLocked,
             LinkedDocuments: linked, Editability: new ReceiptEditabilityDto(d.Facts.SferaCanEdit, reasons),

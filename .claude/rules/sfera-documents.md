@@ -29,6 +29,11 @@ Atrybut `WartoscPodatku` nie istnieje w Sferze (0 trafień w całym CHM) — `Tr
 połykał błąd i `totals.vat` było zawsze null (naprawione w audycie 2026-06-10,
 `docs/AUDIT-2026-06-10.md`).
 
+**Kwoty PZ (od v0.21.1):** `POST /receipts` i `GET /receipts/{id}` czytają kwoty JEDNĄ ścieżką — `ReadTotals(dok)` →
+`DocumentTotals.Read` (`WartoscNetto`, `WartoscVat`, `WartoscBrutto ?? KwotaDoZaplaty`; nieczytelne = `null`, nigdy `0`).
+Do v0.21.0 POST PZ zwracał `Net/Vat: null` na sztywno (panel nie miał netto PZ). Brutto z linii tylko w POST, gdy dokument
+go nie poda. FS/KFS: `ReadDocumentTotalsOrThrow` (twardy błąd przy braku brutto) — świadomie osobno.
+
 ## Magazyn dokumentu = magazyn SESJI Sfery, NIE per pozycja (od v0.7.50)
 
 **Magazyn dokumentu (`dok_MagId`) bierze się z magazynu roboczego SESJI Sfery
