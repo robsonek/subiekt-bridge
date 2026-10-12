@@ -841,9 +841,7 @@ public sealed class RealSferaSession : ISferaSession
         bool? canEdit = TryReadBool(dok, "MoznaEdytowac");
         string? issueDate = TryReadDateString(dok, "DataWystawienia");
         long? contractorId = TryReadInt64(dok, "KontrahentId");
-        decimal? net = TryReadDecimal(dok, "WartoscNetto");
-        decimal? vat = TryReadDecimal(dok, "WartoscVat");
-        decimal? gross = TryReadDecimal(dok, "WartoscBrutto") ?? TryReadDecimal(dok, "KwotaDoZaplaty");
+        var (net, vat, gross) = ReadTotals(dok);
         var (nip, nazwa) = contractorId is { } cid ? ReadContractorNipName(cid, nameof(ReadReceipt)) : (null, null);
 
         var byPosition = new Dictionary<long, (string? Symbol, string? Name, decimal? ValueNet, decimal? ValueGross)>();
@@ -2410,14 +2408,9 @@ public sealed class RealSferaSession : ISferaSession
 
             string? pdfBase64 = TryGeneratePdf(pz, subiektId);
 
-            // PZ to dokument magazynowy - WartoscBrutto opcjonalnie (nie wszystkie wersje
-            // Subiekta wystawiają to pole na PZ). Jeśli brak - liczymy z lines payload.
-            // Gdy linia ma unit_price_net (opcja PZ), brutto = netto * (1 + VAT); inaczej
-            // bierzemy unit_price_gross. Bez tego klient wysylajacy net + gross=0 (zgodnie
-            // z dokumentacja) dostalby/zacache'owal totals.gross = 0.
-            decimal? grossOpt = TryReadDecimal(pz, "WartoscBrutto");
-            decimal gross = grossOpt ?? request.Lines.Sum(l =>
-                (l.UnitPriceNet.HasValue ? l.UnitPriceNet.Value * (1m + l.VatRate / 100m) : l.UnitPriceGross) * l.Quantity);
+            // Kwoty z zapisanego PZ tą samą ścieżką co GET /receipts/{id} (ReadTotals) - fail-soft: nieczytelny atrybut = null,
+            // odczyt po Zapisz nie rzuca (zapisany PZ + 500 = ponowienie). Brutto z linii tylko gdy dokument go nie podał.
+            var totals = DocumentTotals.ForIssuedReceipt(ReadTotals((object)pz), request.Lines);
 
             return new InvoiceResponseDto(
                 Id: $"sub_{subiektId}",
@@ -2425,7 +2418,7 @@ public sealed class RealSferaSession : ISferaSession
                 Number: number,
                 IssuedAt: issuedAt,
                 ContractorSubiektId: contractorId,
-                Totals: new InvoiceTotalsDto(Net: null, Vat: null, Gross: gross),
+                Totals: totals,
                 PdfUrl: null,
                 PdfBase64: pdfBase64);
         }
@@ -3450,6 +3443,9 @@ public sealed class RealSferaSession : ISferaSession
         // dla audytu). Brak nie zatrzymuje flow - zostawiamy null.
         return new InvoiceTotalsDto(net, vat, gross);
     }
+
+    /// <summary>[STA] Kwoty nagłówka PZ fail-soft (DocumentTotals) - jedna ścieżka dla GET /receipts/{id} i POST /receipts.</summary>
+    private static DocumentAmounts ReadTotals(object dok) => DocumentTotals.Read(name => TryReadDecimal(dok, name));
 
     // -------------------------- Lookup --------------------------
 
