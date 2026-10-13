@@ -267,5 +267,8 @@ Spec `docs/superpowers/specs/2026-10-13-invoice-revision-fs-kfs-design.md`. `Inv
   `dok_StatusWydruku` (wydruk przez `/pdf` nie zmienia rewizji), rozrachunki `nz__Finanse`, `dok_Rozliczony` (CHM: nieużywany od 1.20),
   dane firmy i nazwy słownikowe. `dok_KwDoZaplaty` JEST w skrócie mimo sprzecznych opisów (MS_Description „0 gdy rozliczony” vs CHM
   „suma brutto”) — najwyżej jedno dodatkowe odświeżenie PDF po rozliczeniu (decyzja lidera 13.10).
+- **Trzy SELECT-y bez wspólnej migawki — świadomie** (Greptile PR #22): REPEATABLE READ blokowałby operatorów, SNAPSHOT/RCSI to opcje bazy
+  klienta (nie zmieniamy). Rozdarty odczyt dokłada najwyżej jedno odświeżenie PDF; pominięcie tylko przy późniejszym cofnięciu części zmian
+  (kontrakt §3.8).
 - Pozycje FS/KFS wybierane po `ob_DokHanId` (FS z WZ: `ob_DokMagId` = WZ). Filtr `dok_Typ IN (2, 6)` w SQL to optymalizacja (lista bez
   `type` zwraca wszystkie typy) — kontrakt bramkuje `InvoiceRevision.Compute`.

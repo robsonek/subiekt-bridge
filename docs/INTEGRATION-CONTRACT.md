@@ -333,6 +333,10 @@ dokument w Subiekcie (np. nazwę pozycji albo formę płatności — zmiany, kt�
   mogłaby opisywać nowszy stan niż plik. Granica: jeśli dokument zmieni się w sekundach między tymi dwoma wywołaniami (plik ma
   już stan B, zapisana rewizja opisuje A), a operator przywróci stan A, zanim kolejny przebieg odświeży plik, rewizja znów
   będzie równa zapisanej i plik ze stanu B zostanie do następnej zmiany dokumentu — tego rewizja nie wykryje.
+  Most czyta rewizję trzema zapytaniami (nagłówek, pozycje, tabela VAT) bez wspólnej migawki bazy, więc zapis operatora
+  w trakcie odczytu (milisekundy) może dać wartość mieszaną. Skutek to co najwyżej jedno zbędne odświeżenie. Pominąć
+  odświeżenie może tylko wtedy, gdy operator później przywróci część dokumentu do wartości sprzed tego zapisu — ta sama
+  klasa co powyżej (cofnięcie zmiany).
 - Sam odczyt, otwarcie dokumentu w Subiekcie ani wydruk (`/pdf`) **nie zmieniają** rewizji.
 - Co ją zmienia: numer, unieważnienie, daty (wystawienia, sprzedaży, magazynowa, termin płatności), uwagi, sumy, waluta, tryb
   cen (od netto / od brutto), adnotacje VAT, tabela VAT (stawki i kwoty), numer KSeF (raz, po nadaniu), forma i kwoty płatności

@@ -642,6 +642,10 @@ public sealed class RealSferaSession : ISferaSession
         return await InvoiceRevision.ReadAllAsync(subiektIds, (batch, token) => ReadInvoiceRevisionBatchAsync(conn, batch, token), ct);
     }
 
+    // Trzy SELECT-y bez wspólnej migawki - ŚWIADOMIE (Greptile PR #22): REPEATABLE READ/SERIALIZABLE trzymałyby blokady na bazie Subiekta
+    // (operatorzy w GUI), SNAPSHOT/RCSI wymagają opcji bazy klienta, a jedno zapytanie pod READ COMMITTED (blokady zwalniane per wiersz) też
+    // nie daje spójności między tabelami. Zapis w trakcie odczytu dokłada najwyżej jedno odświeżenie PDF; pominięcie tylko przy późniejszym
+    // cofnięciu części zmian (kontrakt §3.8, spec §6.3 - symulacja wyczerpująca).
     private static async Task<InvoiceRevisionRows> ReadInvoiceRevisionBatchAsync(Microsoft.Data.SqlClient.SqlConnection conn, long[] batch, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
