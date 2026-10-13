@@ -48,6 +48,12 @@ public interface ISferaSession : IAsyncDisposable
     Task<InvoiceQueryItemDto?> FindInvoiceByIdAsync(long subiektId, CancellationToken ct);
 
     /// <summary>
+    /// Rewizje FS/KFS (v0.21.2): dok_Id → "f1:…" (null dla typu spoza FS/KFS; id bez wiersza w SQL nieobecne). Read-only SQL POZA STA,
+    /// liczone przez <see cref="InvoiceRevision.ComputeAll"/>. Rzuca przy awarii SQL - fail-soft (revision=null) robi kontroler.
+    /// </summary>
+    Task<IReadOnlyDictionary<long, string?>> GetInvoiceRevisionsAsync(IReadOnlyCollection<long> subiektIds, CancellationToken ct);
+
+    /// <summary>
     /// Szczegóły PZ (v0.21.0): nagłówek, pozycje read-only, powiązania, fakty edytowalności, revision. Null = dokument POZYTYWNIE
     /// nie istnieje (Dokumenty.Istnieje == false). Rzuca ReceiptEditException(ReadFailed) gdy odczyt padł przy żywej sesji.
     /// </summary>

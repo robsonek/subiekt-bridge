@@ -93,8 +93,8 @@ przykłady tylko z fikcyjnymi danymi (NIP `1111111111`, EAN-y `5901...`), ZERO d
 |---|---|
 | `GET /api/v1/health` | Sesja Sfery + wersja Subiekta + `sql_connection` (patrz Diagnostyka) |
 | `GET /api/v1/products?ean=` / `GET /api/v1/contractors?nip=` | Lookup towaru / kontrahenta (COM) |
-| `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | Listing FS/KFS; `nip` → `dok_PlatnikId` |
-| `GET /api/v1/invoices/{id}` / `/pdf` | Metadane FV / retro PDF |
+| `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | Listing FS/KFS; `nip` → `dok_PlatnikId`; `revision` per element (od v0.21.2: jeden odczyt na wywołanie, polecenie SQL na partię ≤ 500 dokumentów) |
+| `GET /api/v1/invoices/{id}` / `/pdf` | Metadane FV + `revision` FS/KFS (od v0.21.2: `f1:`, skrót treści wydruku z read-only SQL, fail-soft `null`) / retro PDF |
 | `GET /api/v1/invoices/open-receivables` / `open-payables` | Otwarte rozrachunki sprzedaży (39) / zakupu (40) w oknie kwoty — kandydaci do matchingu |
 | `POST /api/v1/invoices` | Wystaw FS |
 | `POST /api/v1/invoices/{id}/corrections` | Wystaw KFS |
@@ -185,7 +185,7 @@ Logi: `C:\SubiektBridge\logs\subiekt-bridge-yyyyMMdd.log` (Serilog rolling daily
 `sql_connection` = `SELECT 1` przez własny `SqlConnection` (poza STA). **Sesja Sfery (COM) NIE używa SqlClienta** —
 zepsuty SqlClient daje `200` + `status: "degraded"` + `sql_connection: "down"`; `503` tylko przy padniętej sesji
 Sfery. `sfera_session` jest od v0.19.0 sprawdzane sondą (`IsSessionAlive`: `OtworzKolekcje("dok_Id=-1")`, runda do
-SQL), nie samą obecnością obiektu sesji — zamknięty Subiekt daje `503` od razu, martwa sesja jest resetowana. SqlClient używają: `/bank-transactions`, `/book`, `admin/query`, filtr `nip`, `search` w open-receivables,
+SQL), nie samą obecnością obiektu sesji — zamknięty Subiekt daje `503` od razu, martwa sesja jest resetowana. SqlClient używają: `/bank-transactions`, `/book`, `admin/query`, filtr `nip`, `revision` w `GET /invoices` i `/invoices/{id}` (fail-soft → `null`), `search` w open-receivables,
 lookup NIP przy FS/PZ (fail-closed → `503 CONTRACTOR_LOOKUP_UNAVAILABLE`), magazyn FS źródłowej przy KFS i — od v0.20.0 —
 skan duplikatów przy KAŻDYM FS/KFS/PZ/MM (fail-closed → `503 DUPLICATE_CHECK_UNAVAILABLE`; SqlClient down = żaden dokument
 nie powstanie). MM samo nie używa SqlClienta.

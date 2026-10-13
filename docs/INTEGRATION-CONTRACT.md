@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.21.1** (w przygotowaniu; v0.21.0 wydane 2026-10-11). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
+> **Dotyczy:** SubiektBridge **v0.21.2** (wydane 2026-10-13; v0.21.1 wydane 2026-10-12). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -38,9 +38,9 @@
 | Otwarte zobowiązania (kandydaci do dopasowania z wypłatą, FZ) | `GET /api/v1/invoices/open-payables?min_amount&max_amount&currency&contractor_id&from&to&search&limit` | — |
 | Sprawdź towar po EAN | `GET /api/v1/products?ean=` | — |
 | Sprawdź kontrahenta po NIP | `GET /api/v1/contractors?nip=` | — |
-| Lista FS/KFS | `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | — |
+| Lista FS/KFS (z `revision` od v0.21.2) | `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | — |
 | Lista PZ | `GET /api/v1/receipts?...` | — |
-| Pojedynczy dokument / PDF | `GET /api/v1/invoices/{id}` , `/{id}/pdf` | — |
+| Pojedynczy dokument (z `revision` FS/KFS od v0.21.2) / PDF | `GET /api/v1/invoices/{id}` , `/{id}/pdf` | — |
 | Health / status | `GET /api/v1/health` | — |
 
 `{id}` w ścieżce to **bridge id** w formacie `sub_<SUBIEKT_ID>` (np. `sub_142877`).
@@ -310,8 +310,47 @@ wówczas tylko stan, nie ruszając dokumentu.
 `GET /api/v1/invoices` query: `from` (YYYY-MM-DD), `to`, `type` (`FS`/`KFS`/brak=oba),
 `notes_contains`, `nip`, `limit` (domyślnie 200, max 1000). `nip` = dokumenty, na których kontrahent
 o tym NIP jest nabywcą (porównanie bez kresek i spacji); brak takiego kontrahenta = pusta tablica. Zwraca tablicę pozycji z
-`subiekt_id, number, type, issue_date, contractor_*, *_amount, notes`.
+`subiekt_id, number, type, issue_date, contractor_*, *_amount, notes, revision` (ten sam kształt co `GET /api/v1/invoices/{id}`).
 `GET /api/v1/invoices/{id}/pdf` → strumień `application/pdf` (retro generacja).
+
+**`revision` (od v0.21.2) — znacznik treści wydruku FS/KFS.** Służy do odświeżania przechowywanego PDF, gdy operator zmieni
+dokument w Subiekcie (np. nazwę pozycji albo formę płatności — zmiany, których nie widać w kwotach).
+
+```jsonc
+{ "subiekt_id": 142877, "number": "FS 12/01/2026", "type": "FS", /* … dotychczasowe pola bez zmian … */
+  "revision": "f1:3c9a0e51b7d2f480" }        // opaque; null = brak rewizji (niżej)
+```
+
+- Format: `f1:` + 16 znaków hex (małe litery), 19 znaków. **Porównuj tylko równością**, nie parsuj. Pole jest zawsze w JSON
+  (także jako `null`). Ten sam stan dokumentu daje tę samą wartość w `GET /invoices/{id}` i w liście.
+- `null`, gdy: dokument nie jest FS ani KFS (PZ ma własne `revision` w `GET /receipts/{id}`, §3.6b — to dwie różne wartości);
+  most nie odczytał rewizji z bazy (błąd zapytania SQL mostu — odpowiedź to nadal `200`, pozostałe pola są poprawne; przyczyna
+  w logu mostu jako WARNING; `/health` pokaże `sql_connection: "down"` tylko wtedy, gdy padło samo połączenie z bazą); dokumentu
+  nie ma już w bazie (usunięty między odczytami). Most < v0.21.2 nie zwraca pola — traktuj jak `null`.
+  **Przy `null` nie odświeżaj PDF i nie nadpisuj zapisanej rewizji** — spróbuj w następnym przebiegu.
+- **Kolejność:** najpierw pobierz `revision` (GET), potem PDF; zapisz rewizję odczytaną **przed** pobraniem PDF. Zmiana w Subiekcie
+  w międzyczasie da jedno dodatkowe odświeżenie w następnym przebiegu. Rewizji odczytanej **po** pobraniu PDF nie zapisuj —
+  mogłaby opisywać nowszy stan niż plik. Granica: jeśli dokument zmieni się w sekundach między tymi dwoma wywołaniami (plik ma
+  już stan B, zapisana rewizja opisuje A), a operator przywróci stan A, zanim kolejny przebieg odświeży plik, rewizja znów
+  będzie równa zapisanej i plik ze stanu B zostanie do następnej zmiany dokumentu — tego rewizja nie wykryje.
+  Most czyta rewizję trzema zapytaniami (nagłówek, pozycje, tabela VAT) bez wspólnej migawki bazy, więc zapis operatora
+  w trakcie odczytu (milisekundy) może dać wartość mieszaną. Skutek to co najwyżej jedno zbędne odświeżenie. Pominąć
+  odświeżenie może tylko wtedy, gdy operator później przywróci część dokumentu do wartości sprzed tego zapisu — ta sama
+  klasa co powyżej (cofnięcie zmiany).
+- Sam odczyt, otwarcie dokumentu w Subiekcie ani wydruk (`/pdf`) **nie zmieniają** rewizji.
+- Co ją zmienia: numer, unieważnienie, daty (wystawienia, sprzedaży, magazynowa, termin płatności), uwagi, sumy, waluta, tryb
+  cen (od netto / od brutto), adnotacje VAT, tabela VAT (stawki i kwoty), numer KSeF (raz, po nadaniu), forma i kwoty płatności
+  (gotówka/karta/przelew/kredyt, przedpłaty, do zapłaty), dane nabywcy, odbiorcy i adresu dostawy **zapamiętane na dokumencie**,
+  pozycje (nazwa i symbol towaru albo nazwa usługi jednorazowej, opis, ilość, j.m., ceny, rabat, VAT, wartości, PKWiU/CN/GTU),
+  a w KFS także dokument korygowany (z numerem KSeF) i przyczyny korekty.
+- Granice: **zmiana nazwy towaru w kartotece Subiekta zmienia rewizję wszystkich FS/KFS z tym towarem** (Subiekt drukuje bieżącą
+  nazwę z kartoteki — te PDF naprawdę się zmieniły). Zmiana danych kontrahenta w kartotece **nie** zmienia rewizji (wydruk używa
+  danych zapamiętanych przy wystawieniu), dopóki operator nie zaktualizuje ich na dokumencie. Rozliczenie faktury może zmienić
+  rewizję **raz** (kwota „do zapłaty”). Zmiana danych Twojej firmy, nazw słownikowych (formy płatności, stawki), księgowanie,
+  realizacja skutku magazynowego (dokument odłożony → wykonany) ani wysyłka do KSeF w toku **nie** zmieniają rewizji — po zmianie
+  danych firmy odśwież PDF ręcznie.
+- `POST /invoices` i `POST /invoices/{id}/corrections` **nie** zwracają rewizji — pobierz ją `GET`-em.
+- Zmiana algorytmu = nowy prefiks (`f2:`) = jednorazowo inna rewizja wszystkich dokumentów (ogłoszone w §9).
 `GET /api/v1/receipts/{id}` od v0.21.0 zwraca rozszerzony `ReceiptDetailDto` (§3.6b) — dotychczasowe pola bez zmian.
 
 ### 3.9 Rozliczenia — spinanie faktur z przelewami z wyciągu (**FS i FZ**)
@@ -730,7 +769,7 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
   `sql_connection` (`"ok"`/`"down"`) = osobne połączenie mostu do bazy (`/bank-transactions`, `/book`,
   filtr `nip`, `search` w open-receivables/payables, dopasowanie kontrahenta po NIP przy wystawianiu FS).
   `200` + `status: "degraded"` + `sql_connection: "down"` = sesja Sfery działa, ale zapytania SQL mostu
-  nie — przyczyna w `sql_error`. Dokumenty dla kontrahenta z NIP-em (firmy) dostaną wtedy
+  nie — przyczyna w `sql_error` (od v0.21.2 także `revision: null` w `GET /invoices` i `/invoices/{id}`, §3.8). Dokumenty dla kontrahenta z NIP-em (firmy) dostaną wtedy
   `503 CONTRACTOR_LOOKUP_UNAVAILABLE` (most nie zakłada kontrahenta na ślepo) — ponów z backoffem;
   osoby prywatne (bez NIP) wystawiają się normalnie.
 - **Pełne, autorytatywne DTO:** `src/SubiektBridge.Api/Models/InvoiceModels.cs`.
@@ -746,7 +785,12 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
 
-### v0.21.1 (w przygotowaniu — kwoty PZ w odpowiedzi `POST /receipts`)
+### v0.21.2 (2026-10-13 — rewizja FS/KFS)
+- **`GET /api/v1/invoices/{id}` i `GET /api/v1/invoices`: nowe pole `revision`** (`f1:` + 16 hex albo `null`) — znacznik treści
+  wydruku FS/KFS do odświeżania przechowywanego PDF (§3.8: format, kiedy `null`, kolejność „rewizja przed PDF”, co ją zmienia).
+  Dotychczasowe pola bez zmian. Bez nowych kodów błędów: awaria odczytu rewizji = `revision: null` w odpowiedzi `200`.
+
+### v0.21.1 (2026-10-12 — kwoty PZ w odpowiedzi `POST /receipts`)
 - **`POST /api/v1/receipts`: `totals.net` i `totals.vat` wypełnione** kwotami odczytanymi z zapisanego PZ (§3.6) — do v0.21.0
   zawsze `null`, więc klient nie znał netto/VAT przyjęcia bez osobnego `GET`. Wartości = `net_amount` / `vat_amount` /
   `gross_amount` z `GET /receipts/{id}` (wspólny odczyt). `null` już tylko, gdy Subiekt nie udostępni kwoty (bez zastępczego `0`).

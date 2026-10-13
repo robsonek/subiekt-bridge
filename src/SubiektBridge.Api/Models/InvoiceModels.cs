@@ -357,7 +357,10 @@ public sealed record InvoiceQueryItemDto(
     [property: JsonPropertyName("net_amount")] decimal? NetAmount,
     [property: JsonPropertyName("vat_amount")] decimal? VatAmount,
     [property: JsonPropertyName("gross_amount")] decimal? GrossAmount,
-    [property: JsonPropertyName("notes")] string? Notes
+    [property: JsonPropertyName("notes")] string? Notes,
+    // v0.21.2: rewizja FS/KFS ("f1:" + 16 hex) - znacznik treści wydruku; null = nie-FS/KFS albo odczyt SQL niedostępny (fail-soft).
+    // Spec docs/superpowers/specs/2026-10-13-invoice-revision-fs-kfs-design.md §2. Doklejana w InvoicesController (GET {id} i lista).
+    [property: JsonPropertyName("revision")] string? Revision = null
 );
 
 // ----------------------------- Reference -----------------------------
