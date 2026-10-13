@@ -624,6 +624,39 @@ public sealed class RealSferaSession : ISferaSession
         }, ct);
     }
 
+    /// <summary>
+    /// Rewizje FS/KFS (v0.21.2; spec docs/superpowers/specs/2026-10-13-invoice-revision-fs-kfs-design.md §6): read-only SQL POZA STA
+    /// (jak PingSqlAsync): treści adresu historycznego (adr_Historia) Sfera nie wystawia, a numer KSeF z ksef_NumerKSeF, tabela VAT i pozycje
+    /// z nazwą towaru dla całej listy idą jednym zapytaniem zamiast enumeracji COM per dokument. Jedno polecenie na partię
+    /// (nagłówek, pozycje, VAT - NextResult), READ COMMITTED. Wyjątek propaguje - fail-soft (revision=null) robi InvoicesController.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<long, string?>> GetInvoiceRevisionsAsync(IReadOnlyCollection<long> subiektIds, CancellationToken ct)
+    {
+        if (subiektIds.Count == 0) return new Dictionary<long, string?>();
+
+        // ConnectTimeout 5 s jak PingSqlAsync: nieudane NAWIĄZANIE połączenia (padnięty SQL) kosztuje GET /invoices/{id} do ~5 s, kolejne próby
+        // w oknie blokady puli kończą się od razu. Odczyt na otwartym połączeniu ogranicza osobno CommandTimeout (15 s na polecenie/partię).
+        var connStr = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(SqlConnStr()) { ConnectTimeout = 5 }.ToString();
+        await using var conn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
+        await conn.OpenAsync(ct);
+        return await InvoiceRevision.ReadAllAsync(subiektIds, (batch, token) => ReadInvoiceRevisionBatchAsync(conn, batch, token), ct);
+    }
+
+    private static async Task<InvoiceRevisionRows> ReadInvoiceRevisionBatchAsync(Microsoft.Data.SqlClient.SqlConnection conn, long[] batch, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = InvoiceRevisionSql.Build(batch.Length);
+        cmd.CommandTimeout = 15;
+        for (int i = 0; i < batch.Length; i++)
+        {
+            // dok_Id/ob_DokHanId/vt_DokId to int; id spoza zakresu = OverflowException → fail-soft w kontrolerze.
+            cmd.Parameters.Add(InvoiceRevisionSql.ParameterName(i), System.Data.SqlDbType.Int).Value = checked((int)batch[i]);
+        }
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        return await InvoiceRevision.ReadResultSetsAsync(reader, ct);
+    }
+
     // ----------------------------- Receipt detail / PATCH (v0.21.0) -----------------------------
     // Spec docs/specs/2026-10-11-receipts-edit-pz-0.21-design.md §5.4. Decyzje (revision, komparator, klasyfikacja, Decide) w ReceiptEdit.cs -
     // wspólne z Fake; tu wyłącznie COM (STA, RCW) i read-only SQL (fail-soft). Pierwszy SetComProperty otwiera lock Sfery na dokumencie

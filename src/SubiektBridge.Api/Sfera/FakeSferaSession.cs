@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using SubiektBridge.Api.Models;
@@ -214,6 +215,101 @@ public sealed class FakeSferaSession : ISferaSession
             VatAmount: 18.70m,
             GrossAmount: 100.00m,
             Notes: "fake"));
+    }
+
+    // ----------------------------- Rewizja FS/KFS (v0.21.2) -----------------------------
+    // Fake modeluje WIERSZE SQL dokumentu (whitelista InvoiceRevisionColumns) i liczy przez InvoiceRevision.ComputeAll - jak Real.
+    // Wiersze zależą tylko od id (lista i GET {id} dają tę samą rewizję). Haki instancyjne: brak stanu współdzielonego między testami.
+
+    private readonly ConcurrentDictionary<long, List<Action<Dictionary<string, object?>, List<Dictionary<string, object?>>, List<Dictionary<string, object?>>>>> _invoiceMutations = new();
+    private int _invoiceRevisionReads;
+
+    /// <summary>Test-only: symuluje awarię read-only SQL rewizji (wyjątek z GetInvoiceRevisionsAsync).</summary>
+    internal bool InvoiceRevisionReadFailsForTests { get; set; }
+
+    /// <summary>Test-only: liczba wywołań GetInvoiceRevisionsAsync (jedno wywołanie na żądanie, bez N+1).</summary>
+    internal int InvoiceRevisionReadCountForTests => Volatile.Read(ref _invoiceRevisionReads);
+
+    /// <summary>Test-only: zmiana dokumentu „w Subiekcie” - mutacja wierszy nagłówka/pozycji (kumulowana per id).</summary>
+    internal void MutateInvoiceForTests(long id, Action<Dictionary<string, object?>, List<Dictionary<string, object?>>> mutate)
+        => MutateInvoiceForTests(id, (h, p, _) => mutate(h, p));
+
+    /// <summary>Test-only: jak wyżej, z dostępem do wierszy tabeli VAT.</summary>
+    internal void MutateInvoiceForTests(long id, Action<Dictionary<string, object?>, List<Dictionary<string, object?>>, List<Dictionary<string, object?>>> mutate)
+        => _invoiceMutations.AddOrUpdate(id, _ => new() { mutate }, (_, list) => { lock (list) list.Add(mutate); return list; });
+
+    public Task<IReadOnlyDictionary<long, string?>> GetInvoiceRevisionsAsync(IReadOnlyCollection<long> subiektIds, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        Interlocked.Increment(ref _invoiceRevisionReads);
+        if (InvoiceRevisionReadFailsForTests) throw new InvalidOperationException("Odczyt SQL rewizji niedostepny (fake)");
+
+        return InvoiceRevision.ReadAllAsync(subiektIds, (batch, _) => Task.FromResult(FakeInvoiceRevisionRows(batch)), ct);
+    }
+
+    private InvoiceRevisionRows FakeInvoiceRevisionRows(long[] batch)
+    {
+        var headers = new List<IReadOnlyDictionary<string, object?>>();
+        var positions = new List<IReadOnlyDictionary<string, object?>>();
+        var vat = new List<IReadOnlyDictionary<string, object?>>();
+        foreach (long id in batch)
+        {
+            if (IsMissingDocument(id)) continue;
+            var (header, rows, vatRows) = FakeInvoiceRows(id);
+            if (_invoiceMutations.TryGetValue(id, out var mutations))
+            {
+                lock (mutations) foreach (var mutate in mutations) mutate(header, rows, vatRows);
+            }
+            headers.Add(header);
+            positions.AddRange(rows);
+            vat.AddRange(vatRows);
+        }
+        return new InvoiceRevisionRows(headers, positions, vat);
+    }
+
+    /// <summary>
+    /// Deterministyczna FS zależna TYLKO od id (mocki listy i GET {id} mają różne metadane - wiersze rewizji są osobnym fixture'em):
+    /// każdy klucz whitelisty obecny (brak = KeyNotFound jak w Real), jedna pozycja, jedna stawka VAT.
+    /// </summary>
+    private static (Dictionary<string, object?> Header, List<Dictionary<string, object?>> Positions, List<Dictionary<string, object?>> Vat) FakeInvoiceRows(long id)
+    {
+        var h = InvoiceRevisionColumns.HeaderKeys.ToDictionary(k => k, _ => (object?)null, StringComparer.Ordinal);
+        h["dok_Id"] = (int)id;
+        h["dok_Typ"] = DokTyp.FS;
+        h["dok_Status"] = 1;
+        h["dok_NrPelny"] = $"FS {id}/2026";
+        h["dok_DataWyst"] = new DateTime(2026, 1, 15);
+        h["dok_DataZakonczenia"] = new DateTime(2026, 1, 15);
+        h["dok_Uwagi"] = "fake";
+        h["dok_WartNetto"] = 81.30m;
+        h["dok_WartVat"] = 18.70m;
+        h["dok_WartBrutto"] = 100.00m;
+        h["dok_KwGotowka"] = 100.00m;
+        h["dok_PlatnikId"] = 1;
+        h["platnik_adrh_Nazwa"] = "Mock Klient";
+        h["platnik_adrh_NIP"] = "1111111111";
+        h["platnik_adrh_Ulica"] = "ul. Testowa 1";
+
+        var p = InvoiceRevisionColumns.PositionKeys.ToDictionary(k => k, _ => (object?)null, StringComparer.Ordinal);
+        p[InvoiceRevisionColumns.PositionDocumentKey] = (int)id;
+        p["ob_Id"] = 1;
+        p["ob_DokHanLp"] = 1;
+        p["ob_Ilosc"] = 1m;
+        p["ob_Jm"] = "szt.";
+        p["ob_CenaNetto"] = 81.30m;
+        p["ob_VatProc"] = 23m;
+        p["ob_WartBrutto"] = 100.00m;
+        p["tw_Nazwa"] = "Towar testowy";
+        p["ob_Znak"] = (short)1;
+
+        var v = InvoiceRevisionColumns.Vat.ToDictionary(k => k, _ => (object?)null, StringComparer.Ordinal);
+        v[InvoiceRevisionColumns.VatDocumentKey] = (int)id;
+        v["vt_VatId"] = 1;
+        v["vt_VatProc"] = 23m;
+        v["vt_WartNetto"] = 81.30m;
+        v["vt_WartVat"] = 18.70m;
+        v["vt_WartBrutto"] = 100.00m;
+        return (h, new List<Dictionary<string, object?>> { p }, new List<Dictionary<string, object?>> { v });
     }
 
     public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenReceivablesAsync(OpenReceivablesQueryRequestDto request, CancellationToken ct)

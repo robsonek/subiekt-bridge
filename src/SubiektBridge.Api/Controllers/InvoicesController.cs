@@ -50,10 +50,10 @@ public sealed class InvoicesController : ControllerBase
             Nip: nip,
             Limit: limit > 0 ? limit : 200);
 
+        IReadOnlyList<InvoiceQueryItemDto> items;
         try
         {
-            var items = await _sfera.QueryInvoicesAsync(request, ct);
-            return Ok(items);
+            items = await _sfera.QueryInvoicesAsync(request, ct);
         }
         catch (Exception ex)
         {
@@ -62,6 +62,10 @@ public sealed class InvoicesController : ControllerBase
                 Code: "SUBIEKT_QUERY_FAILED",
                 Message: ex.Message));
         }
+
+        // Jeden odczyt rewizji na całą listę (bez N+1; SQL: polecenie na partię ≤ 500); ta sama funkcja co GET {id} - ta sama rewizja dla tego samego stanu.
+        var revisions = await ReadRevisionsSoftAsync(items.Select(i => i.SubiektId).Distinct().ToList(), ct);
+        return Ok(items.Select(i => i with { Revision = revisions.GetValueOrDefault(i.SubiektId) }).ToList());
     }
 
     /// <summary>
@@ -191,7 +195,32 @@ public sealed class InvoicesController : ControllerBase
                 Code: "INVOICE_NOT_FOUND",
                 Message: $"FV o subiekt_id={subiektId} nie istnieje w Subiekcie."));
         }
-        return Ok(item);
+        var revisions = await ReadRevisionsSoftAsync(new[] { item.SubiektId }, ct);
+        return Ok(item with { Revision = revisions.GetValueOrDefault(item.SubiektId) });
+    }
+
+    private static readonly IReadOnlyDictionary<long, string?> NoRevisions = new Dictionary<long, string?>();
+
+    /// <summary>
+    /// Rewizja FS/KFS (v0.21.2) fail-soft: awaria read-only SQL / brak kolumny / nieznany typ = revision null dla całego wywołania + WARNING,
+    /// pozostałe pola odpowiedzi bez zmian (awaria odczytu rewizji nie psuje GET ani listy). Anulowanie żądania propaguje.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<long, string?>> ReadRevisionsSoftAsync(IReadOnlyCollection<long> ids, CancellationToken ct)
+    {
+        if (ids.Count == 0) return NoRevisions;
+        try
+        {
+            return await _sfera.GetInvoiceRevisionsAsync(ids, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Rewizja FS/KFS niedostepna dla {Count} dokumentow - revision=null (fail-soft)", ids.Count);
+            return NoRevisions;
+        }
     }
 
     /// <summary>Retroaktywny PDF download. Generuje świeży wydruk przez Sferę.</summary>
