@@ -244,3 +244,28 @@ Konsekwencja: każde wystawienie FS/KFS/PZ/MM zależy od SqlClienta (`/health` `
 - `external_reference` w `ReceiptDetailDto` = `ReceiptEditFields.ExtractExternalReference` — odwrotność `UwagiFields.Build` (wspólne stałe
   `ReferenceMarker`/`ReferenceSeparator`): ostatni `ref: ` na początku Uwag albo po ` | `, do końca pola dosłownie (ref może mieć spacje —
   `ValidateExternalReference` ich nie zabrania; ucinanie na pierwszej spacji gubiło słowa — Greptile PR #20).
+
+## Rewizja FS/KFS (od v0.21.2, `revision` w `GET /invoices` i `/invoices/{id}`)
+
+Spec `docs/superpowers/specs/2026-10-13-invoice-revision-fs-kfs-design.md`. `InvoiceRevision.cs` (pure) + `GetInvoiceRevisionsAsync`
+(read-only SQL POZA STA) + fail-soft w `InvoicesController.ReadRevisionsSoftAsync` (awaria = `revision: null`, 200).
+- **Źródło to SQL, nie COM:** kontrahent na wydruku = **adres historyczny** dokumentu (`dok_PlatnikAdreshId`/`dok_OdbiorcaAdreshId`/
+  `dok_AdresDostawyAdreshId` → `adr_Historia`; CHM `SuDokument_KontrahentAdresId`), którego treści Sfera nie wystawia. Kartoteka
+  (`Kontrahenci.Wczytaj`, `adr__Ewid`) to dane BIEŻĄCE — ich zmiana nie zmienia wydruku.
+- **`dok_Pozycja` nie ma kopii nazwy towaru** (tylko `ob_Opis`); `SuPozycja.TowarNazwa` jest RO → wydruk bierze bieżące `tw_Nazwa`.
+  Zmiana nazwy w kartotece zmienia rewizję WSZYSTKICH FS/KFS z tym towarem (celowo — te PDF się zmieniły). Usługa jednorazowa ma
+  `TowarId = NULL` (CHM `SuPozycja_TowarId`), nazwa w `ob_Opis`.
+- **Numer KSeF** widoki producenta (`vwDok4FSFZGrid`, `vwDok4KFSGrid`) czytają z `ksef_NumerKSeF.ksefnr_NumerKSeF` przez
+  `dok_NumerKSeFId` (KFS: `dok_DoNumerKSeFId` dla korygowanej) — tekstowe `dok_NumerKSeF` może nie być zsynchronizowane; w skrócie oba.
+- **Tabela VAT (`dok_Vat`) nie jest pochodną pozycji**: przy `VatLiczonyAutomatycznie = False` VAT per stawka ustawia się ręcznie (CHM).
+- **`dok_Status` to też stan skutku magazynowego** (0 wycofany / 1 wykonany / 3 odłożony) — do skrótu idzie tylko `= 2` (unieważniony).
+- **Whitelista `InvoiceRevisionColumns` = jedno źródło SELECT i skrótu** (r1: 100 kolumn potwierdzonych na prod 1.89 13.10; r2 +14:
+  `dok_CenyTyp`, `dok_NumerKSeFId`, `dok_DoNumerKSeFId`, `ksef_NumerKSeF`, `dok_Vat`). Brak kolumny
+  w wierszu = wyjątek (fail-closed → `null`), nigdy cicho pominięta. Zmiana listy/kanonizacji = nowy prefiks (`f2:`) + §9 kontraktu
+  (test `Golden_value_pins_the_algorithm` pilnuje).
+- Poza skrótem świadomie: status/przetwarzanie KSeF (numer KSeF JEST w skrócie), `dok_StatusKsieg`, `dok_StatusBlok`, `dok_StatusFiskal`,
+  `dok_StatusWydruku` (wydruk przez `/pdf` nie zmienia rewizji), rozrachunki `nz__Finanse`, `dok_Rozliczony` (CHM: nieużywany od 1.20),
+  dane firmy i nazwy słownikowe. `dok_KwDoZaplaty` JEST w skrócie mimo sprzecznych opisów (MS_Description „0 gdy rozliczony” vs CHM
+  „suma brutto”) — najwyżej jedno dodatkowe odświeżenie PDF po rozliczeniu (decyzja lidera 13.10).
+- Pozycje FS/KFS wybierane po `ob_DokHanId` (FS z WZ: `ob_DokMagId` = WZ). Filtr `dok_Typ IN (2, 6)` w SQL to optymalizacja (lista bez
+  `type` zwraca wszystkie typy) — kontrakt bramkuje `InvoiceRevision.Compute`.
