@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.21.1** (w przygotowaniu; v0.21.0 wydane 2026-10-11). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
+> **Dotyczy:** SubiektBridge **v0.21.2** (wydane 2026-10-13; v0.21.1 wydane 2026-10-12). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -785,7 +785,7 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
 
-### v0.21.2 (w przygotowaniu — rewizja FS/KFS)
+### v0.21.2 (2026-10-13 — rewizja FS/KFS)
 - **`GET /api/v1/invoices/{id}` i `GET /api/v1/invoices`: nowe pole `revision`** (`f1:` + 16 hex albo `null`) — znacznik treści
   wydruku FS/KFS do odświeżania przechowywanego PDF (§3.8: format, kiedy `null`, kolejność „rewizja przed PDF”, co ją zmienia).
   Dotychczasowe pola bez zmian. Bez nowych kodów błędów: awaria odczytu rewizji = `revision: null` w odpowiedzi `200`.
