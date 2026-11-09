@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.21.4** (2026-11-09; v0.21.2 wydane 2026-10-13). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
+> **Dotyczy:** SubiektBridge **v0.21.5** (2026-11-10; v0.21.4 wydane 2026-11-09). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -794,6 +794,16 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
+
+### v0.21.5 (2026-11-10 — listing `GET /receipts` i każdy `type` tak jak `type=FS|KFS` w v0.21.4)
+- **`GET /api/v1/receipts` filtruje PZ po typie dokumentu w Subiekcie** (ten sam mechanizm, co `type=FS|KFS` w v0.21.4) — v0.21.4
+  objęło tylko faktury, a listing PZ nadal wczytywał każdy dokument z okna dat i sprawdzał typ po numerze. PZ z niestandardowym
+  symbolem numeracji jest teraz zwracane (pole `type` w odpowiedzi nadal z numeru). Bez nowych kodów błędów; zalecenie wąskiego
+  `from`/`to` albo `notes_contains` (§3.8) dotyczy także `GET /receipts`.
+- **`GET /api/v1/invoices?type=` przyjmuje każdy symbol typu dokumentu Subiekta** (FZ, FS, RZ, RS, KFZ, KFS, MM, PZ, WZ, PW, RW, ZW,
+  ZD, ZK, PA, IW, ZPZ, ZWZ, TS, FM, KFM, ZM; wielkość liter bez znaczenia) i filtruje go po typie w Subiekcie. Symbol spoza tej listy
+  działa jak dotąd (po prefiksie numeru, wolniej). Kontrakt endpointu nadal dotyczy FS/KFS — pozostałe typy to możliwość, nie
+  obietnica kształtu danych (np. `contractor_*` dla dokumentów magazynowych może być puste).
 
 ### v0.21.4 (2026-11-09 — listing `GET /invoices`: filtr `type` po typie dokumentu, przerwanie po rozłączeniu)
 - **`GET /api/v1/invoices?type=FS|KFS` filtruje po typie dokumentu w Subiekcie, nie po prefiksie numeru** (§3.8): dokument
