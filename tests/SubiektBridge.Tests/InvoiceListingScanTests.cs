@@ -50,17 +50,40 @@ public class InvoiceListingScanTests
     }
 
     [Fact]
+    public void PlanType_Pz_FiltersInSqlByDokTyp()
+    {
+        // GET /receipts = ten sam QueryInvoicesAsync z Type "PZ" (ReceiptsController.Query). Bez mapowania PZ wpadało
+        // w filtr po prefiksie numeru po wczytaniu KAŻDEGO dokumentu z okna dat (do 1000) - ten sam mechanizm, co incydent FS.
+        var plan = InvoiceQueryFields.PlanType("PZ", limit: 300);
+
+        Assert.Equal("dok_Typ = 10", plan.SqlClause);
+        Assert.Null(plan.ClientPrefix);
+        Assert.Equal(300, plan.FetchCap);
+    }
+
+    [Theory]
+    [InlineData("FZ", 1)]
+    [InlineData("MM", 9)]
+    public void PlanType_OtherKnownDokTyp_FiltersInSql(string type, int dokTyp)
+    {
+        var plan = InvoiceQueryFields.PlanType(type, limit: 100);
+
+        Assert.Equal($"dok_Typ = {dokTyp}", plan.SqlClause);
+        Assert.Null(plan.ClientPrefix);
+    }
+
+    [Fact]
     public void PlanType_UnknownType_FallsBackToNumberPrefix_WithOversampling()
     {
-        // Typ spoza FS/KFS (np. PZ) nie ma mapowania na dok_Typ w listingu faktur - zostaje dotychczasowy filtr
-        // po prefiksie numeru z nadpróbkowaniem limit*5 (cap 1000), żeby po filtrze nie zabrakło wierszy.
-        var plan = InvoiceQueryFields.PlanType("pz", limit: 300);
+        // Typ bez mapowania na dok_Typ (np. ZK) - zostaje dotychczasowy filtr po prefiksie numeru
+        // z nadpróbkowaniem limit*5 (cap 1000), żeby po filtrze nie zabrakło wierszy.
+        var plan = InvoiceQueryFields.PlanType("zk", limit: 300);
 
         Assert.Null(plan.SqlClause);
-        Assert.Equal("PZ", plan.ClientPrefix);
+        Assert.Equal("ZK", plan.ClientPrefix);
         Assert.Equal(1000, plan.FetchCap);
 
-        Assert.Equal(250, InvoiceQueryFields.PlanType("PZ", limit: 50).FetchCap);
+        Assert.Equal(250, InvoiceQueryFields.PlanType("ZK", limit: 50).FetchCap);
     }
 
     // ----------------------------- Rdzeń pętli listingu -----------------------------

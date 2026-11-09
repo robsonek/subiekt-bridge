@@ -348,23 +348,31 @@ public static class InvoiceQueryFields
     public const int MaxFetchCap = 1000;
 
     /// <summary>
-    /// Jak zrealizować filtr `type` listingu (incydent 2026-11-09): FS/KFS → klauzula po kolumnie dok_Typ (2/6) w filtrze
-    /// OtworzKolekcje, więc Sfera zwraca TYLKO faktury i most nie ładuje przez COM setek PZ/WZ/ZK z tego samego okna dat
-    /// (do v0.21.3 typ sprawdzano po prefiksie numeru DOPIERO po pełnym wczytaniu dokumentu i kontrahenta - miesiąc z 2012
-    /// dokumentami blokował wątek STA na wiele minut). Bez `type` nic się nie zmienia (lista zwraca wszystkie typy, jak dotąd).
-    /// Typ spoza FS/KFS nie ma mapowania w listingu faktur - zostaje dotychczasowy filtr po prefiksie numeru
-    /// (<see cref="InvoiceTypePlan.ClientPrefix"/>) z nadpróbkowaniem limit*5 (cap <see cref="MaxFetchCap"/>).
+    /// Jak zrealizować filtr `type` listingu (incydent 2026-11-09): typ znany z <see cref="Sfera.DokTyp"/> (FZ/FS/KFS/MM/PZ) →
+    /// klauzula po kolumnie dok_Typ w filtrze OtworzKolekcje, więc Sfera zwraca TYLKO dokumenty tego typu i most nie ładuje
+    /// przez COM setek dokumentów innych typów z tego samego okna dat (do v0.21.3 typ sprawdzano po prefiksie numeru DOPIERO
+    /// po pełnym wczytaniu dokumentu i kontrahenta - miesiąc z 2012 dokumentami blokował wątek STA na wiele minut).
+    /// PZ jest tu, bo GET /receipts to ten sam QueryInvoicesAsync z Type "PZ" (ReceiptsController.Query; v0.21.4 znało tylko
+    /// FS/KFS i listing PZ dalej wpadał w stary tryb). Bez `type` nic się nie zmienia (lista zwraca wszystkie typy, jak dotąd).
+    /// Typ bez mapowania na dok_Typ zostaje przy filtrze po prefiksie numeru (<see cref="InvoiceTypePlan.ClientPrefix"/>)
+    /// z nadpróbkowaniem limit*5 (cap <see cref="MaxFetchCap"/>).
     /// </summary>
     public static InvoiceTypePlan PlanType(string? type, int limit)
     {
         var prefix = string.IsNullOrWhiteSpace(type) ? null : type.Trim().ToUpperInvariant();
-        return prefix switch
+        if (prefix is null) return new InvoiceTypePlan(null, null, limit);
+        int? dokTyp = prefix switch
         {
-            null => new InvoiceTypePlan(null, null, limit),
-            "FS" => new InvoiceTypePlan($"dok_Typ = {Sfera.DokTyp.FS}", null, limit),
-            "KFS" => new InvoiceTypePlan($"dok_Typ = {Sfera.DokTyp.KFS}", null, limit),
-            _ => new InvoiceTypePlan(null, prefix, Math.Min(limit * 5, MaxFetchCap)),
+            "FZ" => Sfera.DokTyp.FZ,
+            "FS" => Sfera.DokTyp.FS,
+            "KFS" => Sfera.DokTyp.KFS,
+            "MM" => Sfera.DokTyp.MM,
+            "PZ" => Sfera.DokTyp.PZ,
+            _ => null,
         };
+        return dokTyp is { } t
+            ? new InvoiceTypePlan($"dok_Typ = {t}", null, limit)
+            : new InvoiceTypePlan(null, prefix, Math.Min(limit * 5, MaxFetchCap));
     }
 }
 
