@@ -75,8 +75,9 @@ dokumentów, klient rozłączył się po 30 s, a job na STA mielił dalej i prze
 
 ## Listing `GET /invoices` — jeden job STA blokuje cały most
 
-Pętla listingu to `InvoiceListingScan.Collect` (delegaty, testy bez COM): typ znany z `DokTyp` (FZ/FS/KFS/MM/PZ) przez
-`InvoiceQueryFields.PlanType` → klauzula `dok_Typ` w filtrze (typ bez mapowania: prefiks numeru + nadpróbkowanie limit*5, cap 1000).
+Pętla listingu to `InvoiceListingScan.Collect` (delegaty, testy bez COM): każdy symbol typu z `DokTyp.BySymbol` (22 typy z
+MS_Description `dok_Typ` w zrzucie schematu) przez `InvoiceQueryFields.PlanType` → klauzula `dok_Typ` w filtrze (symbol spoza listy,
+np. niestandardowy „FH": prefiks numeru + nadpróbkowanie limit*5, cap 1000).
 **`GET /receipts` = ten sam `QueryInvoicesAsync` z `Type: "PZ"`** (`ReceiptsController.Query`) — każda zmiana w listingu faktur
 dotyczy też PZ (v0.21.4 znało tylko FS/KFS i listing PZ został w starym trybie do v0.21.5); `limit`/`fetchCap` sprawdzane PRZED
 pobraniem kolejnego dokumentu; **anulowanie wołającego sprawdzane na granicy dokumentu** (`RunOnStaAsync` patrzy na token tylko

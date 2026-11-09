@@ -61,29 +61,45 @@ public class InvoiceListingScanTests
         Assert.Equal(300, plan.FetchCap);
     }
 
+    // Pełna lista z MS_Description kolumny dok_Typ (zrzut schematu 1.88 HF3, dbo.dok__Dokument.sql):
+    // {1-FZ,2-FS,3-RZ,4-RS,5-KFZ,6-KFS,9-MM,10-PZ,11-WZ,12-PW,13-RW,14-ZW,15-ZD,16-ZK,21-PA,29-IW,35-ZPZ,36-ZWZ,51-TS,62-FM,67-KFM,72-ZM}
     [Theory]
-    [InlineData("FZ", 1)]
-    [InlineData("MM", 9)]
-    public void PlanType_OtherKnownDokTyp_FiltersInSql(string type, int dokTyp)
+    [InlineData("FZ", 1)] [InlineData("FS", 2)] [InlineData("RZ", 3)] [InlineData("RS", 4)] [InlineData("KFZ", 5)]
+    [InlineData("KFS", 6)] [InlineData("MM", 9)] [InlineData("PZ", 10)] [InlineData("WZ", 11)] [InlineData("PW", 12)]
+    [InlineData("RW", 13)] [InlineData("ZW", 14)] [InlineData("ZD", 15)] [InlineData("ZK", 16)] [InlineData("PA", 21)]
+    [InlineData("IW", 29)] [InlineData("ZPZ", 35)] [InlineData("ZWZ", 36)] [InlineData("TS", 51)] [InlineData("FM", 62)]
+    [InlineData("KFM", 67)] [InlineData("ZM", 72)]
+    public void PlanType_EveryDokTypFromSchema_FiltersInSql(string type, int dokTyp)
     {
-        var plan = InvoiceQueryFields.PlanType(type, limit: 100);
+        var plan = InvoiceQueryFields.PlanType(type.ToLowerInvariant(), limit: 100);
 
         Assert.Equal($"dok_Typ = {dokTyp}", plan.SqlClause);
         Assert.Null(plan.ClientPrefix);
+        Assert.Equal(100, plan.FetchCap);
+    }
+
+    [Fact]
+    public void DokTyp_SymbolMap_MatchesConstants()
+    {
+        Assert.Equal(DokTyp.FS, DokTyp.FromSymbol("FS"));
+        Assert.Equal(DokTyp.PZ, DokTyp.FromSymbol("pz"));
+        Assert.Null(DokTyp.FromSymbol("XYZ"));
+        Assert.Null(DokTyp.FromSymbol(""));
+        Assert.Equal(22, DokTyp.BySymbol.Count);
     }
 
     [Fact]
     public void PlanType_UnknownType_FallsBackToNumberPrefix_WithOversampling()
     {
-        // Typ bez mapowania na dok_Typ (np. ZK) - zostaje dotychczasowy filtr po prefiksie numeru
+        // Symbol spoza listy dok_Typ (np. niestandardowy "FH") - zostaje dotychczasowy filtr po prefiksie numeru
         // z nadpróbkowaniem limit*5 (cap 1000), żeby po filtrze nie zabrakło wierszy.
-        var plan = InvoiceQueryFields.PlanType("zk", limit: 300);
+        var plan = InvoiceQueryFields.PlanType("fh", limit: 300);
 
         Assert.Null(plan.SqlClause);
-        Assert.Equal("ZK", plan.ClientPrefix);
+        Assert.Equal("FH", plan.ClientPrefix);
         Assert.Equal(1000, plan.FetchCap);
 
-        Assert.Equal(250, InvoiceQueryFields.PlanType("ZK", limit: 50).FetchCap);
+        Assert.Equal(250, InvoiceQueryFields.PlanType("FH", limit: 50).FetchCap);
     }
 
     // ----------------------------- Rdzeń pętli listingu -----------------------------
