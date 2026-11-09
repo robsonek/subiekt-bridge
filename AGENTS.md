@@ -93,7 +93,7 @@ przykłady tylko z fikcyjnymi danymi (NIP `1111111111`, EAN-y `5901...`), ZERO d
 |---|---|
 | `GET /api/v1/health` | Sesja Sfery + wersja Subiekta + `sql_connection` (patrz Diagnostyka) |
 | `GET /api/v1/products?ean=` / `GET /api/v1/contractors?nip=` | Lookup towaru / kontrahenta (COM) |
-| `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | Listing FS/KFS; `nip` → `dok_PlatnikId`; `revision` per element (od v0.21.2: jeden odczyt na wywołanie, polecenie SQL na partię ≤ 500 dokumentów) |
+| `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | Listing FS/KFS; `nip` → `dok_PlatnikId`; `type` → `dok_Typ` w filtrze `OtworzKolekcje` (od v0.21.4, wcześniej prefiks numeru po wczytaniu KAŻDEGO dokumentu); anulowanie klienta przerywa pętlę STA na granicy dokumentu (`InvoiceListingScan`); `revision` per element (od v0.21.2: jeden odczyt na wywołanie, polecenie SQL na partię ≤ 500 dokumentów) |
 | `GET /api/v1/invoices/{id}` / `/pdf` | Metadane FV + `revision` FS/KFS (od v0.21.2: `f1:`, skrót treści wydruku z read-only SQL, fail-soft `null`) / retro PDF |
 | `GET /api/v1/invoices/open-receivables` / `open-payables` | Otwarte rozrachunki sprzedaży (39) / zakupu (40) w oknie kwoty — kandydaci do matchingu |
 | `POST /api/v1/invoices` | Wystaw FS |
@@ -124,6 +124,8 @@ Wszystkie wymagają `X-Bridge-Token: <secret>`. Mutujące POST (`/invoices`, `/c
   `Activator.CreateInstance(InsERT.GT)` z MTA rzuca `0x8000FFFF E_UNEXPECTED`. Dedykowany wątek
   `SetApartmentState(STA)` + `BlockingCollection<Action>`; każda metoda `RealSferaSession` idzie przez
   `RunOnStaAsync(Func<T>)`. PowerShellowy `New-Object -ComObject "InsERT.GT"` **przejdzie** mimo błędu mostu (PS jest STA).
+  **Jeden długi job blokuje WSZYSTKO** (także sondę `/health` → 503), a `RunOnStaAsync` sprawdza token anulowania tylko PRZED
+  startem joba — pętla po kolekcji Sfery musi dostać `ct` i sprawdzać go per dokument (incydent 2026-11-09, `InvoiceListingScan`).
 - **Bitowość:** Bridge x64 nie połączy się z Subiektem x86 (`0x8000FFFF Katastrofalny błąd`). Cała linia „GT”
   InsERT to 32-bit; Subiekt Nexo (x64) to inny produkt. CI matrix: **win-x86 only**.
 - **RCW:** kolekcje z `OtworzKolekcje` i dokumenty zwalniaj (`Zamknij()` / `Marshal.ReleaseComObject`) w `finally`.

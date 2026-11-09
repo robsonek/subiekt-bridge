@@ -277,10 +277,12 @@ public sealed class RealSferaSession : ISferaSession
 
     public Task<IReadOnlyList<InvoiceQueryItemDto>> QueryInvoicesAsync(InvoiceQueryRequestDto request, CancellationToken ct)
     {
-        return RunOnStaAsync<IReadOnlyList<InvoiceQueryItemDto>>(() => QueryInvoicesCore(request), ct);
+        // Token idzie TAKŻE do rdzenia: RunOnStaAsync sprawdza go tylko przed startem, a listing po rozłączeniu klienta
+        // (timeout 30 s) mielił dalej do 1000 dokumentów i blokował kolejkę STA dla wszystkich (incydent 2026-11-09).
+        return RunOnStaAsync<IReadOnlyList<InvoiceQueryItemDto>>(() => QueryInvoicesCore(request, ct), ct);
     }
 
-    private IReadOnlyList<InvoiceQueryItemDto> QueryInvoicesCore(InvoiceQueryRequestDto request)
+    private IReadOnlyList<InvoiceQueryItemDto> QueryInvoicesCore(InvoiceQueryRequestDto request, CancellationToken ct)
     {
         // NIP nie jest kolumna dok__Dokument (siedzi w adr__Ewid) - najpierw NIP -> kh_Id przez SQL,
         // potem zawezamy OtworzKolekcje po kontrahencie dokumentu. Brak kontrahenta = pusty wynik.
@@ -295,27 +297,25 @@ public sealed class RealSferaSession : ISferaSession
             }
         }
 
-        var filter = BuildInvoiceQueryFilter(request, nipContractorIds);
-        // Type filter client-side (kolumna SQL nie istnieje dla NumerPelny).
-        // Pobieramy wiecej niz limit zeby po filtrze nie zabraklo, hard cap = limit*5.
-        var typeFilter = string.IsNullOrWhiteSpace(request.Type)
-            ? null
-            : request.Type.Trim().ToUpperInvariant();
-        var fetchCap = typeFilter != null ? Math.Min(request.Limit * 5, 1000) : Math.Min(request.Limit, 1000);
+        var limit = Math.Clamp(request.Limit <= 0 ? 200 : request.Limit, 1, 1000);
+        // Typ FS/KFS filtruje SQL po dok_Typ (plan.SqlClause) - Sfera zwraca same faktury, zamiast wszystkich dokumentów z okna
+        // dat, z których most ładował przez COM do 1000 i dopiero po mapowaniu odrzucał PZ/WZ/ZK (incydent 2026-11-09).
+        // dok_NumerPelny to atrybut COM, nie kolumna - typ spoza FS/KFS zostaje po prefiksie numeru (plan.ClientPrefix, limit*5).
+        var plan = InvoiceQueryFields.PlanType(request.Type, limit);
+        var filter = BuildInvoiceQueryFilter(request, nipContractorIds, plan.SqlClause);
         // Sfera dokumentacja nie udostepnia listy kolumn dok__Dokument; dok_Id jest
         // bezpieczne (PK), data wystawienia ma rozne nazwy w roznych wersjach Subiekta
         // (dok_DataWyst vs dok_DataWystawienia) - sortujemy po dok_Id DESC zeby dostac
         // najnowsze (Subiekt nadaje rosnace ID).
         var sort = "dok_Id DESC";
-        var limit = Math.Clamp(request.Limit <= 0 ? 200 : request.Limit, 1, 1000);
 
-        _logger.LogInformation("QueryInvoices filter={Filter} sort={Sort} limit={Limit}",
-            filter, sort, limit);
+        _logger.LogInformation("QueryInvoices filter={Filter} sort={Sort} limit={Limit} fetchCap={FetchCap}",
+            filter, sort, limit, plan.FetchCap);
 
         dynamic kolekcja = Session.SuDokumentyManager.OtworzKolekcje(filter, sort);
         try
         {
-            return EnumerateInvoiceQueryItems((object)kolekcja, typeFilter, fetchCap, limit);
+            return EnumerateInvoiceQueryItems((object)kolekcja, plan.ClientPrefix, plan.FetchCap, limit, ct);
         }
         finally
         {
@@ -324,7 +324,7 @@ public sealed class RealSferaSession : ISferaSession
         }
     }
 
-    private IReadOnlyList<InvoiceQueryItemDto> EnumerateInvoiceQueryItems(dynamic kolekcja, string? typeFilter, int fetchCap, int limit)
+    private IReadOnlyList<InvoiceQueryItemDto> EnumerateInvoiceQueryItems(dynamic kolekcja, string? clientTypePrefix, int fetchCap, int limit, CancellationToken ct)
     {
         // Liczba moze byc int albo Variant - cast defensywnie.
         int total;
@@ -337,61 +337,28 @@ public sealed class RealSferaSession : ISferaSession
         _logger.LogInformation("QueryInvoices: kolekcja zwrocila {Total} dokumentow (cap={Limit})", total, limit);
 
         var items = new List<InvoiceQueryItemDto>(Math.Min(total, limit));
+        Func<object, InvoiceQueryItemDto> map = dok => MapDokumentToQueryItem(dok);
+        Action<Exception> onMapError = mapEx => _logger.LogWarning(mapEx, "QueryInvoices: skip dokument (mapping error)");
+        Action<object> close = dok => { try { ((dynamic)dok).Zamknij(); } catch { /* best-effort cleanup */ } };
 
+        // Pętla (limit/fetchCap/anulowanie/zamykanie) = InvoiceListingScan.Collect (testowalny bez COM).
         // Sfera eksportuje IEnumVARIANT (VBA For Each dziala) - uzywamy IEnumerable.
         // Fallback: Element(i) w razie gdyby IEnumVARIANT nie byl wystawiony.
         try
         {
-            int seen = 0;
-            foreach (dynamic dok in (System.Collections.IEnumerable)kolekcja)
-            {
-                if (seen >= fetchCap || items.Count >= limit) break;
-                seen++;
-                try
-                {
-                    var mapped = MapDokumentToQueryItem(dok);
-                    if (typeFilter == null || mapped.Type == typeFilter)
-                    {
-                        items.Add(mapped);
-                    }
-                }
-                catch (Exception mapEx)
-                {
-                    _logger.LogWarning(mapEx, "QueryInvoices: skip dokument (mapping error)");
-                }
-                finally
-                {
-                    try { dok.Zamknij(); } catch { /* best-effort cleanup */ }
-                }
-            }
+            InvoiceListingScan.Collect(((System.Collections.IEnumerable)kolekcja).Cast<object>(), items, map,
+                clientTypePrefix, fetchCap, limit, ct, onMapError, close);
         }
         catch (InvalidCastException) when (items.Count == 0)
         {
             // Fallback tylko gdy enumeracja nie ruszyla (inaczej dublowalby juz zebrane wiersze).
             // Kolekcje Sfery sa 1-indeksowane (CHM _Kolekcja_Element: 1..Liczba).
             _logger.LogInformation("QueryInvoices: IEnumerable nie dostepne - fallback na Element(i)");
-            int take = Math.Min(total, fetchCap);
-            for (int i = 1; i <= take && items.Count < limit; i++)
-            {
-                dynamic? dok = null;
-                try
-                {
-                    dok = kolekcja.Element(i);
-                    var mapped = MapDokumentToQueryItem(dok);
-                    if (typeFilter == null || mapped.Type == typeFilter)
-                    {
-                        items.Add(mapped);
-                    }
-                }
-                catch (Exception mapEx)
-                {
-                    _logger.LogWarning(mapEx, "QueryInvoices: skip dokument (mapping error)");
-                }
-                finally
-                {
-                    try { dok?.Zamknij(); } catch { /* best-effort */ }
-                }
-            }
+            object kolekcjaObj = (object)kolekcja;
+            var elements = InvoiceListingScan.ElementsByIndex(Math.Min(total, fetchCap),
+                element: i => (object?)((dynamic)kolekcjaObj).Element(i), ct,
+                onReadError: (i, ex) => _logger.LogWarning(ex, "QueryInvoices: skip dokument (Element({Index}) error)", i));
+            InvoiceListingScan.Collect(elements, items, map, clientTypePrefix, fetchCap, limit, ct, onMapError, close);
         }
 
         return items;
@@ -402,13 +369,14 @@ public sealed class RealSferaSession : ISferaSession
     /// strony są escapeowane (single quote -&gt; double single quote), daty walidowane
     /// po regex YYYY-MM-DD.
     /// </summary>
-    private static string BuildInvoiceQueryFilter(InvoiceQueryRequestDto r, IReadOnlyCollection<long>? nipContractorIds)
+    private static string BuildInvoiceQueryFilter(InvoiceQueryRequestDto r, IReadOnlyCollection<long>? nipContractorIds, string? typeClause)
     {
         var clauses = new List<string>();
 
-        // Type filter NIE w SQL: dok_NumerPelny to atrybut COM (computed), nie kolumna w
-        // dok__Dokument - SQL "LIKE 'FS %'" zwraca 0x80040E14. Filtrujemy client-side
-        // (po MapDokumentToQueryItem) na bazie response.number.
+        // Typ FS/KFS po kolumnie dok_Typ (InvoiceQueryFields.PlanType) - NIE po numerze: dok_NumerPelny to atrybut COM
+        // (computed), nie kolumna w dok__Dokument - SQL "LIKE 'FS %'" zwraca 0x80040E14. Typ bez mapowania na dok_Typ
+        // zostaje client-side (po MapDokumentToQueryItem) na bazie response.number.
+        if (typeClause is not null) clauses.Add(typeClause);
 
         // Daty - dok_DataWyst (krotka nazwa kolumny w Subiekt GT).
         if (IsValidIsoDate(r.From)) clauses.Add($"dok_DataWyst >= '{r.From}'");

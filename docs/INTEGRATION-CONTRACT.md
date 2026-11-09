@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.21.2** (wydane 2026-10-13; v0.21.1 wydane 2026-10-12). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
+> **Dotyczy:** SubiektBridge **v0.21.4** (2026-11-09; v0.21.2 wydane 2026-10-13). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -312,6 +312,16 @@ wówczas tylko stan, nie ruszając dokumentu.
 o tym NIP jest nabywcą (porównanie bez kresek i spacji); brak takiego kontrahenta = pusta tablica. Zwraca tablicę pozycji z
 `subiekt_id, number, type, issue_date, contractor_*, *_amount, notes, revision` (ten sam kształt co `GET /api/v1/invoices/{id}`).
 `GET /api/v1/invoices/{id}/pdf` → strumień `application/pdf` (retro generacja).
+
+**`type` (od v0.21.4) filtruje po typie dokumentu w Subiekcie** (`FS` = faktura sprzedaży, `KFS` = korekta), nie po prefiksie
+numeru. Dokument z niestandardowym symbolem numeracji (np. „FH 1/2026”) jest zwracany, a pole `type` w odpowiedzi nadal pochodzi
+z numeru (`"FH"`) — do v0.21.3 taki dokument był pomijany. Bez `type` lista zawiera wszystkie typy dokumentów z okna dat (bez zmian).
+
+**Wydajność = wąskie okno.** Most buduje listę, wczytując z Subiekta każdy dokument po kolei na jednym wątku, który obsługuje
+też wszystkie pozostałe wywołania (łącznie z `/health`). Szerokie okno bez `type` i bez `notes_contains` (np. cały miesiąc) może
+trwać dłużej niż Twój timeout. Zawężaj `from`/`to` (kilka dni) albo podawaj `notes_contains` — oba filtry działają po stronie bazy.
+Gdy rozłączysz się przed odpowiedzią, most od v0.21.4 przerywa pracę przy najbliższym dokumencie (do v0.21.3 kończył całą listę
+w tle i przez ten czas blokował pozostałe wywołania).
 
 **`revision` (od v0.21.2) — znacznik treści wydruku FS/KFS.** Służy do odświeżania przechowywanego PDF, gdy operator zmieni
 dokument w Subiekcie (np. nazwę pozycji albo formę płatności — zmiany, których nie widać w kwotach).
@@ -784,6 +794,14 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
+
+### v0.21.4 (2026-11-09 — listing `GET /invoices`: filtr `type` po typie dokumentu, przerwanie po rozłączeniu)
+- **`GET /api/v1/invoices?type=FS|KFS` filtruje po typie dokumentu w Subiekcie, nie po prefiksie numeru** (§3.8): dokument
+  z niestandardowym symbolem numeracji (np. „FH 1/2026”) jest teraz zwracany (pole `type` w odpowiedzi nadal z numeru). Lista
+  bez `type` bez zmian. Kolekcja z Subiekta zawiera już tylko faktury — listing miesiąca z `type` nie ładuje setek PZ/WZ.
+- **Rozłączenie klienta przerywa listing** przy najbliższym dokumencie — do v0.21.3 most kończył całą listę w tle i przez ten czas
+  (minuty) nie odpowiadał na żadne wywołanie dotykające Subiekta, łącznie z `/health` (`503`). Zalecenie bez zmian: wąskie
+  `from`/`to` albo `notes_contains` (§3.8). Bez nowych kodów błędów.
 
 ### v0.21.2 (2026-10-13 — rewizja FS/KFS)
 - **`GET /api/v1/invoices/{id}` i `GET /api/v1/invoices`: nowe pole `revision`** (`f1:` + 16 hex albo `null`) — znacznik treści
