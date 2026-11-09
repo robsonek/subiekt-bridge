@@ -42,6 +42,7 @@ public sealed class ReceiptsController : ControllerBase
         [FromQuery(Name = "notes_contains")] string? notesContains,
         [FromQuery] string? nip,
         [FromQuery] int limit,
+        [FromQuery(Name = "warehouse_subiekt_id")] int? warehouseSubiektId,
         CancellationToken ct)
     {
         var request = new InvoiceQueryRequestDto(
@@ -50,7 +51,8 @@ public sealed class ReceiptsController : ControllerBase
             Type: "PZ",
             NotesContains: notesContains,
             Nip: nip,
-            Limit: limit > 0 ? limit : 200);
+            Limit: limit > 0 ? limit : 200,
+            WarehouseSubiektId: warehouseSubiektId);
 
         try
         {

@@ -322,7 +322,9 @@ public sealed record InvoiceQueryRequestDto(
     [property: JsonPropertyName("type")] string? Type,                    // FS / KFS / null=oba
     [property: JsonPropertyName("notes_contains")] string? NotesContains, // LIKE %X% w dok_Uwagi
     [property: JsonPropertyName("nip")] string? Nip,                      // NIP kontrahenta
-    [property: JsonPropertyName("limit")] int Limit = 200                 // hard cap 1000
+    [property: JsonPropertyName("limit")] int Limit = 200,                // hard cap 1000
+    // v0.21.6: filtr dok_MagId; null = WSZYSTKIE magazyny (listing SQL widzi wszystkie; COM OtworzKolekcje widział tylko magazyn sesji).
+    [property: JsonPropertyName("warehouse_subiekt_id")] int? WarehouseSubiektId = null
 );
 
 /// <summary>
@@ -389,7 +391,9 @@ public sealed record InvoiceQueryItemDto(
     [property: JsonPropertyName("notes")] string? Notes,
     // v0.21.2: rewizja FS/KFS ("f1:" + 16 hex) - znacznik treści wydruku; null = nie-FS/KFS albo odczyt SQL niedostępny (fail-soft).
     // Spec docs/superpowers/specs/2026-10-13-invoice-revision-fs-kfs-design.md §2. Doklejana w InvoicesController (GET {id} i lista).
-    [property: JsonPropertyName("revision")] string? Revision = null
+    [property: JsonPropertyName("revision")] string? Revision = null,
+    // v0.21.6: magazyn dokumentu (dok_MagId) - wypełniany przez listing SQL (GET /invoices, GET /receipts); null w ścieżkach COM (GET /invoices/{id}).
+    [property: JsonPropertyName("warehouse_subiekt_id")] int? WarehouseSubiektId = null
 );
 
 // ----------------------------- Reference -----------------------------

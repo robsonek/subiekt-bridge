@@ -277,9 +277,67 @@ public sealed class RealSferaSession : ISferaSession
 
     public Task<IReadOnlyList<InvoiceQueryItemDto>> QueryInvoicesAsync(InvoiceQueryRequestDto request, CancellationToken ct)
     {
+        // Od v0.21.6 listing idzie z read-only SQL POZA STA (InvoiceListingSql): enumeracja kolekcji przez COM kosztuje 0,5-1,5 s na
+        // dokument (prod 2026-11-10: 100 FS nie mieściło się w 30 s), a każdy taki job blokuje pozostałe wywołania Sfery. Ścieżka COM
+        // zostaje WYŁĄCZNIE jako jawny przełącznik awaryjny (Bridge:InvoiceListingViaSql=false) - nigdy cichy fallback po błędzie SQL
+        // (wróciłby tryb blokujący most); błąd SQL = wyjątek = 502 SUBIEKT_QUERY_FAILED (odczyt, retry-safe).
+        if (_bridgeOptions.InvoiceListingViaSql) return QueryInvoicesSqlAsync(request, ct);
+
         // Token idzie TAKŻE do rdzenia: RunOnStaAsync sprawdza go tylko przed startem, a listing po rozłączeniu klienta
         // (timeout 30 s) mielił dalej do 1000 dokumentów i blokował kolejkę STA dla wszystkich (incydent 2026-11-09).
         return RunOnStaAsync<IReadOnlyList<InvoiceQueryItemDto>>(() => QueryInvoicesCore(request, ct), ct);
+    }
+
+    /// <summary>
+    /// [poza STA] Listing z dok__Dokument + adr__Ewid (InvoiceListingSql.Build/Map). Widzi WSZYSTKIE magazyny (opcjonalny filtr
+    /// dok_MagId), pomija anulowane (dok_Status = 2). ConnectTimeout 5 s / CommandTimeout 15 s jak GetInvoiceRevisionsAsync.
+    /// </summary>
+    private async Task<IReadOnlyList<InvoiceQueryItemDto>> QueryInvoicesSqlAsync(InvoiceQueryRequestDto request, CancellationToken ct)
+    {
+        IReadOnlyCollection<long>? nipContractorIds = null;
+        if (!string.IsNullOrWhiteSpace(request.Nip))
+        {
+            nipContractorIds = FindContractorIdsByNip(request.Nip);
+            if (nipContractorIds.Count == 0)
+            {
+                _logger.LogInformation("QueryInvoices(SQL): brak kontrahenta z NIP {Nip} - pusty wynik", request.Nip);
+                return Array.Empty<InvoiceQueryItemDto>();
+            }
+        }
+
+        var limit = Math.Clamp(request.Limit <= 0 ? 200 : request.Limit, 1, 1000);
+        var query = InvoiceListingSql.Build(request, limit, nipContractorIds);
+        _logger.LogInformation("QueryInvoices(SQL) type={Type} from={From} to={To} notes={HasNotes} nip={HasNip} mag={Mag} limit={Limit}",
+            request.Type, request.From, request.To, !string.IsNullOrWhiteSpace(request.NotesContains), nipContractorIds is not null,
+            request.WarehouseSubiektId, limit);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var connStr = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(SqlConnStr()) { ConnectTimeout = 5 }.ToString();
+        await using var conn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = query.Sql;
+        cmd.CommandTimeout = 15;
+        foreach (var p in query.Parameters)
+        {
+            cmd.Parameters.Add(p.Name, p.Type).Value = p.Value;
+        }
+
+        var items = new List<InvoiceQueryItemDto>(limit);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var names = Enumerable.Range(0, reader.FieldCount).Select(reader.GetName).ToArray();
+        while (await reader.ReadAsync(ct))
+        {
+            var row = new Dictionary<string, object?>(names.Length, StringComparer.Ordinal);
+            for (int i = 0; i < names.Length; i++)
+            {
+                row[names[i]] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+            }
+            items.Add(InvoiceListingSql.Map(row));
+        }
+
+        _logger.LogInformation("QueryInvoices(SQL): {Count} wierszy w {Ms} ms", items.Count, sw.ElapsedMilliseconds);
+        return items;
     }
 
     private IReadOnlyList<InvoiceQueryItemDto> QueryInvoicesCore(InvoiceQueryRequestDto request, CancellationToken ct)

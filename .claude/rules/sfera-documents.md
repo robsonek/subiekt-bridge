@@ -73,7 +73,19 @@ innych typów z okna dat. Incydent 2026-11-09: `GET /invoices?from=2026-07-01&to
 dokumentów, klient rozłączył się po 30 s, a job na STA mielił dalej i przez wiele minut blokował KAŻDE wywołanie Sfery, także
 `/health` (503).
 
-## Listing `GET /invoices` — jeden job STA blokuje cały most
+## Listing `GET /invoices` / `GET /receipts` — od v0.21.6 read-only SQL poza STA
+
+**Domyślnie listing NIE dotyka Sfery:** `InvoiceListingSql.Build/Map` (czysta logika, testy bez SqlClient) + `QueryInvoicesSqlAsync`
+w Real (ConnectTimeout 5 s, CommandTimeout 15 s). Powód: prod 2026-11-10 — enumeracja kolekcji przez COM kosztuje **0,5–1,5 s na
+dokument** (pełne wczytanie + `Kontrahenci.Wczytaj`), 100 FS nie mieściło się w 30 s klienta nawet po filtrze `dok_Typ`. Zasady:
+`SELECT TOP (@limit)` z `dok__Dokument d LEFT JOIN adr__Ewid a` (adres główny, `adr_TypAdresu = 1`), parametry zamiast interpolacji
+(LIKE escapowane `OpenReceivableFields.EscapeLikeWildcards`), **wszystkie magazyny** + opcjonalny `dok_MagId = @mag` + `dok_MagId`
+w każdym wierszu (`warehouse_subiekt_id`), `dok_Status <> 2`, typ spoza listy `DokTyp.BySymbol` po prefiksie **realnej** kolumny
+`dok_NrPelny`, `type` w DTO nadal z numeru. Błąd SQL → wyjątek → `502 SUBIEKT_QUERY_FAILED`; **ZAKAZ cichego fallbacku na COM**
+(wróciłby tryb blokujący most). Nagłówki dokumentów KSeF są czytelne (szyfrowany tylko XML w `ksef_Pliki`). Ścieżka COM poniżej żyje
+wyłącznie pod `Bridge:InvoiceListingViaSql=false` (przełącznik awaryjny). `GET /invoices/{id}` nadal COM (`warehouse_subiekt_id = null`).
+
+### Ścieżka COM (tylko `InvoiceListingViaSql=false`) — jeden job STA blokuje cały most
 
 Pętla listingu to `InvoiceListingScan.Collect` (delegaty, testy bez COM): każdy symbol typu z `DokTyp.BySymbol` (22 typy z
 MS_Description `dok_Typ` w zrzucie schematu) przez `InvoiceQueryFields.PlanType` → klauzula `dok_Typ` w filtrze (symbol spoza listy,

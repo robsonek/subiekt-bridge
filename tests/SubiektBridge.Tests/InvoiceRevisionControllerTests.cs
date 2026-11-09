@@ -57,7 +57,7 @@ public sealed class InvoiceRevisionControllerTests : IDisposable
     }
 
     private async Task<IReadOnlyList<InvoiceQueryItemDto>> List(FakeSferaSession fake)
-        => Ok(await Controller(fake).Query(null, null, null, null, null, 0, CancellationToken.None));
+        => Ok(await Controller(fake).Query(null, null, null, null, null, 0, null, CancellationToken.None));
 
     // ----------------------------- GET /invoices/{id} -----------------------------
 
@@ -223,7 +223,7 @@ public sealed class InvoiceRevisionControllerTests : IDisposable
         var fake = new FakeSferaSession();
         using var cts = new CancellationTokenSource();
         cts.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Controller(fake).Query(null, null, null, null, null, 0, cts.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Controller(fake).Query(null, null, null, null, null, 0, null, cts.Token));
     }
 
     /// <summary>Mutant: rewizja czytana w ścieżce replayu idempotencji (FindInvoiceByIdAsync) - zbędna zależność POST od SqlClienta.</summary>
