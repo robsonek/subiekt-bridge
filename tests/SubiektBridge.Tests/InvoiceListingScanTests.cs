@@ -229,6 +229,49 @@ public class InvoiceListingScanTests
         Assert.Equal(1, docs.Pulled);
     }
 
+    // ----------------------------- Fallback Element(i) -----------------------------
+
+    [Fact]
+    public void ElementsByIndex_FailingReads_StillHonorCancellation()
+    {
+        // Greptile PR #26: nieudany Element(i) to też wywołanie COM; seria błędów nie może omijać sprawdzenia tokena,
+        // bo iterator nie dochodzi wtedy do pętli Collect i po rozłączeniu klienta job STA dalej odpytuje kolekcję.
+        using var cts = new CancellationTokenSource();
+        int reads = 0;
+
+        var seq = InvoiceListingScan.ElementsByIndex(take: 1000,
+            element: i => { reads++; if (i == 2) cts.Cancel(); throw new InvalidOperationException("read"); },
+            ct: cts.Token, onReadError: (_, _) => { });
+
+        Assert.Throws<OperationCanceledException>(() => seq.ToList());
+        Assert.Equal(2, reads); // trzeci Element(i) nie jest już wołany
+    }
+
+    [Fact]
+    public void ElementsByIndex_SkipsFailingAndNullElements_YieldsRest_ReportsErrors()
+    {
+        var errors = new List<int>();
+
+        var seq = InvoiceListingScan.ElementsByIndex(take: 5,
+            element: i => i switch { 2 => throw new InvalidOperationException("read"), 4 => null, _ => (object)i },
+            ct: CancellationToken.None, onReadError: (i, _) => errors.Add(i));
+
+        Assert.Equal(new object[] { 1, 3, 5 }, seq.ToList());
+        Assert.Equal(new[] { 2 }, errors);
+    }
+
+    [Fact]
+    public void ElementsByIndex_IsLazy_StopsReadingWhenConsumerStops()
+    {
+        int reads = 0;
+
+        var first = InvoiceListingScan.ElementsByIndex(take: 1000, element: i => { reads++; return i; },
+            ct: CancellationToken.None, onReadError: (_, _) => { }).Take(2).ToList();
+
+        Assert.Equal(2, first.Count);
+        Assert.Equal(2, reads); // Collect przerywa po limit/fetchCap - iterator nie może czytać na zapas
+    }
+
     [Fact]
     public void Collect_CancellationIsNotSwallowedAsMappingError()
     {

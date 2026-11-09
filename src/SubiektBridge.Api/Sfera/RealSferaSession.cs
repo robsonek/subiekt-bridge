@@ -354,28 +354,14 @@ public sealed class RealSferaSession : ISferaSession
             // Fallback tylko gdy enumeracja nie ruszyla (inaczej dublowalby juz zebrane wiersze).
             // Kolekcje Sfery sa 1-indeksowane (CHM _Kolekcja_Element: 1..Liczba).
             _logger.LogInformation("QueryInvoices: IEnumerable nie dostepne - fallback na Element(i)");
-            InvoiceListingScan.Collect(ElementsByIndex((object)kolekcja, Math.Min(total, fetchCap)), items, map,
-                clientTypePrefix, fetchCap, limit, ct, onMapError, close);
+            object kolekcjaObj = (object)kolekcja;
+            var elements = InvoiceListingScan.ElementsByIndex(Math.Min(total, fetchCap),
+                element: i => (object?)((dynamic)kolekcjaObj).Element(i), ct,
+                onReadError: (i, ex) => _logger.LogWarning(ex, "QueryInvoices: skip dokument (Element({Index}) error)", i));
+            InvoiceListingScan.Collect(elements, items, map, clientTypePrefix, fetchCap, limit, ct, onMapError, close);
         }
 
         return items;
-    }
-
-    /// <summary>Leniwa enumeracja Element(1..take); błąd odczytu elementu pomija go (jak dawny catch w pętli fallbacku).</summary>
-    private IEnumerable<object> ElementsByIndex(object kolekcja, int take)
-    {
-        for (int i = 1; i <= take; i++)
-        {
-            object? dok;
-            try { dok = (object?)((dynamic)kolekcja).Element(i); }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "QueryInvoices: skip dokument (Element({Index}) error)", i);
-                continue;
-            }
-            if (dok is null) continue;
-            yield return dok;
-        }
     }
 
     /// <summary>

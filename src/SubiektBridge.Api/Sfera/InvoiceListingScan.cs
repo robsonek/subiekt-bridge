@@ -66,4 +66,28 @@ public static class InvoiceListingScan
             ct.ThrowIfCancellationRequested();
         }
     }
+
+    /// <summary>
+    /// Leniwa enumeracja Element(1..take) dla fallbacku bez IEnumVARIANT (kolekcje Sfery są 1-indeksowane). Token sprawdzany
+    /// PRZED każdym odczytem, poza catch: nieudany Element(i) to też wywołanie COM, a seria błędów/nulli nie dochodzi do pętli
+    /// <see cref="Collect{TDoc}"/> i bez tego sprawdzenia po rozłączeniu klienta job STA odpytywałby kolekcję do końca
+    /// (Greptile PR #26). Błąd odczytu pomija element (<paramref name="onReadError"/>), null jest pomijany bez raportu.
+    /// </summary>
+    public static IEnumerable<object> ElementsByIndex(int take, Func<int, object?> element, CancellationToken ct, Action<int, Exception> onReadError)
+    {
+        for (int i = 1; i <= take; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            object? dok;
+            try { dok = element(i); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                onReadError(i, ex);
+                continue;
+            }
+            if (dok is null) continue;
+            yield return dok;
+        }
+    }
 }
