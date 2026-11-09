@@ -63,10 +63,23 @@ przelicza `netto = unit_price_gross / (1 + vat/100)`. Od v0.7.49 `LineDto.UnitPr
 (opcjonalne, `decimal?`) pozwala podać netto **wprost** - wtedy brak przeliczania i brak
 groszowych rozjazdów (cenne dla cen zakupu). Pole znaczące tylko dla PZ; FS/KFS je ignorują.
 
-## `dok_NumerPelny` to atrybut COM, NIE kolumna SQL
+## `dok_NumerPelny` to atrybut COM, NIE kolumna SQL — typ filtruj po `dok_Typ`
 
 `SQL filter "dok_NumerPelny LIKE 'FS %'"` rzuca syntax error. To computed atrybut
-Sfery (z `dok_TypNr + dok_Nr/dok_Rok`). Filtruj client-side po pobraniu kolekcji.
+Sfery (z `dok_TypNr + dok_Nr/dok_Rok`). Typ dokumentu w filtrze `OtworzKolekcje` zawsze po kolumnie `dok_Typ` (`DokTyp`: 2=FS,
+6=KFS, 9=MM, 10=PZ), NIGDY client-side po pobraniu kolekcji — **enumeracja kolekcji to pełne wczytanie KAŻDEGO dokumentu przez
+Sferę** (w listingu plus `Kontrahenci.Wczytaj`), więc filtr po prefiksie numeru nakładany po mapowaniu ładował do 1000 dokumentów
+innych typów z okna dat. Incydent 2026-11-09: `GET /invoices?from=2026-07-01&to=2026-07-31&type=FS&limit=300` → kolekcja 2012
+dokumentów, klient rozłączył się po 30 s, a job na STA mielił dalej i przez wiele minut blokował KAŻDE wywołanie Sfery, także
+`/health` (503).
+
+## Listing `GET /invoices` — jeden job STA blokuje cały most
+
+Pętla listingu to `InvoiceListingScan.Collect` (delegaty, testy bez COM): typ FS/KFS przez `InvoiceQueryFields.PlanType` → klauzula
+`dok_Typ` w filtrze (typ spoza FS/KFS: prefiks numeru + nadpróbkowanie limit*5, cap 1000); `limit`/`fetchCap` sprawdzane PRZED
+pobraniem kolejnego dokumentu; **anulowanie wołającego sprawdzane na granicy dokumentu** (`RunOnStaAsync` patrzy na token tylko
+przed startem joba — rdzeń musi dostać `ct` sam); każdy pobrany dokument `Zamknij()` w `finally`. Fallback `Element(i)` (brak
+IEnumVARIANT) idzie przez tę samą pętlę. Każdy nowy listing na kolekcji Sfery: filtry do SQL w `OtworzKolekcje`, token do pętli.
 
 ## `OtworzKolekcje` zwraca duchy
 
