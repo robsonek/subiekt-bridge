@@ -448,6 +448,11 @@ public sealed class RealSferaSession : ISferaSession
         if (nipContractorIds is not null && InvoiceQueryFields.ContractorClause(nipContractorIds) is { } contractorClause)
             clauses.Add(contractorClause);
 
+        // warehouse_subiekt_id także w ścieżce COM (Greptile PR #28) - OtworzKolekcje i tak widzi tylko magazyn sesji, więc inny
+        // magazyn da pustą listę zamiast dokumentów cudzego magazynu.
+        if (InvoiceQueryFields.WarehouseClause(r.WarehouseSubiektId) is { } warehouseClause)
+            clauses.Add(warehouseClause);
+
         return clauses.Count == 0 ? "dok_Id > 0" : string.Join(" AND ", clauses);
     }
 

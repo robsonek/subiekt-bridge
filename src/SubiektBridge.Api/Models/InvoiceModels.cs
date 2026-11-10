@@ -346,6 +346,14 @@ public static class InvoiceQueryFields
         return $"dok_PlatnikId IN ({string.Join(",", contractorIds)})";
     }
 
+    /// <summary>
+    /// Klauzula magazynu dla filtra OtworzKolekcje w ścieżce COM (Bridge:InvoiceListingViaSql=false): dok_MagId to kolumna
+    /// dok__Dokument. Bez niej filtr `warehouse_subiekt_id` był tam cicho ignorowany (Greptile PR #28) - żądanie magazynu 4 zwracało
+    /// dokumenty magazynu sesji. Null = bez klauzuli (COM i tak widzi tylko magazyn sesji; SQL - wszystkie). Id to int - bez escapowania.
+    /// </summary>
+    public static string? WarehouseClause(int? warehouseSubiektId)
+        => warehouseSubiektId is { } id ? $"dok_MagId = {id}" : null;
+
     /// <summary>Górny limit dokumentów pobieranych z kolekcji, gdy typ filtrujemy dopiero po stronie mostu (nadpróbkowanie limit*5).</summary>
     public const int MaxFetchCap = 1000;
 
