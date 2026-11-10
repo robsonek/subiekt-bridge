@@ -40,6 +40,7 @@ public sealed class InvoicesController : ControllerBase
         [FromQuery(Name = "notes_contains")] string? notesContains,
         [FromQuery] string? nip,
         [FromQuery] int limit,
+        [FromQuery(Name = "warehouse_subiekt_id")] int? warehouseSubiektId,
         CancellationToken ct)
     {
         var request = new InvoiceQueryRequestDto(
@@ -48,7 +49,8 @@ public sealed class InvoicesController : ControllerBase
             Type: type,
             NotesContains: notesContains,
             Nip: nip,
-            Limit: limit > 0 ? limit : 200);
+            Limit: limit > 0 ? limit : 200,
+            WarehouseSubiektId: warehouseSubiektId);
 
         IReadOnlyList<InvoiceQueryItemDto> items;
         try

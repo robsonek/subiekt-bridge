@@ -51,6 +51,13 @@ public sealed class BridgeOptions
     /// (idempotentny advance). Min egzekwowane w kodzie: 5 s.
     /// </summary>
     public int KsefSendTimeoutSeconds { get; init; } = 90;
+
+    /// <summary>
+    /// Listing GET /invoices i GET /receipts z read-only SQL poza wątkiem STA (od v0.21.6, InvoiceListingSql). **Domyślnie TRUE.**
+    /// FALSE = dawna ścieżka COM (OtworzKolekcje + wczytanie każdego dokumentu, 0,5–1,5 s/dokument, blokuje kolejkę STA) -
+    /// wyłącznie jawny przełącznik awaryjny, nigdy cichy fallback po błędzie SQL.
+    /// </summary>
+    public bool InvoiceListingViaSql { get; init; } = true;
 }
 
 public sealed class SubiektOptions

@@ -322,7 +322,9 @@ public sealed record InvoiceQueryRequestDto(
     [property: JsonPropertyName("type")] string? Type,                    // FS / KFS / null=oba
     [property: JsonPropertyName("notes_contains")] string? NotesContains, // LIKE %X% w dok_Uwagi
     [property: JsonPropertyName("nip")] string? Nip,                      // NIP kontrahenta
-    [property: JsonPropertyName("limit")] int Limit = 200                 // hard cap 1000
+    [property: JsonPropertyName("limit")] int Limit = 200,                // hard cap 1000
+    // v0.21.6: filtr dok_MagId; null = WSZYSTKIE magazyny (listing SQL widzi wszystkie; COM OtworzKolekcje widział tylko magazyn sesji).
+    [property: JsonPropertyName("warehouse_subiekt_id")] int? WarehouseSubiektId = null
 );
 
 /// <summary>
@@ -343,6 +345,14 @@ public static class InvoiceQueryFields
         if (contractorIds.Count == 0) return null;
         return $"dok_PlatnikId IN ({string.Join(",", contractorIds)})";
     }
+
+    /// <summary>
+    /// Klauzula magazynu dla filtra OtworzKolekcje w ścieżce COM (Bridge:InvoiceListingViaSql=false): dok_MagId to kolumna
+    /// dok__Dokument. Bez niej filtr `warehouse_subiekt_id` był tam cicho ignorowany (Greptile PR #28) - żądanie magazynu 4 zwracało
+    /// dokumenty magazynu sesji. Null = bez klauzuli (COM i tak widzi tylko magazyn sesji; SQL - wszystkie). Id to int - bez escapowania.
+    /// </summary>
+    public static string? WarehouseClause(int? warehouseSubiektId)
+        => warehouseSubiektId is { } id ? $"dok_MagId = {id}" : null;
 
     /// <summary>Górny limit dokumentów pobieranych z kolekcji, gdy typ filtrujemy dopiero po stronie mostu (nadpróbkowanie limit*5).</summary>
     public const int MaxFetchCap = 1000;
@@ -389,7 +399,9 @@ public sealed record InvoiceQueryItemDto(
     [property: JsonPropertyName("notes")] string? Notes,
     // v0.21.2: rewizja FS/KFS ("f1:" + 16 hex) - znacznik treści wydruku; null = nie-FS/KFS albo odczyt SQL niedostępny (fail-soft).
     // Spec docs/superpowers/specs/2026-10-13-invoice-revision-fs-kfs-design.md §2. Doklejana w InvoicesController (GET {id} i lista).
-    [property: JsonPropertyName("revision")] string? Revision = null
+    [property: JsonPropertyName("revision")] string? Revision = null,
+    // v0.21.6: magazyn dokumentu (dok_MagId) - wypełniany przez listing SQL (GET /invoices, GET /receipts); null w ścieżkach COM (GET /invoices/{id}).
+    [property: JsonPropertyName("warehouse_subiekt_id")] int? WarehouseSubiektId = null
 );
 
 // ----------------------------- Reference -----------------------------

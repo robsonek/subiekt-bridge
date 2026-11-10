@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.21.5** (2026-11-10; v0.21.4 wydane 2026-11-09). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
+> **Dotyczy:** SubiektBridge **v0.21.6** (2026-11-10; v0.21.5 wydane 2026-11-10). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -308,20 +308,28 @@ wówczas tylko stan, nie ruszając dokumentu.
 ### 3.8 Listingi i pojedynczy dokument
 
 `GET /api/v1/invoices` query: `from` (YYYY-MM-DD), `to`, `type` (`FS`/`KFS`/brak=oba),
-`notes_contains`, `nip`, `limit` (domyślnie 200, max 1000). `nip` = dokumenty, na których kontrahent
+`notes_contains`, `nip`, `limit` (domyślnie 200, max 1000), `warehouse_subiekt_id` (od v0.21.6, opcjonalne). `nip` = dokumenty, na których kontrahent
 o tym NIP jest nabywcą (porównanie bez kresek i spacji); brak takiego kontrahenta = pusta tablica. Zwraca tablicę pozycji z
-`subiekt_id, number, type, issue_date, contractor_*, *_amount, notes, revision` (ten sam kształt co `GET /api/v1/invoices/{id}`).
+`subiekt_id, number, type, issue_date, contractor_*, *_amount, notes, revision, warehouse_subiekt_id` (ten sam kształt co `GET /api/v1/invoices/{id}`).
 `GET /api/v1/invoices/{id}/pdf` → strumień `application/pdf` (retro generacja).
+
+**Źródło listy i magazyny (od v0.21.6).** Lista (`GET /invoices` i `GET /receipts`) jest czytana wprost z bazy Subiekta (tylko odczyt),
+nie przez wczytywanie każdego dokumentu w Sferze — odpowiedź to milisekundy niezależnie od okna dat i nie obciąża kolejki do Subiekta.
+Konsekwencje:
+- lista obejmuje **wszystkie magazyny** (do v0.21.5 tylko magazyn sesji mostu — niewidoczny dla Ciebie); każdy wiersz ma
+  `warehouse_subiekt_id` (id magazynu dokumentu), a `warehouse_subiekt_id=` w zapytaniu zawęża do jednego magazynu;
+- dokumenty **anulowane** w Subiekcie nie są zwracane (wcześniej były pomijane w praktyce, bo nie dawały się wczytać);
+- `contractor_nip` / `contractor_name` to bieżące dane kartoteki nabywcy (jak dotąd), `type` nadal z prefiksu numeru;
+- `warehouse_subiekt_id` w `GET /invoices/{id}` jest `null` (ten endpoint czyta dokument przez Sferę);
+- błąd odczytu bazy = `502 SUBIEKT_QUERY_FAILED` (lista retry §4), bez cichego powrotu do wolnego trybu.
 
 **`type` (od v0.21.4) filtruje po typie dokumentu w Subiekcie** (`FS` = faktura sprzedaży, `KFS` = korekta), nie po prefiksie
 numeru. Dokument z niestandardowym symbolem numeracji (np. „FH 1/2026”) jest zwracany, a pole `type` w odpowiedzi nadal pochodzi
 z numeru (`"FH"`) — do v0.21.3 taki dokument był pomijany. Bez `type` lista zawiera wszystkie typy dokumentów z okna dat (bez zmian).
 
-**Wydajność = wąskie okno.** Most buduje listę, wczytując z Subiekta każdy dokument po kolei na jednym wątku, który obsługuje
-też wszystkie pozostałe wywołania (łącznie z `/health`). Szerokie okno bez `type` i bez `notes_contains` (np. cały miesiąc) może
-trwać dłużej niż Twój timeout. Zawężaj `from`/`to` (kilka dni) albo podawaj `notes_contains` — oba filtry działają po stronie bazy.
-Gdy rozłączysz się przed odpowiedzią, most od v0.21.4 przerywa pracę przy najbliższym dokumencie (do v0.21.3 kończył całą listę
-w tle i przez ten czas blokował pozostałe wywołania).
+**Wydajność.** Do v0.21.5 most budował listę, wczytując z Subiekta każdy dokument po kolei (0,5–1,5 s na dokument) na wątku
+obsługującym też wszystkie pozostałe wywołania, więc szerokie okno przekraczało timeout klienta. Od v0.21.6 lista idzie z bazy
+(wyżej) i to ograniczenie znika; `limit` nadal określa, ile **najnowszych** dokumentów dostaniesz.
 
 **`revision` (od v0.21.2) — znacznik treści wydruku FS/KFS.** Służy do odświeżania przechowywanego PDF, gdy operator zmieni
 dokument w Subiekcie (np. nazwę pozycji albo formę płatności — zmiany, których nie widać w kwotach).
@@ -794,6 +802,14 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
+
+### v0.21.6 (2026-11-10 — lista `GET /invoices` / `GET /receipts` z bazy, wszystkie magazyny)
+- **Lista jest czytana wprost z bazy Subiekta (tylko odczyt), nie przez Sferę** (§3.8): odpowiedź w milisekundach niezależnie od okna
+  dat (na v0.21.4/5 100 faktur nadal przekraczało 30 s, bo każdy dokument kosztował 0,5–1,5 s), bez obciążania kolejki do Subiekta.
+- **Nowe pole `warehouse_subiekt_id`** w każdym wierszu listy (id magazynu dokumentu) i **nowy filtr `warehouse_subiekt_id=`**
+  w zapytaniu. **Lista obejmuje wszystkie magazyny** (do v0.21.5 tylko magazyn sesji mostu). W `GET /invoices/{id}` pole jest `null`.
+- Dokumenty anulowane w Subiekcie nie są zwracane. Bez nowych kodów błędów: błąd odczytu bazy = `502 SUBIEKT_QUERY_FAILED` (jak dotąd
+  błąd Sfery). Pozostałe pola i ich znaczenie bez zmian.
 
 ### v0.21.5 (2026-11-10 — listing `GET /receipts` i każdy `type` tak jak `type=FS|KFS` w v0.21.4)
 - **`GET /api/v1/receipts` filtruje PZ po typie dokumentu w Subiekcie** (ten sam mechanizm, co `type=FS|KFS` w v0.21.4) — v0.21.4

@@ -93,13 +93,13 @@ przykłady tylko z fikcyjnymi danymi (NIP `1111111111`, EAN-y `5901...`), ZERO d
 |---|---|
 | `GET /api/v1/health` | Sesja Sfery + wersja Subiekta + `sql_connection` (patrz Diagnostyka) |
 | `GET /api/v1/products?ean=` / `GET /api/v1/contractors?nip=` | Lookup towaru / kontrahenta (COM) |
-| `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit` | Listing FS/KFS; `nip` → `dok_PlatnikId`; `type` → `dok_Typ` w filtrze `OtworzKolekcje` (od v0.21.4, wcześniej prefiks numeru po wczytaniu KAŻDEGO dokumentu); anulowanie klienta przerywa pętlę STA na granicy dokumentu (`InvoiceListingScan`); `revision` per element (od v0.21.2: jeden odczyt na wywołanie, polecenie SQL na partię ≤ 500 dokumentów) |
+| `GET /api/v1/invoices?from&to&type&notes_contains&nip&limit&warehouse_subiekt_id` | Listing FS/KFS. **Od v0.21.6 read-only SQL poza STA** (`InvoiceListingSql`: `dok__Dokument` + `adr__Ewid`, wszystkie magazyny, `warehouse_subiekt_id` w wierszu i jako filtr `dok_MagId`, bez `dok_Status = 2`; błąd SQL → 502, bez fallbacku na COM; `Bridge:InvoiceListingViaSql=false` = dawna ścieżka COM: `OtworzKolekcje` z `type` → `dok_Typ`, pętla `InvoiceListingScan` z anulowaniem per dokument, 0,5–1,5 s/dokument). `nip` → `dok_PlatnikId`; `revision` per element (od v0.21.2: jeden odczyt na wywołanie, polecenie SQL na partię ≤ 500 dokumentów) |
 | `GET /api/v1/invoices/{id}` / `/pdf` | Metadane FV + `revision` FS/KFS (od v0.21.2: `f1:`, skrót treści wydruku z read-only SQL, fail-soft `null`) / retro PDF |
 | `GET /api/v1/invoices/open-receivables` / `open-payables` | Otwarte rozrachunki sprzedaży (39) / zakupu (40) w oknie kwoty — kandydaci do matchingu |
 | `POST /api/v1/invoices` | Wystaw FS |
 | `POST /api/v1/invoices/{id}/corrections` | Wystaw KFS |
 | `POST /api/v1/invoices/{id}/ksef` / `GET` | Wyślij e-Fakturę do KSeF (advance maszyny stanów) / odczyt stanu |
-| `GET /api/v1/receipts?...` / `{id}/pdf` | Listing / PDF PZ |
+| `GET /api/v1/receipts?...` / `{id}/pdf` | Listing PZ (= `QueryInvoicesAsync` z `Type: "PZ"`, od v0.21.6 SQL jak `/invoices`) / PDF PZ |
 | `GET /api/v1/receipts/{id}` | Szczegóły PZ (od v0.21.0): pozycje read-only, `linked_documents` (FZ/KFS), `editability` jako fakty, `revision`, `issued_*` z `dok_MagRuch` (SQL fail-soft) |
 | `POST /api/v1/receipts` | Wystaw PZ (dropshipping) |
 | `PATCH /api/v1/receipts/{id}` | Zmień „Dokument dostawcy” (`original_number`) istniejącego PZ (od v0.21.0) — odczyt kontrolny po `Zapisz`, kod = dowód o skutku; `expected_revision` opcjonalne |
@@ -187,7 +187,7 @@ Logi: `C:\SubiektBridge\logs\subiekt-bridge-yyyyMMdd.log` (Serilog rolling daily
 `sql_connection` = `SELECT 1` przez własny `SqlConnection` (poza STA). **Sesja Sfery (COM) NIE używa SqlClienta** —
 zepsuty SqlClient daje `200` + `status: "degraded"` + `sql_connection: "down"`; `503` tylko przy padniętej sesji
 Sfery. `sfera_session` jest od v0.19.0 sprawdzane sondą (`IsSessionAlive`: `OtworzKolekcje("dok_Id=-1")`, runda do
-SQL), nie samą obecnością obiektu sesji — zamknięty Subiekt daje `503` od razu, martwa sesja jest resetowana. SqlClient używają: `/bank-transactions`, `/book`, `admin/query`, filtr `nip`, `revision` w `GET /invoices` i `/invoices/{id}` (fail-soft → `null`), `search` w open-receivables,
+SQL), nie samą obecnością obiektu sesji — zamknięty Subiekt daje `503` od razu, martwa sesja jest resetowana. SqlClient używają: **listing `GET /invoices` i `GET /receipts` (od v0.21.6, fail-closed → `502 SUBIEKT_QUERY_FAILED`)**, `/bank-transactions`, `/book`, `admin/query`, filtr `nip`, `revision` w `GET /invoices` i `/invoices/{id}` (fail-soft → `null`), `search` w open-receivables,
 lookup NIP przy FS/PZ (fail-closed → `503 CONTRACTOR_LOOKUP_UNAVAILABLE`), magazyn FS źródłowej przy KFS i — od v0.20.0 —
 skan duplikatów przy KAŻDYM FS/KFS/PZ/MM (fail-closed → `503 DUPLICATE_CHECK_UNAVAILABLE`; SqlClient down = żaden dokument
 nie powstanie). MM samo nie używa SqlClienta.

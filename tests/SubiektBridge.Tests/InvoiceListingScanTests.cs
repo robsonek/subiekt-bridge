@@ -78,6 +78,16 @@ public class InvoiceListingScanTests
         Assert.Equal(100, plan.FetchCap);
     }
 
+    [Theory]
+    [InlineData(4, "dok_MagId = 4")]
+    [InlineData(null, null)]
+    public void WarehouseClause_FiltersDokMagId_NullMeansAllVisible(int? warehouse, string? expected)
+    {
+        // Greptile PR #28: ścieżka awaryjna COM (InvoiceListingViaSql=false) ignorowała warehouse_subiekt_id - żądanie magazynu 4
+        // zwracało dokumenty magazynu sesji. dok_MagId to kolumna dok__Dokument, więc idzie do filtra OtworzKolekcje jak dok_Typ.
+        Assert.Equal(expected, InvoiceQueryFields.WarehouseClause(warehouse));
+    }
+
     [Fact]
     public void DokTyp_SymbolMap_MatchesConstants()
     {
