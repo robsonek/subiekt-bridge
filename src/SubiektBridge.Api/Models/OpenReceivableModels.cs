@@ -48,9 +48,9 @@ public sealed record OpenReceivableDto(
     [property: JsonPropertyName("remaining")] decimal Remaining,
     // ObiektPowiazanyId rozrachunku (kontrahent). null gdy rozrachunek nie jest wystawiony dla kontrahenta.
     [property: JsonPropertyName("contractor_id")] long? ContractorId,
-    // Nazwa kontrahenta (Kontrahenci.Wczytaj(ObiektPowiazanyId).Nazwa). null gdy nie udalo sie odczytac.
+    // Nazwa kontrahenta (kartoteka po ObiektPowiazanyId: adr_Nazwa = COM Kontrahent.Nazwa; od v0.21.7 z SQL). null gdy nie udalo sie odczytac.
     [property: JsonPropertyName("contractor_name")] string? ContractorName,
-    // Pelny numer dokumentu zrodlowego (NumerPelny rozrachunku), np. "FS 573/05/2026".
+    // Pelny numer dokumentu zrodlowego (NumerPelny rozrachunku), np. "FS 101/05/2026".
     [property: JsonPropertyName("number")] string Number,
     // Data dokumentu (nzf_Data, COM atrybut "Data"), YYYY-MM-DD. null gdy nie udalo sie odczytac.
     // Operator dopasowuje przelew do FV po dacie - swiezy przelew zwykle do swiezej FV.
@@ -59,7 +59,7 @@ public sealed record OpenReceivableDto(
     // kwota FV; "remaining" to ile jeszcze zostalo. Operator widzi czy to wplata pelna czy czesciowa.
     // 0 gdy nie udalo sie odczytac.
     [property: JsonPropertyName("original")] decimal Original = 0m,
-    // NIP kontrahenta (z tego samego Kontrahenci.Wczytaj co ContractorName). null dla osob prywatnych
+    // NIP kontrahenta (z tego samego odczytu kartoteki co ContractorName). null dla osob prywatnych
     // (B2C) lub gdy nie udalo sie odczytac. Pomaga rozroznic firmy o podobnych nazwach.
     [property: JsonPropertyName("nip")] string? Nip = null
 );

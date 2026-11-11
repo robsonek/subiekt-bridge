@@ -188,10 +188,12 @@ Logi: `C:\SubiektBridge\logs\subiekt-bridge-yyyyMMdd.log` (Serilog rolling daily
 zepsuty SqlClient daje `200` + `status: "degraded"` + `sql_connection: "down"`; `503` tylko przy padniętej sesji
 Sfery. `sfera_session` jest od v0.19.0 sprawdzane sondą (`IsSessionAlive`: `OtworzKolekcje("dok_Id=-1")`, runda do
 SQL), nie samą obecnością obiektu sesji — zamknięty Subiekt daje `503` od razu, martwa sesja jest resetowana. SqlClient używają: **listing `GET /invoices` i `GET /receipts` (od v0.21.6, fail-closed → `502 SUBIEKT_QUERY_FAILED`)**, `/bank-transactions`, `/book`, `admin/query`, filtr `nip`, `revision` w `GET /invoices` i `/invoices/{id}` (fail-soft → `null`), `search` w open-receivables,
+**NIP/nazwa kontrahenta w `GET /invoices/{id}`, `GET`/`PATCH /receipts/{id}` i open-receivables/payables (od v0.21.7, `ContractorNipName`:
+`adr__Ewid` na STA zamiast `Kontrahenci.Wczytaj`, wartości bajt w bajt jak COM; awaria SQL → dawny COM + WARNING; `Bridge:ContractorReadViaSql=false` = tylko COM)**,
 lookup NIP przy FS/PZ (fail-closed → `503 CONTRACTOR_LOOKUP_UNAVAILABLE`), magazyn FS źródłowej przy KFS i — od v0.20.0 —
 skan duplikatów przy KAŻDYM FS/KFS/PZ/MM (fail-closed → `503 DUPLICATE_CHECK_UNAVAILABLE`; SqlClient down = żaden dokument
 nie powstanie). MM samo nie używa SqlClienta.
-**`/contractors?nip=` to COM, nie SQL.** `last_invoice_at` trzymane w pamięci — po restarcie `null`.
+**`/contractors?nip=` to COM, nie SQL** (osobny kod po Symbolu — `Kontrahenci.Wczytaj` przy złym planie procedury InsERT ~2,4 s). `last_invoice_at` trzymane w pamięci — po restarcie `null`.
 
 ## Klient Laravel-side
 

@@ -83,7 +83,8 @@ dokument** (pełne wczytanie + `Kontrahenci.Wczytaj`), 100 FS nie mieściło si�
 w każdym wierszu (`warehouse_subiekt_id`), `dok_Status <> 2`, typ spoza listy `DokTyp.BySymbol` po prefiksie **realnej** kolumny
 `dok_NrPelny`, `type` w DTO nadal z numeru. Błąd SQL → wyjątek → `502 SUBIEKT_QUERY_FAILED`; **ZAKAZ cichego fallbacku na COM**
 (wróciłby tryb blokujący most). Nagłówki dokumentów KSeF są czytelne (szyfrowany tylko XML w `ksef_Pliki`). Ścieżka COM poniżej żyje
-wyłącznie pod `Bridge:InvoiceListingViaSql=false` (przełącznik awaryjny). `GET /invoices/{id}` nadal COM (`warehouse_subiekt_id = null`).
+wyłącznie pod `Bridge:InvoiceListingViaSql=false` (przełącznik awaryjny). `GET /invoices/{id}` nadal COM (`warehouse_subiekt_id = null`;
+NIP/nazwa kontrahenta od v0.21.7 z SQL — sekcja niżej).
 
 ### Ścieżka COM (tylko `InvoiceListingViaSql=false`) — jeden job STA blokuje cały most
 
@@ -95,6 +96,24 @@ dotyczy też PZ (v0.21.4 znało tylko FS/KFS i listing PZ został w starym trybi
 pobraniem kolejnego dokumentu; **anulowanie wołającego sprawdzane na granicy dokumentu** (`RunOnStaAsync` patrzy na token tylko
 przed startem joba — rdzeń musi dostać `ct` sam); każdy pobrany dokument `Zamknij()` w `finally`. Fallback `Element(i)` (brak
 IEnumVARIANT) idzie przez tę samą pętlę. Każdy nowy listing na kolekcji Sfery: filtry do SQL w `OtworzKolekcje`, token do pętli.
+
+## NIP/nazwa kontrahenta w odczytach — od v0.21.7 SQL `adr__Ewid`, NIE `Kontrahenci.Wczytaj`
+
+**`Kontrahenci.Wczytaj(id)` uruchamia procedurę InsERT `spRew_KPE_MaZapisy` (2×)**; od 2026-11-09 jej plan w SQL Serverze klienta
+był zły (~1 s, ~1,13 mln odczytów stron) → +~2,4 s na każdy `GET /invoices/{id}` / `GET /receipts/{id}` (procedura zaszyfrowana, plan
+naprawia tylko admin SQL). `ReadContractorNipName` (wołający: `MapDokumentToQueryItem`, `ReadReceipt` — GET i PATCH PZ, `ResolveContractor`
+— open-receivables/payables) czyta więc `SELECT a.adr_NIP, a.adr_Nazwa FROM adr__Ewid a WHERE a.adr_IdObiektu = @kh AND a.adr_TypAdresu = 1`
+(`ContractorNipName`, czysta logika + testy; SQL synchronicznie na STA — seek po `UNIQUE(adr_IdObiektu, adr_TypAdresu)`, ms).
+- **Ścisły parytet z COM** (sondy prod 11.11, 14 dokumentów firma/osoba/zagraniczny × FS/KFS/PZ — zgodne co do znaku): COM `.Nazwa`
+  = `adr_Nazwa` (nazwa skrócona, także dla osoby), `.NIP` = `adr_NIP`; COM NIE przycina (178 nazw ze spacją brzegową) i dla osoby daje
+  `""`. Dlatego mapowanie BEZ normalizacji — **nie** `InvoiceListingSql.TrimmedOrNull` (listing przycina i daje `null`; świadoma różnica
+  opisana w kontrakcie §3.8).
+- Brak wiersza → `(null, null)` bez COM (= dawny COM po nieudanym `Wczytaj`; prod: 0 kontrahentów bez adresu głównego).
+- **Awaria SQL → dawna ścieżka COM + WARNING** (inaczej niż listing: tu fallback to jedno `Wczytaj`, czyli stan sprzed v0.21.7, nie
+  blokada mostu). `Bridge:ContractorReadViaSql=false` (czytane przy starcie) = wyłącznie COM. Blokada puli SqlClient po padnięciu SQL nie
+  obejmuje timeoutu polecenia (5 s): w open-receivables najgorszy przypadek = N × (5 s + COM) i N wpisów WARNING — przyjęte, rzadkie.
+- Zostają na COM: `/contractors?nip=` (`FindContractorByNipAsync`, po Symbolu) i wystawianie (`EnsureContractor`: `Istnieje`/`Wczytaj`/
+  `Dodaj` po Symbolu) — każdy taki krok płaci koszt procedury przy złym planie.
 
 ## `OtworzKolekcje` zwraca duchy
 

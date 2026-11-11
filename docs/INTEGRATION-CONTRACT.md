@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.21.6** (2026-11-10; v0.21.5 wydane 2026-11-10). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
+> **Dotyczy:** SubiektBridge **v0.21.7** (2026-11-11; v0.21.6 wydane 2026-11-10). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -320,6 +320,8 @@ Konsekwencje:
   `warehouse_subiekt_id` (id magazynu dokumentu), a `warehouse_subiekt_id=` w zapytaniu zawęża do jednego magazynu;
 - dokumenty **anulowane** w Subiekcie nie są zwracane (wcześniej były pomijane w praktyce, bo nie dawały się wczytać);
 - `contractor_nip` / `contractor_name` to bieżące dane kartoteki nabywcy (jak dotąd), `type` nadal z prefiksu numeru;
+  lista podaje je przycięte, a pustą wartość jako `null`, natomiast `GET /invoices/{id}` i `GET /receipts/{id}` — dosłownie
+  jak w kartotece (kontrahent bez NIP = `""`, spacje na brzegu nazwy zachowane); porównując oba źródła, normalizuj;
 - `warehouse_subiekt_id` w `GET /invoices/{id}` jest `null` (ten endpoint czyta dokument przez Sferę);
 - błąd odczytu bazy = `502 SUBIEKT_QUERY_FAILED` (lista retry §4), bez cichego powrotu do wolnego trybu.
 
@@ -492,14 +494,14 @@ sprzedaży z otwartym saldem `WartoscBiezaca>0`), **NIE matchuje** — dopasowan
 ```jsonc
 [
   {
-    "document_id": "sub_53447",         // bridge id → POST /invoices/{id}/settlements
-    "document_subiekt_id": 53447,
+    "document_id": "sub_53401",         // bridge id → POST /invoices/{id}/settlements
+    "document_subiekt_id": 53401,
     "doc_type": "FS",                    // etykieta z numeru (FS/FZ/...)
     "currency": "PLN",
-    "remaining": 3372.50,                // pozostało do zapłaty (po tym matchujesz)
-    "contractor_id": 13292,
-    "contractor_name": "Szyszka Krzysztof",
-    "number": "FS 573/05/2026"
+    "remaining": 1230.00,                // pozostało do zapłaty (po tym matchujesz)
+    "contractor_id": 13201,
+    "contractor_name": "Testowy Jan",
+    "number": "FS 101/05/2026"
   }
 ]
 ```
@@ -802,6 +804,14 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
+
+### v0.21.7 (2026-11-11 — dane kontrahenta w odczycie pojedynczego dokumentu z bazy)
+- `contractor_nip` / `contractor_name` w `GET /invoices/{id}`, `GET` i `PATCH /receipts/{id}` oraz `contractor_name` / `nip`
+  w `GET /invoices/open-receivables` i `open-payables` są czytane wprost z kartoteki w bazie Subiekta (tylko odczyt), bez wczytywania
+  kontrahenta w Sferze. **Wartości bez zmian** (te same pola, ten sam zapis co do znaku, w tym `""` dla kontrahenta bez NIP
+  w `GET /{id}`); odczyt pojedynczego dokumentu nie zależy już od wolnej procedury bazy wołanej przy wczytaniu kontrahenta
+  (u klienta od 2026-11-09 +~2,4 s na każdy `GET /invoices/{id}` i `GET /receipts/{id}`). Awaria odczytu bazy = dotychczasowa,
+  wolniejsza ścieżka przez Sferę (ten sam wynik, bez nowych kodów błędów).
 
 ### v0.21.6 (2026-11-10 — lista `GET /invoices` / `GET /receipts` z bazy, wszystkie magazyny)
 - **Lista jest czytana wprost z bazy Subiekta (tylko odczyt), nie przez Sferę** (§3.8): odpowiedź w milisekundach niezależnie od okna

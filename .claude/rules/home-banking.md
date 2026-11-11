@@ -80,7 +80,7 @@ dopasowania z wpłatą), Laravel matchuje. `open-payables` = lustro dla zakupu (
 - **Czysto COM, NIE raw SQL na `nz__Finanse`** (właściciel wprost; raw SQL na `nz__Finanse` kruche).
   Mapowania COM `FinDokument` (CHM, od GT 1.13): `DokumentZrodlowyId`=`nzf_IdDokumentAuto` (id dok. handlowego →
   `document_subiekt_id`); `WartoscBiezaca`=pozostało (RO, PLN); `NumerPelny` rozrachunku=numer dok. źródłowego
-  (`doc_type`=prefiks; COM `Typ` ≠ `nzf_Typ` od GT 1.17); `ObiektPowiazanyId`+`Kontrahenci.Wczytaj(id).Nazwa`;
+  (`doc_type`=prefiks; COM `Typ` ≠ `nzf_Typ` od GT 1.17); `ObiektPowiazanyId` + nazwa/NIP z kartoteki (`ReadContractorNipName`: od v0.21.7 SQL `adr__Ewid`, awaria → `Kontrahenci.Wczytaj(id)`);
   `Waluta`=symbol sl_Waluta.
 - **PERF (fix po prod v0.11.0: 35s / timeout >90s → <kilka s):** WSZYSTKIE predykaty
   (kwota/waluta/kontrahent/data) idą do **filtra `OtworzKolekcje`** (raw kolumny `nz__Finanse`, jak `/bank-operations`),
