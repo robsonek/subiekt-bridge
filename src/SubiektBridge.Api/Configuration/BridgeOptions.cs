@@ -58,6 +58,13 @@ public sealed class BridgeOptions
     /// wyłącznie jawny przełącznik awaryjny, nigdy cichy fallback po błędzie SQL.
     /// </summary>
     public bool InvoiceListingViaSql { get; init; } = true;
+
+    /// <summary>
+    /// NIP i nazwa kontrahenta w odczytach pojedynczego dokumentu (GET /invoices/{id}, GET/PATCH /receipts/{id}) i open-receivables/payables
+    /// z read-only SQL (adr__Ewid, od v0.21.7, ContractorNipName) zamiast COM Kontrahenci.Wczytaj (~2,4 s przy złym planie procedury InsERT).
+    /// **Domyślnie TRUE.** Awaria SQL i tak wraca do COM (WARNING); FALSE = wyłącznie dawna ścieżka COM (przełącznik awaryjny, czytany przy starcie).
+    /// </summary>
+    public bool ContractorReadViaSql { get; init; } = true;
 }
 
 public sealed class SubiektOptions

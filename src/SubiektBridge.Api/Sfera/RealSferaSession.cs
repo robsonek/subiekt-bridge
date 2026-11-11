@@ -494,9 +494,8 @@ public sealed class RealSferaSession : ISferaSession
         decimal? net = TryGetDecimal(dok, "WartoscNetto");
         decimal? vat = TryGetDecimal(dok, "WartoscVat");
 
-        // NIP/Nazwa kontrahenta - NabywcaInfo na SuDokument bywa pusty.
-        // Lookup do Kontrahenci.Wczytaj(KontrahentId) jest niezbedny do uzyskania
-        // pelnych metadanych. N+1 (200 lookupow per listing) ale Sfera dziala lokalnie.
+        // NIP/Nazwa kontrahenta - NabywcaInfo na SuDokument bywa pusty, wiec czytamy kartoteke po KontrahentId
+        // (od v0.21.7 read-only SQL z adr__Ewid zamiast Kontrahenci.Wczytaj - ReadContractorNipName).
         var (nip, nazwa) = contractorId is { } cid ? ReadContractorNipName(cid, nameof(MapDokumentToQueryItem)) : (null, null);
 
         return new InvoiceQueryItemDto(
@@ -514,10 +513,52 @@ public sealed class RealSferaSession : ISferaSession
     }
 
     /// <summary>
-    /// [STA] NIP + Nazwa kontrahenta (Kontrahenci.Wczytaj) z deterministycznym zwolnieniem RCW: Zamknij + Marshal.ReleaseComObject w finally
-    /// (takze gdy Zamknij rzuci - Codex r4 #5); uchwyt jako object (bez dynamic do prywatnych helperow). Best-effort: blad -> (null, null).
+    /// [STA] NIP + Nazwa kontrahenta - od v0.21.7 z read-only SQL (adr__Ewid, ContractorNipName; spec
+    /// docs/superpowers/specs/2026-11-11-kontrahent-nip-nazwa-sql-design.md) zamiast COM Kontrahenci.Wczytaj, ktore uruchamia procedure InsERT
+    /// (zly plan w SQL Serverze klienta 2026-11-09: ~2,4 s na kazdy GET /invoices/{id} i /receipts/{id}). Wartosci bajt w bajt jak z COM
+    /// (bez trim, osoba bez NIP = ""). Awaria SQL -> dawna sciezka COM + WARNING; Bridge:ContractorReadViaSql=false -> tylko COM.
+    /// Best-effort jak dotad: nigdy nie rzuca, blad obu sciezek -> (null, null).
     /// </summary>
     private (string? Nip, string? Name) ReadContractorNipName(long contractorId, string caller)
+        => ContractorNipName.Resolve(contractorId, _bridgeOptions.ContractorReadViaSql,
+            ReadContractorNipNameSql,
+            id => ReadContractorNipNameCom(id, caller),
+            ex => _logger.LogWarning(ex,
+                "{Caller}: NIP/nazwa kontrahenta {Id} z SQL nieudane - powrot do COM Kontrahenci.Wczytaj (wolniej, ten sam wynik)",
+                caller, contractorId));
+
+    /// <summary>
+    /// [STA, synchronicznie - jak FindContractorIdByNip/ReadReceiptSqlFacts] Punktowy odczyt po UNIQUE(adr_IdObiektu, adr_TypAdresu) trwa
+    /// milisekundy, wiec kolejka STA jest praktycznie wolna (wyniesienie poza STA = przebudowa 5 sciezek, w tym petli open-receivables).
+    /// ConnectTimeout 5 s jak listing/rewizje (ten sam ciag polaczenia = wspolna pula; przy padnietym SQL pula blokuje kolejne otwarcia,
+    /// wiec 5 s nie placi kazde zadanie), CommandTimeout 5 s. Wyjatek propaguje do ContractorNipName.Resolve (-> sciezka COM).
+    /// </summary>
+    private (string? Nip, string? Name) ReadContractorNipNameSql(long contractorId)
+    {
+        var parameter = ContractorNipName.Parameter(contractorId);
+        var connStr = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(SqlConnStr()) { ConnectTimeout = 5 }.ToString();
+        using var conn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = ContractorNipName.Sql;
+        cmd.CommandTimeout = 5;
+        cmd.Parameters.Add(parameter.Name, parameter.Type).Value = parameter.Value;
+        using var reader = cmd.ExecuteReader(System.Data.CommandBehavior.SingleRow);
+        if (!reader.Read()) return ContractorNipName.Map(null);
+
+        var row = new Dictionary<string, object?>(reader.FieldCount, StringComparer.Ordinal);
+        for (int i = 0; i < reader.FieldCount; i++)
+        {
+            row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+        }
+        return ContractorNipName.Map(row);
+    }
+
+    /// <summary>
+    /// [STA] Dawna sciezka (do v0.21.6 jedyna): Kontrahenci.Wczytaj z deterministycznym zwolnieniem RCW: Zamknij + Marshal.ReleaseComObject
+    /// w finally (takze gdy Zamknij rzuci - Codex r4 #5); uchwyt jako object (bez dynamic do prywatnych helperow). Best-effort: blad -> (null, null).
+    /// </summary>
+    private (string? Nip, string? Name) ReadContractorNipNameCom(long contractorId, string caller)
     {
         object? kontr = null;
         try
@@ -2229,7 +2270,7 @@ public sealed class RealSferaSession : ISferaSession
 
         // TYTUL: chcemy SUROWY opis przelewu (hb_Tytul) jak operacja reczna w GUI. DodajOperacjeBankowa domyslnie
         // ustawia GenerujTytulemNaPodstawieRozl=true (mimo nzf_GenerujTytulem DEFAULT 0 w schemacie) - wtedy Subiekt
-        // po rozliczeniu REGENERUJE "Tytulem" z numerow rozrachunkow ("FS 573/05(3372.50)"), nadpisujac nasz surowy
+        // po rozliczeniu REGENERUJE "Tytulem" z numerow rozrachunkow ("FS 101/05(1230.00)"), nadpisujac nasz surowy
         // tytul (stad wczesniej Tytulem "nie dzialal"). GUI ma ten checkbox ODZNACZONY. Wylaczamy autogeneracje
         // (atrybut FinDokument od GT 1.32 -> nzf_GenerujTytulem) PRZED ustawieniem Tytulem. Bezwarunkowo, by byc 1:1
         // z reczna operacja (idempotentne; przy OperacjaBezDanychKh=true Sfera i tak sama daje false - CHM).
@@ -3162,7 +3203,7 @@ public sealed class RealSferaSession : ISferaSession
                     long? docId = TryReadInt64((object)roz, "DokumentZrodlowyId");
                     if (!docId.HasValue || docId.Value <= 0) continue;
 
-                    // NumerPelny rozrachunku = numer dokumentu zrodlowego ("FS 573/05/2026"); doc_type = prefiks
+                    // NumerPelny rozrachunku = numer dokumentu zrodlowego ("FS 101/05/2026"); doc_type = prefiks
                     // (COM Typ != nzf_Typ od GT 1.17, wiec etykiety NIE bierzemy z Typ).
                     string number = TryReadString((object)roz, "NumerPelny") ?? "";
                     string docType = number.Length > 0 ? number.Split(' ', 2)[0] : "";
@@ -3219,7 +3260,7 @@ public sealed class RealSferaSession : ISferaSession
     }
 
     /// <summary>
-    /// Nazwa + NIP kontrahenta po ObiektPowiazanyId (jeden Kontrahenci.Wczytaj(id) -> Nazwa + NIP).
+    /// Nazwa + NIP kontrahenta po ObiektPowiazanyId (jeden odczyt -> Nazwa + NIP; od v0.21.7 SQL z adr__Ewid, awaria -> Kontrahenci.Wczytaj).
     /// Best-effort jak MapDokumentToQueryItem: blad/nie-kontrahent -> (null, null) (NIE wywala listingu).
     /// Wolane na STA workerze, tylko dla wierszy w oknie (&lt;= limit), wiec N+1 jest ograniczone. NIP null dla
     /// osob prywatnych (B2C). Jeden odczyt na oba pola - nie dublujemy Wczytaj.
@@ -3227,7 +3268,7 @@ public sealed class RealSferaSession : ISferaSession
     private (string? Name, string? Nip) ResolveContractor(long? contractorId)
     {
         if (!contractorId.HasValue) return (null, null);
-        // Jeden Wczytaj z Zamknij + ReleaseComObject w finally (ReadContractorNipName); NIP normalizowany ''->null (B2C) przez
+        // Jeden odczyt (ReadContractorNipName: SQL, awaria -> Wczytaj z Zamknij + ReleaseComObject); NIP normalizowany ''->null (B2C) przez
         // OpenReceivableFields.NormalizeNip - logika wydzielona i pokryta testem jednostkowym (metoda COM/windows-only).
         var (nip, name) = ReadContractorNipName(contractorId.Value, "QueryOpenReceivables");
         return (name, OpenReceivableFields.NormalizeNip(nip));
