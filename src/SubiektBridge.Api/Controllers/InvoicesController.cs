@@ -70,7 +70,16 @@ public sealed class InvoicesController : ControllerBase
         }
 
         // Jeden odczyt rewizji na całą listę (bez N+1; SQL: polecenie na partię ≤ 500); ta sama funkcja co GET {id} - ta sama rewizja dla tego samego stanu.
-        var revisions = await ReadRevisionsSoftAsync(items.Select(i => i.SubiektId).Distinct().ToList(), ct);
+        IReadOnlyDictionary<long, string?> revisions;
+        try
+        {
+            revisions = await ReadRevisionsSoftAsync(items.Select(i => i.SubiektId).Distinct().ToList(), ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Rozłączenie klienta w fazie rewizji = to samo co w fazie listy: 499 bez wpisu błędu, nie nieobsłużony wyjątek.
+            return ClientDisconnect.Result(_logger, "QueryInvoices");
+        }
         return Ok(items.Select(i => i with { Revision = revisions.GetValueOrDefault(i.SubiektId) }).ToList());
     }
 
@@ -209,7 +218,15 @@ public sealed class InvoicesController : ControllerBase
                 Code: "INVOICE_NOT_FOUND",
                 Message: $"FV o subiekt_id={subiektId} nie istnieje w Subiekcie."));
         }
-        var revisions = await ReadRevisionsSoftAsync(new[] { item.SubiektId }, ct);
+        IReadOnlyDictionary<long, string?> revisions;
+        try
+        {
+            revisions = await ReadRevisionsSoftAsync(new[] { item.SubiektId }, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return ClientDisconnect.Result(_logger, "GetInvoice");
+        }
         return Ok(item with { Revision = revisions.GetValueOrDefault(item.SubiektId) });
     }
 
@@ -217,7 +234,8 @@ public sealed class InvoicesController : ControllerBase
 
     /// <summary>
     /// Rewizja FS/KFS (v0.21.2) fail-soft: awaria read-only SQL / brak kolumny / nieznany typ = revision null dla całego wywołania + WARNING,
-    /// pozostałe pola odpowiedzi bez zmian (awaria odczytu rewizji nie psuje GET ani listy). Anulowanie żądania propaguje.
+    /// pozostałe pola odpowiedzi bez zmian (awaria odczytu rewizji nie psuje GET ani listy). Anulowanie żądania propaguje do akcji,
+    /// która zamienia je na 499 (ClientDisconnect) - nigdy na revision=null ani 502.
     /// </summary>
     private async Task<IReadOnlyDictionary<long, string?>> ReadRevisionsSoftAsync(IReadOnlyCollection<long> ids, CancellationToken ct)
     {
