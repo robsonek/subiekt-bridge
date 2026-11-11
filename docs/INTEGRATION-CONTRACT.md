@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.23.0** (2026-11-11; v0.22.0 wydane 2026-11-11). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
+> **Dotyczy:** SubiektBridge **v0.24.0** (2026-11-11; v0.23.0 wydane 2026-11-11). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -786,6 +786,10 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
   `503` = Subiekt/Sfera offline, wstrzymaj wysyłkę (circuit-breaker). Od v0.19.0 health **sonduje** sesję
   zapytaniem do bazy (nie tylko sprawdza, czy obiekt sesji istnieje) — zamknięty przez operatora Subiekt daje `503`
   od razu, nie dopiero przy pierwszym padniętym żądaniu.
+  **`status: "busy"` + `sfera_session: "busy"` z `200` (od v0.24.0):** most żyje, ale Subiekt wykonuje jedno długie zadanie
+  i sprawdzenie sesji nie zmieściło się w 5 s. `busy_for_seconds` = od ilu sekund trwa to zadanie, `queue_depth` = ile wywołań
+  czeka lub trwa (do v0.23.0 zawsze `0`). Traktuj jak „jeszcze nie gotowy": wstrzymaj kampanię i sprawdź ponownie za chwilę;
+  to nie jest awaria i nie wymaga restartu, dopóki `busy_for_seconds` nie rośnie przez wiele minut.
   `sql_connection` (`"ok"`/`"down"`) = osobne połączenie mostu do bazy (`/bank-transactions`, `/book`,
   filtr `nip`, `search` w open-receivables/payables, dopasowanie kontrahenta po NIP przy wystawianiu FS).
   `200` + `status: "degraded"` + `sql_connection: "down"` = sesja Sfery działa, ale zapytania SQL mostu
@@ -804,6 +808,15 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
+
+### v0.24.0 (2026-11-11 — `/health` nie czeka na zajęty Subiekt, przerwanie pozostałych list, jedna aktualizacja naraz)
+- **`GET /health`: nowy stan `status: "busy"` / `sfera_session: "busy"` z kodem `200`** i nowe pole `busy_for_seconds`
+  (`null`, gdy Subiekt jest wolny). `queue_depth` pokazuje prawdziwą liczbę wywołań w kolejce (dotąd zawsze `0`). Do v0.23.0
+  `/health` przy zajętym Subiekcie czekał do limitu czasu klienta i kończył się `503`. Opis: §8.
+- **`GET /bank-operations`, `/invoices/open-receivables`, `/invoices/open-payables`:** rozłączenie klienta przerywa budowanie listy
+  przy najbliższym wierszu (jak `GET /invoices` od v0.21.4). Odpowiedzi bez zmian.
+- **`POST /admin/update`:** drugie żądanie w ciągu 10 minut od zaplanowanej aktualizacji nie uruchamia drugiego skryptu. Odpowiedź
+  to nadal `202` w tym samym kształcie, z nowym polem `already_scheduled: true` i `scheduled_at` pierwszego żądania.
 
 ### v0.23.0 (2026-11-11 — most na .NET 11)
 - Most działa na .NET 11 (dotąd .NET 10). **Dla klienta API nic się nie zmienia**: te same żądania, odpowiedzi i kody błędów.

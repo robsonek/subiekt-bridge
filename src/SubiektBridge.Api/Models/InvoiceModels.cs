@@ -444,7 +444,10 @@ public sealed record HealthResponseDto(
     [property: JsonPropertyName("last_error")] string? LastError = null,
     // "ok" / "down" / "unknown" - własne połączenie SqlClient (raw SQL), niezależne od sesji Sfery.
     [property: JsonPropertyName("sql_connection")] string SqlConnection = "unknown",
-    [property: JsonPropertyName("sql_error")] string? SqlError = null
+    [property: JsonPropertyName("sql_error")] string? SqlError = null,
+    // v0.24.0: od ilu sekund trwa bieżące zadanie na wątku Sfery (null = wątek wolny). Przy status "busy" sonda sesji nie zdążyła
+    // się wykonać w budżecie - most żyje, ale Subiekt jest zajęty jednym długim zadaniem.
+    [property: JsonPropertyName("busy_for_seconds")] double? BusyForSeconds = null
 );
 
 // ----------------------------- Raw -----------------------------

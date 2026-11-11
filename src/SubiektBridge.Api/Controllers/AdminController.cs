@@ -32,6 +32,14 @@ public sealed class AdminController : ControllerBase
         @"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|EXEC|EXECUTE|MERGE|GRANT|REVOKE)\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
+    private const int UpdateDelaySeconds = 5;
+
+    /// <summary>
+    /// Jedna zaplanowana aktualizacja na proces (kontroler jest tworzony per żądanie, więc bramka jest statyczna). 10 min = z zapasem
+    /// ponad czas pobrania paczki i restartu (~1 min); proces i tak ginie przy udanej aktualizacji.
+    /// </summary>
+    private static readonly SelfUpdateGate UpdateGate = new(TimeSpan.FromMinutes(10));
+
     private readonly BridgeOptions _options;
     private readonly ISferaSession _sfera;
     private readonly ILogger<AdminController> _logger;
@@ -172,6 +180,21 @@ public sealed class AdminController : ControllerBase
         var installDir = ResolveInstallDir();
         var scriptPath = Path.Combine(installDir, "update-bridge.ps1");
 
+        // Bramka PRZED odświeżeniem skryptu: drugie żądanie w oknie nie nadpisuje pliku, który pierwszy skrypt właśnie wykonuje,
+        // i nie uruchamia drugiego update-bridge.ps1 (prod 2026-11-09: dwa równoległe skrypty po dwóch kliknięciach w panelu).
+        if (!UpdateGate.TryAcquire(DateTimeOffset.UtcNow, out var firstScheduledAt))
+        {
+            _logger.LogWarning("Self-update juz zaplanowany o {ScheduledAt:O} - kolejne zadanie nie uruchamia drugiego skryptu", firstScheduledAt);
+            return Accepted(new UpdateResponseDto(
+                ScheduledAt: firstScheduledAt.AddSeconds(UpdateDelaySeconds),
+                DelaySeconds: UpdateDelaySeconds,
+                EstimatedDurationSeconds: 60,
+                ScriptPath: scriptPath,
+                Message: "Update jest juz zaplanowany wczesniejszym zadaniem - drugi skrypt nie zostal uruchomiony. " +
+                         "Sprawdz /health w petli (~30-60s) zeby wiedziec kiedy nowa wersja wstala.",
+                AlreadyScheduled: true));
+        }
+
         // Pobierz swiezszy skrypt z main jesli proszony.
         if (request.RefreshScript)
         {
@@ -193,6 +216,7 @@ public sealed class AdminController : ControllerBase
 
         if (!System.IO.File.Exists(scriptPath))
         {
+            UpdateGate.Release();
             return UnprocessableEntity(new ErrorResponseDto(
                 Code: "SCRIPT_NOT_FOUND",
                 Message: $"update-bridge.ps1 nie istnieje w {installDir}. Pobierz recznie: " +
@@ -224,6 +248,7 @@ public sealed class AdminController : ControllerBase
         if (!string.IsNullOrWhiteSpace(resolvedTag) && !IsValidReleaseTag(resolvedTag))
         {
             _logger.LogError("GitHub latest tag has invalid format: {Tag}", resolvedTag);
+            UpdateGate.Release();
             return StatusCode(StatusCodes.Status502BadGateway, new ErrorResponseDto(
                 Code: "INVALID_RELEASE_TAG",
                 Message: "GitHub Releases zwrocil tag w nieprawidlowym formacie."));
@@ -242,7 +267,7 @@ public sealed class AdminController : ControllerBase
         // Start-Sleep daje Bridge'owi czas na zwrocenie 202 zanim service
         // zostanie zatrzymany. Calosc w jednym procesie powershell.exe
         // (cmd.exe + timeout nie dziala jako child serwisu Windows).
-        var delaySeconds = 5;
+        var delaySeconds = UpdateDelaySeconds;
         var psCommand = $"Start-Sleep -Seconds {delaySeconds}; & '{scriptPath}'{scriptArgs}";
         var psArgs = $"-NoProfile -ExecutionPolicy Bypass -Command \"{psCommand}\"";
 
@@ -265,6 +290,7 @@ public sealed class AdminController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Nie udalo sie spawnowac update-bridge.ps1");
+            UpdateGate.Release();
             return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponseDto(
                 Code: "SPAWN_FAILED",
                 Message: "Nie udalo sie uruchomic update-bridge.ps1: " + ex.Message));

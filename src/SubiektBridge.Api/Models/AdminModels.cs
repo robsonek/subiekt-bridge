@@ -24,5 +24,7 @@ public sealed record UpdateResponseDto(
     [property: JsonPropertyName("delay_seconds")] int DelaySeconds,
     [property: JsonPropertyName("estimated_duration_seconds")] int EstimatedDurationSeconds,
     [property: JsonPropertyName("script_path")] string ScriptPath,
-    [property: JsonPropertyName("message")] string Message
+    [property: JsonPropertyName("message")] string Message,
+    // v0.24.0: true = aktualizacja była już zaplanowana wcześniejszym żądaniem (scheduled_at = tamten moment); drugi skrypt NIE ruszył.
+    [property: JsonPropertyName("already_scheduled")] bool AlreadyScheduled = false
 );

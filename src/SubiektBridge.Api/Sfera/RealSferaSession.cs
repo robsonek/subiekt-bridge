@@ -36,6 +36,10 @@ public sealed class RealSferaSession : ISferaSession
     private readonly ILogger<RealSferaSession> _logger;
     private readonly Thread _staThread;
     private readonly BlockingCollection<Action> _workQueue = new();
+    // Stan kolejki STA dla /health (queue_depth, busy_for_seconds) - czytany poza STA, patrz HealthAsync.
+    private readonly StaQueueMonitor _staMonitor = new();
+    /// <summary>Ile /health czeka na sondę sesji w kolejce STA, zanim zgłosi "busy" (zimne otwarcie sesji na prod: 1-2,2 s).</summary>
+    private static readonly TimeSpan HealthProbeBudget = TimeSpan.FromSeconds(5);
     private dynamic? _subiekt;
     private DateTimeOffset? _lastInvoiceAt;
     private string? _subiektVersion;
@@ -73,6 +77,7 @@ public sealed class RealSferaSession : ISferaSession
         {
             foreach (var work in _workQueue.GetConsumingEnumerable())
             {
+                _staMonitor.Started(DateTimeOffset.UtcNow);
                 try
                 {
                     work();
@@ -81,6 +86,10 @@ public sealed class RealSferaSession : ISferaSession
                 {
                     // Wyjątki delegowane do TaskCompletionSource w wywołaniu.
                     _logger.LogDebug(ex, "STA worker action threw (delegated to caller)");
+                }
+                finally
+                {
+                    _staMonitor.Finished();
                 }
             }
         }
@@ -114,6 +123,7 @@ public sealed class RealSferaSession : ISferaSession
         // Rejestrację zwalniamy po wykonaniu joba, inaczej token trzyma referencję do tcs.
         var registration = ct.Register(() => tcs.TrySetCanceled(ct));
 
+        _staMonitor.Enqueued();
         try
         {
             _workQueue.Add(() =>
@@ -141,6 +151,7 @@ public sealed class RealSferaSession : ISferaSession
         {
             // Kolejka zamknieta (Dispose w trakcie) - job nie ruszy, wiec jego finally nie zwolni rejestracji.
             registration.Dispose();
+            _staMonitor.Abandoned();
             throw;
         }
 
@@ -223,7 +234,10 @@ public sealed class RealSferaSession : ISferaSession
 
     public async Task<SferaHealthDto> HealthAsync(CancellationToken ct)
     {
-        var sfera = await RunOnStaAsync(() =>
+        // Sonda stoi w tej samej kolejce STA co wszystko inne. Czekamy na nią najwyżej HealthProbeBudget: gdy STA jest zajęty długim
+        // jobem, zgłaszamy "busy" z prawdziwym stanem kolejki zamiast wisieć do limitu klienta (do v0.23.0: 30 s i 503 - most wyglądał
+        // na martwy). Po budżecie token sondy jest anulowany, więc RunOnStaAsync pominie ją, gdy dojdzie do czoła kolejki.
+        var (probed, probeResult) = await StaProbe.RunAsync(token => RunOnStaAsync(() =>
         {
             try
             {
@@ -241,11 +255,34 @@ public sealed class RealSferaSession : ISferaSession
                 ResetSessionOnSta();
                 return new SferaHealthDto("unknown", false, _lastInvoiceAt, _lastError);
             }
-        }, ct);
+        }, token), HealthProbeBudget, ct);
+
+        SferaHealthDto sfera;
+        if (probed && probeResult is not null)
+        {
+            sfera = probeResult;
+        }
+        else
+        {
+            // SessionActive = ostatni znany stan (obiekt sesji istnieje), NIE wynik sondy - Map i tak zwraca "busy".
+            sfera = new SferaHealthDto(_subiektVersion ?? "unknown", (object?)_subiekt is not null, _lastInvoiceAt, _lastError) with { StaBusy = true };
+        }
 
         // SQL poza STA: ping nie blokuje kolejki COM (connect timeout do 5 s).
         var sqlError = await PingSqlAsync(ct);
-        return sfera with { SqlConnectionOk = sqlError is null, SqlError = sqlError };
+        var queue = _staMonitor.Snapshot(DateTimeOffset.UtcNow);
+        if (sfera.StaBusy)
+        {
+            _logger.LogWarning("Health: watek STA zajety od {BusyFor:F0} s, kolejka {Depth} - sonda sesji pominieta (status busy)",
+                queue.BusyFor?.TotalSeconds ?? 0, queue.Depth);
+        }
+        return sfera with
+        {
+            SqlConnectionOk = sqlError is null,
+            SqlError = sqlError,
+            QueueDepth = queue.Depth,
+            StaBusyForSeconds = queue.BusyFor?.TotalSeconds,
+        };
     }
 
     /// <summary>
@@ -1341,17 +1378,17 @@ public sealed class RealSferaSession : ISferaSession
 
     public Task<IReadOnlyList<BankOperationDto>> QueryBankOperationsAsync(BankOperationQueryRequestDto request, CancellationToken ct)
     {
-        return RunOnStaAsync<IReadOnlyList<BankOperationDto>>(() => QueryBankOperationsCore(request), ct);
+        return RunOnStaAsync<IReadOnlyList<BankOperationDto>>(() => QueryBankOperationsCore(request, ct), ct);
     }
 
     public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenReceivablesAsync(OpenReceivablesQueryRequestDto request, CancellationToken ct)
     {
-        return RunOnStaAsync<IReadOnlyList<OpenReceivableDto>>(() => QueryOpenSettlementsCore(39, request), ct);
+        return RunOnStaAsync<IReadOnlyList<OpenReceivableDto>>(() => QueryOpenSettlementsCore(39, request, ct), ct);
     }
 
     public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenPayablesAsync(OpenReceivablesQueryRequestDto request, CancellationToken ct)
     {
-        return RunOnStaAsync<IReadOnlyList<OpenReceivableDto>>(() => QueryOpenSettlementsCore(40, request), ct);
+        return RunOnStaAsync<IReadOnlyList<OpenReceivableDto>>(() => QueryOpenSettlementsCore(40, request, ct), ct);
     }
 
     // Bank transactions (hb_Transakcja) - read-only SQL (hb_Transakcja nie jest wystawione przez Sfere).
@@ -3055,7 +3092,7 @@ public sealed class RealSferaSession : ISferaSession
         throw new SettlementException(SettlementError.SettlementNotFound, $"Rozliczenie {rozliczenieId} nie istnieje dla dokumentu {documentSubiektId}");
     }
 
-    private IReadOnlyList<BankOperationDto> QueryBankOperationsCore(BankOperationQueryRequestDto request)
+    private IReadOnlyList<BankOperationDto> QueryBankOperationsCore(BankOperationQueryRequestDto request, CancellationToken ct)
     {
         // Filtr po KOLUMNIE DB nzf_Typ (NIE FinDokument.Typ - od v1.17 enum Sfery != nzf_Typ).
         // 19 = BP (wplata), 20 = BW (wyplata).
@@ -3078,7 +3115,8 @@ public sealed class RealSferaSession : ISferaSession
         try
         {
             kolekcja = Session.FinManager.OtworzKolekcje(filter, "nzf_Data DESC");
-            foreach (dynamic op in (System.Collections.IEnumerable)kolekcja)
+            // Anulowanie sprawdzane przed pobraniem każdego elementu (CancellableEnumeration) - po rozłączeniu klienta job zwalnia STA.
+            foreach (dynamic op in CancellableEnumeration.Each((System.Collections.IEnumerable)kolekcja, ct))
             {
                 try
                 {
@@ -3136,7 +3174,7 @@ public sealed class RealSferaSession : ISferaSession
     // Wspolny rdzen dla open-receivables (nzfTyp=39, naleznosci) i open-payables (nzfTyp=40, zobowiazania).
     // Jedyna roznica miedzy stronami to nzf_Typ; okno kwoty/kontrahent/data/search + ResolveContractor + scan-cap
     // sa identyczne (rozrachunek zakupu i sprzedazy maja ten sam ksztalt atrybutow FinDokument).
-    private IReadOnlyList<OpenReceivableDto> QueryOpenSettlementsCore(int nzfTyp, OpenReceivablesQueryRequestDto request)
+    private IReadOnlyList<OpenReceivableDto> QueryOpenSettlementsCore(int nzfTyp, OpenReceivablesQueryRequestDto request, CancellationToken ct)
     {
         int limit = Math.Clamp(request.Limit > 0 ? request.Limit : 50, 1, 200);
 
@@ -3181,7 +3219,8 @@ public sealed class RealSferaSession : ISferaSession
         try
         {
             kolekcja = Session.FinManager.OtworzKolekcje(filter, "nzf_Data DESC");
-            foreach (dynamic roz in (System.Collections.IEnumerable)kolekcja)
+            // Anulowanie sprawdzane przed pobraniem każdego elementu (CancellableEnumeration) - po rozłączeniu klienta job zwalnia STA.
+            foreach (dynamic roz in CancellableEnumeration.Each((System.Collections.IEnumerable)kolekcja, ct))
             {
                 try
                 {
