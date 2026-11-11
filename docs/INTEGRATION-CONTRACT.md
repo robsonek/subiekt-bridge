@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.21.7** (2026-11-11; v0.21.6 wydane 2026-11-10). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
+> **Dotyczy:** SubiektBridge **v0.22.0** (2026-11-11; v0.21.7 wydane 2026-11-11). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -275,7 +275,7 @@ opcjonalne). Zasady:
   zmianą. Ponowienie po udanym zapisie: **cache hit** (ten sam `Idempotency-Key`) → `200` z cache niezależnie od `expected_revision`;
   **cache miss + stare `expected_revision`** → `409` **celowo** (sprawdź `GET`); **cache miss bez `expected_revision`** → no-op tylko gdy
   bieżąca wartość równa żądanej, inaczej zapis (nadpisze zmianę operatora — świadomie nie podałeś `expected_revision`).
-- edycja pozycji PZ (`PUT …/items`) — planowana w v0.22.0, poza tym kontraktem.
+- edycja pozycji PZ (`PUT …/items`) — planowana w przyszłej wersji (v0.22.0 jej nie zawiera), poza tym kontraktem.
 
 ### 3.7 `POST /api/v1/transfers` — MM (przesunięcie międzymagazynowe)
 
@@ -805,6 +805,12 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
 
+### v0.22.0 (2026-11-11 — koniec odczytu kluczy idempotencji sprzed v0.21.0)
+- Most nie czyta już wpisów `Idempotency-Key` zapisanych przez wersje starsze niż v0.21.0 (klucz bez zakresu operacji, §2). Te wpisy
+  wygasły po 14 dniach od wdrożenia v0.21.0, więc **dla klienta nic się nie zmienia**: klucz użyty w ostatnich 14 dniach nadal daje
+  replay tej samej operacji. Bez zmian w żądaniach, odpowiedziach i kodach błędów.
+- Zależności mostu podniesione do linii 11.0 (Sqlite, WindowsServices, Pkcs); runtime pozostaje .NET 10.
+
 ### v0.21.7 (2026-11-11 — dane kontrahenta w odczycie pojedynczego dokumentu z bazy)
 - `contractor_nip` / `contractor_name` w `GET /invoices/{id}`, `GET` i `PATCH /receipts/{id}` oraz `contractor_name` / `nip`
   w `GET /invoices/open-receivables` i `open-payables` są czytane wprost z kartoteki w bazie Subiekta (tylko odczyt), bez wczytywania
@@ -869,7 +875,7 @@ Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx =
   (stały klucz na operację, ten sam przy retry) — bez zmian. Wpisy sprzed 0.21.0 czytane przez POST-y do 14 dni po wdrożeniu (do
   usunięcia w 0.22.0); `PATCH` ich nie czyta.
 - `POST /invoices/{id}/corrections`: `422 INVALID_BRIDGE_ID` sprawdzany przed replayem (jak `/settlements`).
-- Edycja pozycji PZ (`PUT …/items`) — planowana w v0.22.0.
+- Edycja pozycji PZ (`PUT …/items`) — planowana w przyszłej wersji (pierwotnie zapowiadana na v0.22.0).
 
 ### v0.20.0 (2026-10-10 — backlog 138)
 - **Nowy kod `503 DUPLICATE_CHECK_UNAVAILABLE`** (FS/KFS/PZ/MM): most nie mógł sprawdzić w Subiekcie, czy dokument z tym
