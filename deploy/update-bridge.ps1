@@ -44,7 +44,7 @@
 
 .PARAMETER Fxdep
     Pobierz wariant framework-dependent (~4 MB) zamiast self-contained (default).
-    Wymaga ASP.NET Core 10 Runtime (x86) zainstalowanego na hoscie. Bez niego
+    Wymaga ASP.NET Core 11 Runtime (x86) zainstalowanego na hoscie (od v0.23.0; do v0.22.0: 10). Bez niego
     serwis nie wystartuje ("No frameworks were found"). Uzywaj swiadomie.
 
 .EXAMPLE
@@ -54,7 +54,7 @@
     # Konkretna wersja
     .\update-bridge.ps1 -Tag v0.7.9
 
-    # Fxdep (gdy masz zainstalowany ASP.NET Core 10 Runtime x86)
+    # Fxdep (gdy masz zainstalowany ASP.NET Core 11 Runtime x86)
     .\update-bridge.ps1 -Fxdep
 
     # Inny port (jesli zmieniles w appsettings)
@@ -216,15 +216,15 @@ $variant = if ($UseSelfContained) { "win-x86" } else { "win-x86-fxdep" }
 Write-Host "Target version: $Tag" -ForegroundColor Yellow
 Write-Host "Variant: $variant" -ForegroundColor Yellow
 
-# Dla fxdep ostrzezenie gdy ASP.NET Core 10 (x86) nie zainstalowany.
+# Dla fxdep ostrzezenie gdy ASP.NET Core 11 (x86) nie zainstalowany (od v0.23.0 most celuje w net11.0).
 # Self-contained nie wymaga niczego.
 if (-not $UseSelfContained) {
     $aspnetX86 = "C:\Program Files (x86)\dotnet\shared\Microsoft.AspNetCore.App"
-    $hasAspnet10 = (Test-Path $aspnetX86) -and
-        (Get-ChildItem $aspnetX86 -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "10.*" })
-    if (-not $hasAspnet10) {
-        Write-Host "OSTRZEZENIE: nie wykryto ASP.NET Core 10 Runtime (x86)." -ForegroundColor Yellow
-        Write-Host "Pobierz: https://dotnet.microsoft.com/download/dotnet/10.0 (Runtime, x86, ASP.NET Core)" -ForegroundColor Yellow
+    $hasAspnet11 = (Test-Path $aspnetX86) -and
+        (Get-ChildItem $aspnetX86 -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "11.*" })
+    if (-not $hasAspnet11) {
+        Write-Host "OSTRZEZENIE: nie wykryto ASP.NET Core 11 Runtime (x86) - wymagany od v0.23.0 (starsze tagi: 10)." -ForegroundColor Yellow
+        Write-Host "Pobierz: https://dotnet.microsoft.com/download/dotnet/11.0 (Runtime, x86, ASP.NET Core)" -ForegroundColor Yellow
         Write-Host "Albo nie uzywaj -Fxdep (default = self-contained, runtime wbudowany)." -ForegroundColor Yellow
     }
 }

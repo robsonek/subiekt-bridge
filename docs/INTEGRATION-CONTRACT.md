@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.22.0** (2026-11-11; v0.21.7 wydane 2026-11-11). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
+> **Dotyczy:** SubiektBridge **v0.23.0** (2026-11-11; v0.22.0 wydane 2026-11-11). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -804,6 +804,11 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
+
+### v0.23.0 (2026-11-11 — most na .NET 11)
+- Most działa na .NET 11 (dotąd .NET 10). **Dla klienta API nic się nie zmienia**: te same żądania, odpowiedzi i kody błędów.
+- Instalacja: paczka self-contained (domyślna, także przy self-update) ma runtime wbudowany i nie wymaga niczego. Wariant `fxdep`
+  wymaga teraz ASP.NET Core Runtime 11 (x86) na serwerze.
 
 ### v0.22.0 (2026-11-11 — koniec odczytu kluczy idempotencji sprzed v0.21.0)
 - Most nie czyta już wpisów `Idempotency-Key` zapisanych przez wersje starsze niż v0.21.0 (klucz bez zakresu operacji, §2). Te wpisy

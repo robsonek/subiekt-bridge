@@ -10,7 +10,7 @@ i korygujące przez oficjalne API Sfery, działa jako Windows Service obok Subie
 
 ```
 Twoja aplikacja  ── HTTPS + X-Bridge-Token ──►  SubiektBridge.Api
-(Linux/macOS)         JSON REST                  (Windows .NET 10)
+(Linux/macOS)         JSON REST                  (Windows .NET 11)
                                                        │
                                                        ▼ COM/OLE Automation
                                               Subiekt GT + Sfera + MSSQL
@@ -60,11 +60,11 @@ Subiekt GT jest tylko 32-bit, więc Bridge musi być **win-x86** (in-process COM
 | Wariant | Rozmiar (ZIP / rozpakowane) | Wymagania na Windowsie |
 |---|---|---|
 | **`SubiektBridge-X.Y.Z-win-x86.zip`** (self-contained) | ~45 MB / ~100 MB | Nic — runtime wbudowany w binarki |
-| **`SubiektBridge-X.Y.Z-win-x86-fxdep.zip`** (framework-dependent) | ~1.5 MB / ~3 MB | [ASP.NET Core Runtime 10 (x86)](https://dotnet.microsoft.com/download/dotnet/10.0) |
+| **`SubiektBridge-X.Y.Z-win-x86-fxdep.zip`** (framework-dependent) | ~1.5 MB / ~3 MB | [ASP.NET Core Runtime 11 (x86)](https://dotnet.microsoft.com/download/dotnet/11.0) (od v0.23.0; do v0.22.0: 10) |
 
 **Niepewny? Bierz self-contained** — kosztuje 100 MB na dysku, ale eliminuje całą klasę problemów ("brakuje runtime", "zła wersja .NET", konflikt z innymi appkami na hoście).
 
-**Masz już zainstalowane .NET 10 SDK lub ASP.NET Core Runtime x86?** Bierz fxdep.
+**Masz już zainstalowane .NET 11 SDK lub ASP.NET Core Runtime 11 x86?** Bierz fxdep.
 
 ## Szybki start (produkcja)
 

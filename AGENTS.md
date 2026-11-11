@@ -5,7 +5,7 @@ udostępnia HTTPS REST API z którego korzysta Laravel-owy konsument.
 
 ```
 Klient HTTP (Linux/Mac)        SubiektBridge (Windows Service)        Subiekt GT
-  Laravel SubiektBridgeClient   ASP.NET Core 10 (win-x86)               InsERT.GT (32-bit COM)
+  Laravel SubiektBridgeClient   ASP.NET Core 11 (win-x86)               InsERT.GT (32-bit COM)
          HTTPS + X-Bridge-Token  Controllers → ISferaSession   COM/STA   SuDokumentyMgr, Towary,
   ─────────────────────────────►   ↳ RealSferaSession (COM)  ────────►  Kontrahenci, FinManager
                                    ↳ FakeSferaSession (dev/testy)
@@ -13,7 +13,7 @@ Klient HTTP (Linux/Mac)        SubiektBridge (Windows Service)        Subiekt GT
                                  Microsoft.Data.SqlClient    ────────►  MSSQL (raw SQL read + hb_ link)
 ```
 
-**Stack:** .NET 10, ASP.NET Core, **win-x86** (Subiekt GT to wyłącznie 32-bit), Windows Service przez
+**Stack:** .NET 11 (od v0.23.0; STS, wsparcie do 2028-11-14 jak .NET 10), ASP.NET Core, **win-x86** (Subiekt GT to wyłącznie 32-bit), Windows Service przez
 `Microsoft.Extensions.Hosting.WindowsServices` (zero NSSM). **Bezpieczeństwo:** HTTPS z auto-generowanym
 self-signed certem (`data/cert.pfx`), statyczny `X-Bridge-Token`, opcjonalny IP whitelist w Windows Firewall.
 
@@ -34,10 +34,10 @@ zanim dotkniesz danego obszaru.**
 ## Build / Test / Run
 
 ```bash
-# Lokalnie (macOS/Linux z .NET 10 SDK)
+# Lokalnie (macOS/Linux z .NET 11 SDK)
 dotnet build SubiektBridge.sln
 dotnet test SubiektBridge.sln    # xUnit v3 na Microsoft Testing Platform (opt-in w global.json;
-                                 # bez tego .NET 10 SDK odrzuca xunit.v3 4.x w trybie VSTest)
+                                 # bez tego SDK .NET 10+ odrzuca xunit.v3 4.x w trybie VSTest)
 
 # Dev run — FakeSferaSession zamiast COM (appsettings.Development.json: Bridge:UseFakeSfera=true,
 # token "dev-token", HTTP :8080 + HTTPS :988)
