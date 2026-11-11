@@ -18,7 +18,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.15" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="11.0.0" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.1.1" />
     <!-- Wyciszenie NuGet Audit (NU1903/NU1902): SqlClient 7.1.1 wymaga Pkcs >= 9.0.18, a 9.0.18 ma CVE-2026-84008
          (HIGH, DoS) i CVE-2026-70162 (Moderate, DoS). Ten pin NIE zmienia binarek: Pkcs dostarcza Microsoft.AspNetCore.App
