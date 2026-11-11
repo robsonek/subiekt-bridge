@@ -39,20 +39,26 @@ public sealed class HealthController : ControllerBase
     /// <summary>
     /// 503 tylko gdy padła sesja Sfery (wystawianie dokumentów niemożliwe). Padnięty SqlClient =
     /// "degraded" z 200: dokumenty przez COM dalej idą, ale raw SQL (lookup NIP, /bank-transactions) nie.
+    /// Od v0.24.0 "busy" z 200: wątek Sfery jest zajęty jednym długim zadaniem i sonda sesji nie zdążyła się wykonać w budżecie -
+    /// most żyje i odpowiada, a `queue_depth` / `busy_for_seconds` mówią, co się dzieje (do v0.23.0 /health wisiał wtedy do limitu
+    /// klienta i wyglądał jak awaria całego mostu - incydent 2026-11-09).
     /// </summary>
     internal static (int StatusCode, HealthResponseDto Response) Map(SferaHealthDto sfera)
     {
+        string status = sfera.StaBusy ? "busy" : sfera.SessionActive && sfera.SqlConnectionOk != false ? "ok" : "degraded";
+        string session = sfera.StaBusy ? "busy" : sfera.SessionActive ? "active" : "down";
         var response = new HealthResponseDto(
-            Status: sfera.SessionActive && sfera.SqlConnectionOk != false ? "ok" : "degraded",
+            Status: status,
             BridgeVersion: BridgeVersion,
             SubiektVersion: sfera.SubiektVersion,
-            SferaSession: sfera.SessionActive ? "active" : "down",
+            SferaSession: session,
             LastInvoiceAt: sfera.LastInvoiceAt,
-            QueueDepth: 0,
+            QueueDepth: sfera.QueueDepth,
             LastError: sfera.LastError,
             SqlConnection: sfera.SqlConnectionOk switch { true => "ok", false => "down", null => "unknown" },
-            SqlError: sfera.SqlError);
+            SqlError: sfera.SqlError,
+            BusyForSeconds: sfera.StaBusyForSeconds);
 
-        return (sfera.SessionActive ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable, response);
+        return (sfera.StaBusy || sfera.SessionActive ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable, response);
     }
 }

@@ -175,4 +175,9 @@ public sealed record SferaHealthDto(
     // Własne połączenie SqlClient (raw SQL: /bank-transactions, /book, filtr nip, lookup NIP przy FS...) - niezależne
     // od sesji COM, więc sesja Sfery może być "active" przy padniętym SqlClient. null = nie sprawdzano.
     bool? SqlConnectionOk = null,
-    string? SqlError = null);
+    string? SqlError = null,
+    // v0.24.0 (StaQueueMonitor): joby czekające + wykonywany na wątku STA oraz czas trwania bieżącego. StaBusy = sonda sesji nie
+    // zdążyła się wykonać w budżecie (STA zajęty długim jobem) - SessionActive jest wtedy ostatnim znanym stanem, nie wynikiem sondy.
+    int QueueDepth = 0,
+    double? StaBusyForSeconds = null,
+    bool StaBusy = false);

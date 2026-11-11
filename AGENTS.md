@@ -111,7 +111,7 @@ przykłady tylko z fikcyjnymi danymi (NIP `1111111111`, EAN-y `5901...`), ZERO d
 | `DELETE /api/v1/invoices/{id}/settlements/{rozliczenie_id}` | Cofnij rozliczenie |
 | `POST /api/v1/admin/query` | Read-only SQL (whitelist SELECT/WITH) |
 | `GET /api/v1/admin/logs?tail=N&grep=substr` | Tail najnowszego pliku logu (domyślnie 100, max 5000 linii; `grep` = substring, case-insensitive) — zdalna weryfikacja bez RDP |
-| `POST /api/v1/admin/update` | Self-update (detached PowerShell) |
+| `POST /api/v1/admin/update` | Self-update (detached PowerShell). Od v0.24.0 `SelfUpdateGate`: drugie żądanie w 10 min → `202` z `already_scheduled: true`, bez drugiego skryptu i bez nadpisania `update-bridge.ps1` |
 | `POST /api/v1/sfera/raw` | Escape hatch (whitelist metod w configu) |
 
 Wszystkie wymagają `X-Bridge-Token: <secret>`. Mutujące POST (`/invoices`, `/corrections`, `/receipts`,
@@ -125,7 +125,8 @@ Wszystkie wymagają `X-Bridge-Token: <secret>`. Mutujące POST (`/invoices`, `/c
   `SetApartmentState(STA)` + `BlockingCollection<Action>`; każda metoda `RealSferaSession` idzie przez
   `RunOnStaAsync(Func<T>)`. PowerShellowy `New-Object -ComObject "InsERT.GT"` **przejdzie** mimo błędu mostu (PS jest STA).
   **Jeden długi job blokuje WSZYSTKO** (także sondę `/health` → 503), a `RunOnStaAsync` sprawdza token anulowania tylko PRZED
-  startem joba — pętla po kolekcji Sfery musi dostać `ct` i sprawdzać go per dokument (incydent 2026-11-09, `InvoiceListingScan`).
+  startem joba — pętla po kolekcji Sfery musi dostać `ct` i sprawdzać go per dokument (incydent 2026-11-09, `InvoiceListingScan`; od v0.24.0
+  `CancellableEnumeration.Each` w `/bank-operations` i open-receivables/payables).
 - **Bitowość:** Bridge x64 nie połączy się z Subiektem x86 (`0x8000FFFF Katastrofalny błąd`). Cała linia „GT”
   InsERT to 32-bit; Subiekt Nexo (x64) to inny produkt. CI matrix: **win-x86 only**.
 - **RCW:** kolekcje z `OtworzKolekcje` i dokumenty zwalniaj (`Zamknij()` / `Marshal.ReleaseComObject`) w `finally`.
@@ -181,13 +182,14 @@ Logi: `C:\SubiektBridge\logs\subiekt-bridge-yyyyMMdd.log` (Serilog rolling daily
 
 ```json
 { "status": "ok", "bridge_version": "0.17.0.0", "subiekt_version": "1.89 HF2", "sfera_session": "active",
-  "last_invoice_at": null, "queue_depth": 0, "last_error": null, "sql_connection": "ok", "sql_error": null }
+  "last_invoice_at": null, "queue_depth": 0, "last_error": null, "sql_connection": "ok", "sql_error": null,
+  "busy_for_seconds": null }
 ```
 
 `sql_connection` = `SELECT 1` przez własny `SqlConnection` (poza STA). **Sesja Sfery (COM) NIE używa SqlClienta** —
 zepsuty SqlClient daje `200` + `status: "degraded"` + `sql_connection: "down"`; `503` tylko przy padniętej sesji
 Sfery. `sfera_session` jest od v0.19.0 sprawdzane sondą (`IsSessionAlive`: `OtworzKolekcje("dok_Id=-1")`, runda do
-SQL), nie samą obecnością obiektu sesji — zamknięty Subiekt daje `503` od razu, martwa sesja jest resetowana. SqlClient używają: **listing `GET /invoices` i `GET /receipts` (od v0.21.6, fail-closed → `502 SUBIEKT_QUERY_FAILED`)**, `/bank-transactions`, `/book`, `admin/query`, filtr `nip`, `revision` w `GET /invoices` i `/invoices/{id}` (fail-soft → `null`), `search` w open-receivables,
+SQL), nie samą obecnością obiektu sesji — zamknięty Subiekt daje `503` od razu, martwa sesja jest resetowana. **Od v0.24.0 sonda ma budżet 5 s (`StaProbe`):** gdy wątek STA jest zajęty długim jobem, `/health` zwraca `200` + `status`/`sfera_session: "busy"`, prawdziwe `queue_depth` i `busy_for_seconds` z `StaQueueMonitor` (do v0.23.0 wisiał do limitu klienta i dawał `503`; `queue_depth` było na sztywno `0`), a job sondy z anulowanym tokenem jest pomijany. Gałąź „busy” nie czyta żywych pól sesji, tylko migawkę ostatniej sondy (`HealthProbeMemory`); porażka sondy sprzed ≤ 60 s wraca jako `503` zamiast „busy” (sonda sama bywa długim zadaniem: otwarcie sesji przy niedostępnym Subiekcie). SqlClient używają: **listing `GET /invoices` i `GET /receipts` (od v0.21.6, fail-closed → `502 SUBIEKT_QUERY_FAILED`)**, `/bank-transactions`, `/book`, `admin/query`, filtr `nip`, `revision` w `GET /invoices` i `/invoices/{id}` (fail-soft → `null`), `search` w open-receivables,
 **NIP/nazwa kontrahenta w `GET /invoices/{id}`, `GET`/`PATCH /receipts/{id}` i open-receivables/payables (od v0.21.7, `ContractorNipName`:
 `adr__Ewid` na STA zamiast `Kontrahenci.Wczytaj`, wartości bajt w bajt jak COM; awaria SQL → dawny COM + WARNING; `Bridge:ContractorReadViaSql=false` = tylko COM)**,
 lookup NIP przy FS/PZ (fail-closed → `503 CONTRACTOR_LOOKUP_UNAVAILABLE`), magazyn FS źródłowej przy KFS i — od v0.20.0 —

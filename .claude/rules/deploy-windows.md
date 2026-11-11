@@ -70,6 +70,13 @@ był pusty. Fix: `Path.Combine(AppContext.BaseDirectory, "logs", ...)`.
 
 ## Self-update flow
 
+**Jedna aktualizacja naraz (od v0.24.0, `SelfUpdateGate` w `AdminController`):** bramka statyczna z oknem 10 min, sprawdzana PRZED
+odświeżeniem skryptu. Drugi `POST /admin/update` w oknie → `202` + `already_scheduled: true`, bez spawnu i bez nadpisania
+`update-bridge.ps1` (prod 2026-11-09: dwa kliknięcia w panelu = dwa równoległe skrypty). `Release()` przy `SCRIPT_NOT_FOUND`,
+`INVALID_RELEASE_TAG`, `SPAWN_FAILED`. **Blokady w samym skrypcie świadomie NIE ma:** skrypt uruchamia sam siebie jako odłączony
+proces (`-Detached`), więc mutex wymaga testu na PS 5.x, a plik jest pobierany z `main` przy każdej aktualizacji - błąd w nim
+odcina self-update na prod. Ręczne uruchomienie skryptu równolegle z aktualizacją z panelu pozostaje niechronione.
+
 ```
 POST /api/v1/admin/update {refresh_script: true}
   ↓
