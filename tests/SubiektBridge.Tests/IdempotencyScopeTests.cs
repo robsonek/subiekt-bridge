@@ -73,16 +73,16 @@ public class IdempotencyScopeTests
     private static InvoiceResponseDto Doc(long subiektId)
         => new($"sub_{subiektId}", subiektId, $"PZ {subiektId}/2026", DateTimeOffset.UtcNow, 0, new InvoiceTotalsDto(Gross: 0m), null, null);
 
-    /// <summary>Wszystkie operacje z Idempotency-Key (census: 6 POST sprzed v0.21.0 + PATCH z v0.21.0).</summary>
-    private static readonly (IdempotencyScope Scope, bool PreExisting)[] AllOperations =
+    /// <summary>Wszystkie operacje z Idempotency-Key (census: 6 POST + PATCH z v0.21.0).</summary>
+    private static readonly IdempotencyScope[] AllOperations =
     {
-        (IdempotencyScope.CreateInvoice, true),
-        (IdempotencyScope.CreateCorrection(1), true),
-        (IdempotencyScope.CreateReceipt, true),
-        (IdempotencyScope.CreateTransfer, true),
-        (IdempotencyScope.CreateSettlement(1), true),
-        (IdempotencyScope.BookBankTransaction(1), true),
-        (IdempotencyScope.UpdateReceiptHeader(1), false),
+        IdempotencyScope.CreateInvoice,
+        IdempotencyScope.CreateCorrection(1),
+        IdempotencyScope.CreateReceipt,
+        IdempotencyScope.CreateTransfer,
+        IdempotencyScope.CreateSettlement(1),
+        IdempotencyScope.BookBankTransaction(1),
+        IdempotencyScope.UpdateReceiptHeader(1),
     };
 
     private static ContractorDto Contractor() => new(
@@ -224,70 +224,63 @@ public class IdempotencyScopeTests
     }
 
     [Fact]
-    public async Task Store_UnscopedEntryFromBeforeUpgrade_ReadOnlyByPreExistingPosts()
+    public async Task Store_UnscopedEntry_IsNeverReadNorDeleted_ByAnyOperation()
     {
-        // Wpis sprzed v0.21.0 (TTL 14 dni): 6 POST-ów czyta go jak dotąd (ponowienie przez aktualizację = replay), PATCH - nigdy.
+        // Wpisy sprzed v0.21.0 (klucz bez zakresu) wygasły po TTL 14 dni od wdrożenia v0.21.0 (prod: 2026-10-11) - od v0.22.0 żadna
+        // operacja ich nie czyta ani nie kasuje. Pozostały wiersz to martwe dane dla IdempotencyCleanupService, nigdy replay.
         var (store, path) = NewStoreWithPath();
         InsertUnscoped(path, "k-old", Doc(7));
-        foreach (var (scope, preExisting) in AllOperations)
+        foreach (var scope in AllOperations)
         {
-            var cached = await store.TryGetAsync<InvoiceResponseDto>(scope, "k-old", CancellationToken.None);
-            if (preExisting) Assert.Equal(7, Assert.IsType<InvoiceResponseDto>(cached).SubiektId);
-            else Assert.Null(cached);
+            Assert.Null(await store.TryGetAsync<InvoiceResponseDto>(scope, "k-old", CancellationToken.None));
+            await store.DeleteAsync(scope, "k-old", CancellationToken.None);
         }
-
-        await store.DeleteAsync(IdempotencyScope.UpdateReceiptHeader(1), "k-old", CancellationToken.None);
         Assert.True(RowExists(path, "k-old"));
-        await store.DeleteAsync(IdempotencyScope.CreateReceipt, "k-old", CancellationToken.None);
-        Assert.False(RowExists(path, "k-old"));
     }
 
     [Fact]
-    public async Task Store_ScopedEntryWinsOverUnscoped()
+    public async Task Store_ScopedEntry_IsIndependentOfUnscopedRowWithSameKey()
     {
         var (store, path) = NewStoreWithPath();
         InsertUnscoped(path, "k", Doc(1));
         await store.SaveAsync(IdempotencyScope.CreateReceipt, "k", Doc(2), CancellationToken.None);
         Assert.Equal(2, (await store.TryGetAsync<InvoiceResponseDto>(IdempotencyScope.CreateReceipt, "k", CancellationToken.None))!.SubiektId);
-        Assert.True(RowExists(path, IdempotencyScope.CreateReceipt.StorageKey("k")));
+
+        await store.DeleteAsync(IdempotencyScope.CreateReceipt, "k", CancellationToken.None);
+        Assert.False(RowExists(path, IdempotencyScope.CreateReceipt.StorageKey("k")));
+        Assert.True(RowExists(path, "k"));
     }
 
     [Fact]
-    public async Task W1_UnscopedEntry_PostReplays_PatchSameKeyExecutes()
+    public async Task UnscopedEntry_PostWithSameKey_ExecutesInsteadOfReplaying()
     {
-        // Warunek lidera: wpis w starym formacie → POST /receipts = replay jak przed aktualizacją, PATCH tym kluczem go NIE czyta (zapis numeru).
+        // Stary wiersz pod samym kluczem nie jest odpowiedzią żadnej operacji: POST /receipts wykonuje pełny flow (201, nowy dokument).
         var fake = new FakeSferaSession();
         var (store, path) = NewStoreWithPath();
         var c = new ReceiptsController(fake, store, NullLogger<ReceiptsController>.Instance);
-        var created = await fake.CreateReceiptAsync(Receipt(), CancellationToken.None);
-        InsertUnscoped(path, "test:order:1:PZ", created);
+        InsertUnscoped(path, "test:order:1:PZ", Doc(999_999));
 
-        var (sPost, vPost) = Unwrap((await c.Create(Receipt(), "test:order:1:PZ", CancellationToken.None)).Result);
-        Assert.Equal(200, sPost);
-        Assert.Equal(created.SubiektId, Assert.IsType<InvoiceResponseDto>(vPost).SubiektId);
+        var (status, value) = Unwrap((await c.Create(Receipt(), "test:order:1:PZ", CancellationToken.None)).Result);
 
-        var (sPatch, vPatch) = Unwrap((await c.PatchHeader($"sub_{created.SubiektId}", Patch("FZ 1/01/2026"), "test:order:1:PZ", CancellationToken.None)).Result);
-        Assert.Equal(200, sPatch);
-        Assert.Equal("FZ 1/01/2026", Assert.IsType<ReceiptDetailDto>(vPatch).OriginalNumber);
-        Assert.Equal(1, FakeSferaSession.SaveCountForTests(created.SubiektId));
-        Assert.True(RowExists(path, "test:order:1:PZ"));
+        Assert.Equal(201, status);
+        Assert.NotEqual(999_999, Assert.IsType<InvoiceResponseDto>(value).SubiektId);
+        Assert.True(RowExists(path, IdempotencyScope.CreateReceipt.StorageKey("test:order:1:PZ")));
     }
 
     // ----------------------------- W1: census operacji -----------------------------
 
     [Fact]
-    public void Scopes_AllOperations_DistinctPerEndpointAndDocument_OnlyPatchSkipsUnscoped()
+    public void Scopes_AllOperations_DistinctPerEndpointAndDocument()
     {
-        var operations = AllOperations.Select(o => o.Scope.Operation).ToList();
+        var operations = AllOperations.Select(o => o.Operation).ToList();
         Assert.Equal(operations.Count, operations.Distinct(StringComparer.Ordinal).Count());
         Assert.All(operations, op => Assert.DoesNotContain("\n", op));
         Assert.NotEqual(IdempotencyScope.CreateCorrection(1).Operation, IdempotencyScope.CreateCorrection(2).Operation);
         Assert.NotEqual(IdempotencyScope.CreateSettlement(1).Operation, IdempotencyScope.CreateSettlement(2).Operation);
         Assert.NotEqual(IdempotencyScope.BookBankTransaction(1).Operation, IdempotencyScope.BookBankTransaction(2).Operation);
         Assert.NotEqual(IdempotencyScope.UpdateReceiptHeader(1).Operation, IdempotencyScope.UpdateReceiptHeader(2).Operation);
-        Assert.All(AllOperations, o => Assert.Equal(o.PreExisting, o.Scope.ReadsUnscopedEntries));
 
-        // Każda fabryka IdempotencyScope jest w AllOperations - nowa operacja wymaga decyzji o wpisach sprzed v0.21.0.
+        // Każda fabryka IdempotencyScope jest w AllOperations - nowa operacja musi trafić do censusu.
         var t = typeof(IdempotencyScope);
         int factories = t.GetFields(BindingFlags.Public | BindingFlags.Static).Count(f => f.FieldType == t)
                         + t.GetMethods(BindingFlags.Public | BindingFlags.Static).Count(m => m.ReturnType == t);

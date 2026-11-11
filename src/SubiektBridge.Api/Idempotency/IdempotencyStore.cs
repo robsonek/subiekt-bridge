@@ -61,7 +61,6 @@ public sealed class IdempotencyStore
 
         // Krok 1: pobierz JSON i timestamp. Zamykamy reader przed dalszymi operacjami,
         // bo SQLite nie pozwala na concurrent commands na tym samym connection.
-        // Wpis bez zakresu (sprzed v0.21.0) tylko dla operacji, która go czyta - wpis z zakresem ma pierwszeństwo.
         string? storageKey = null;
         string? json = null;
         DateTimeOffset? createdAt = null;
@@ -70,10 +69,9 @@ public sealed class IdempotencyStore
         {
             cmd.CommandText = """
                 SELECT key, response_json, created_at FROM idempotency
-                WHERE key = $scoped OR ($unscoped = 1 AND key = $key)
-                ORDER BY key = $scoped DESC LIMIT 1
+                WHERE key = $scoped
                 """;
-            AddKeyParameters(cmd, scope, key);
+            cmd.Parameters.AddWithValue("$scoped", scope.StorageKey(key));
 
             await using var reader = await cmd.ExecuteReaderAsync(ct);
             if (await reader.ReadAsync(ct))
@@ -119,23 +117,16 @@ public sealed class IdempotencyStore
         }
     }
 
-    /// <summary>Kasuje wpis operacji (i jej wpis bez zakresu sprzed v0.21.0 - ten sam, który zwróciłby <see cref="TryGetAsync{TResponse}"/>).</summary>
+    /// <summary>Kasuje wpis operacji - ten sam, który zwróciłby <see cref="TryGetAsync{TResponse}"/>.</summary>
     public async Task DeleteAsync(IdempotencyScope scope, string key, CancellationToken ct)
     {
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
 
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM idempotency WHERE key = $scoped OR ($unscoped = 1 AND key = $key)";
-        AddKeyParameters(cmd, scope, key);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    private static void AddKeyParameters(SqliteCommand cmd, IdempotencyScope scope, string key)
-    {
+        cmd.CommandText = "DELETE FROM idempotency WHERE key = $scoped";
         cmd.Parameters.AddWithValue("$scoped", scope.StorageKey(key));
-        cmd.Parameters.AddWithValue("$unscoped", scope.ReadsUnscopedEntries ? 1 : 0);
-        cmd.Parameters.AddWithValue("$key", key);
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>Test-only: wyjątek rzucany na wejściu SaveAsync (symulacja awarii cache PO udanym zapisie w Subiekcie; spec PZ v0.21.0 T18).</summary>
