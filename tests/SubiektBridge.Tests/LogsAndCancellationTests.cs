@@ -14,7 +14,7 @@ using Xunit;
 namespace SubiektBridge.Tests;
 
 /// <summary>
-/// Porządki po incydencie 2026-11-09 (v0.24.1):
+/// Porządki po incydencie 2026-11-09 (v0.24.0):
 /// - log produkcyjny miał 5-6 linii frameworka ASP.NET Core na KAŻDE żądanie (Request starting / Executing endpoint / Route matched /
 ///   Executing ObjectResult / Executed action / Executed endpoint / Request finished) obok jednej własnej linii podsumowania -
 ///   zdalny podgląd (`/admin/logs?tail=`) pokazywał przez to kilka razy mniej historii;

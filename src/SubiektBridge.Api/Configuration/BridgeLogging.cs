@@ -8,7 +8,7 @@ namespace SubiektBridge.Api.Configuration;
 /// Executing endpoint, Route matched, Executing ObjectResult, Executed action/endpoint, Request finished), a most ma już własną,
 /// jedną linię podsumowania z UseSerilogRequestLogging ("HTTP GET ... responded 200 in X ms (from ..., UA: ...)"). Sekcja
 /// "Logging:LogLevel" z appsettings NIE działa na Serilog, więc szablon produkcyjny z "Microsoft.AspNetCore": "Warning" niczego
-/// nie wyciszał. Od v0.24.1 Information z Microsoft.AspNetCore.* jest odcinane w kodzie; ostrzeżenia i błędy frameworka zostają,
+/// nie wyciszał. Od v0.24.0 Information z Microsoft.AspNetCore.* jest odcinane w kodzie; ostrzeżenia i błędy frameworka zostają,
 /// tak samo Microsoft.Hosting.Lifetime (Now listening / Application started / shutting down) i wszystkie logi mostu.
 /// Wołane PRZED ReadFrom.Configuration - sekcja "Serilog" w appsettings może to nadpisać (np. na czas diagnozy).
 /// </summary>

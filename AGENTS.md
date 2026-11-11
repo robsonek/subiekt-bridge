@@ -176,7 +176,7 @@ grep -rEi "ONEE|onee.pl|WIN-MSSQL|onee-sync|test@allegro" .   # jeśli coś wrac
 
 ## Diagnostyka
 
-**Poziomy (od v0.24.1, `BridgeLogging.ApplyLevels`):** `Information` z `Microsoft.AspNetCore.*` jest odcięte w kodzie — zostaje jedna linia
+**Poziomy (od v0.24.0, `BridgeLogging.ApplyLevels`):** `Information` z `Microsoft.AspNetCore.*` jest odcięte w kodzie — zostaje jedna linia
 `HTTP <metoda> <ścieżka> responded <kod> in X ms` na żądanie (sekcja `Logging:LogLevel` z appsettings NIE działa na Serilog; nadpisanie
 tylko sekcją `Serilog`). Rozłączenie klienta w listingu = `499` + INF (`ClientDisconnect`), nie `[ERR]` + 502.
 
