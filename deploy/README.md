@@ -24,7 +24,7 @@ Każdy tag `vX.Y.Z` w repozytorium auto-buildujemy GitHub Actions i publikujemy 
 
 ### Opcja B — zbuduj lokalnie
 
-Wymaga .NET SDK 10+ na maszynie buildującej (macOS/Linux/Windows):
+Wymaga .NET SDK 11+ na maszynie buildującej (macOS/Linux/Windows):
 
 ```bash
 git clone https://github.com/robsonek/subiekt-bridge.git

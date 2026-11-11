@@ -7,9 +7,9 @@ Windowsie (na 64-bit przez WOW64).
 | Plik | Rozmiar | Wymagania |
 |---|---|---|
 | `SubiektBridge-__VERSION__-win-x86.zip` | ~45 MB | **Nic** — runtime wbudowany (self-contained) |
-| `SubiektBridge-__VERSION__-win-x86-fxdep.zip` | ~2 MB | **ASP.NET Core Runtime 10 (x86)** zainstalowany |
+| `SubiektBridge-__VERSION__-win-x86-fxdep.zip` | ~2 MB | **ASP.NET Core Runtime 11 (x86)** zainstalowany |
 
 Niepewny? Bierz self-contained.
 
-ASP.NET Core Runtime 10 (x86) dla Windows: https://dotnet.microsoft.com/download/dotnet/10.0
+ASP.NET Core Runtime 11 (x86) dla Windows: https://dotnet.microsoft.com/download/dotnet/11.0
 (przy pobieraniu wybierz "x86" — nie "x64").

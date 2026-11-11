@@ -99,7 +99,7 @@ Skrypt: stop service → kopiuje nowe pliki (zachowując `appsettings.Production
 
 ## Dev (build lokalny)
 
-Wymaga .NET SDK 10+:
+Wymaga .NET SDK 11+:
 
 ```bash
 git clone https://github.com/robsonek/subiekt-bridge.git
