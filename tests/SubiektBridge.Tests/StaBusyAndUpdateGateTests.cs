@@ -152,6 +152,74 @@ public class StaBusyAndUpdateGateTests
         Assert.Equal("down", body.SferaSession);
     }
 
+    // ----------------------------- 1d. Pamięć ostatniej sondy (Greptile PR #36) -----------------------------
+
+    private static SferaHealthDto Alive(DateTimeOffset? lastInvoiceAt = null) => new("1.89 HF2", true, lastInvoiceAt, null);
+    private static SferaHealthDto Dead() => new("unknown", false, null, "COMException: nie mozna otworzyc sesji");
+
+    [Fact]
+    public void Memory_NoProbeYet_Busy_WithUnknownVersion()
+    {
+        var dto = new HealthProbeMemory().WhenProbeTimedOut(T0, TimeSpan.FromSeconds(60));
+
+        Assert.True(dto.StaBusy);
+        Assert.Equal("unknown", dto.SubiektVersion);
+        Assert.Null(dto.LastInvoiceAt);
+    }
+
+    [Fact]
+    public void Memory_LastProbeSucceeded_Busy_UsesPublishedSnapshot_NotLiveFields()
+    {
+        // Gałąź "busy" działa POZA wątkiem STA: bierze wersję i last_invoice_at z niemutowalnej migawki ostatniej sondy,
+        // a nie z pól sesji, które STA może właśnie zapisywać (DateTimeOffset? nie jest atomowe, most to proces 32-bitowy).
+        var memory = new HealthProbeMemory();
+        memory.Record(Alive(T0.AddMinutes(-5)), T0);
+
+        var dto = memory.WhenProbeTimedOut(T0.AddSeconds(30), TimeSpan.FromSeconds(60));
+
+        Assert.True(dto.StaBusy);
+        Assert.Equal("1.89 HF2", dto.SubiektVersion);
+        Assert.Equal(T0.AddMinutes(-5), dto.LastInvoiceAt);
+        Assert.Null(dto.LastError);
+    }
+
+    [Fact]
+    public void Memory_RecentProbeFailure_IsReported_InsteadOfBusy()
+    {
+        // Subiekt offline, otwarcie sesji trwa > budżet i kończy się błędem: sonda sama jest "długim zadaniem". Bez pamięci każdy
+        // /health zwracał 200 busy, wynik sondy przepadał, a monitoring nigdy nie dostawał 503.
+        var memory = new HealthProbeMemory();
+        memory.Record(Dead(), T0);
+
+        var dto = memory.WhenProbeTimedOut(T0.AddSeconds(40), TimeSpan.FromSeconds(60));
+
+        Assert.False(dto.StaBusy);
+        Assert.False(dto.SessionActive);
+        Assert.Equal("COMException: nie mozna otworzyc sesji", dto.LastError);
+        Assert.Equal(503, HealthController.Map(dto).StatusCode);
+    }
+
+    [Fact]
+    public void Memory_OldProbeFailure_DoesNotStick_Busy()
+    {
+        var memory = new HealthProbeMemory();
+        memory.Record(Dead(), T0);
+
+        var dto = memory.WhenProbeTimedOut(T0.AddSeconds(61), TimeSpan.FromSeconds(60));
+
+        Assert.True(dto.StaBusy);
+    }
+
+    [Fact]
+    public void Memory_SuccessAfterFailure_ClearsFailure()
+    {
+        var memory = new HealthProbeMemory();
+        memory.Record(Dead(), T0);
+        memory.Record(Alive(), T0.AddSeconds(10));
+
+        Assert.True(memory.WhenProbeTimedOut(T0.AddSeconds(20), TimeSpan.FromSeconds(60)).StaBusy);
+    }
+
     // ----------------------------- 2. Enumeracja z anulowaniem -----------------------------
 
     private sealed class Counting
@@ -253,6 +321,34 @@ public class StaBusyAndUpdateGateTests
         gate.Release();
 
         Assert.True(gate.TryAcquire(T0.AddSeconds(1), out _));
+    }
+
+    [Fact]
+    public void Gate_Confirm_StoresOneStartTime_ForFirstResponseAndDuplicates()
+    {
+        // Greptile PR #36: pierwsza odpowiedź liczyła scheduled_at po pobraniu skryptu i taga (do ~20 s), duplikat - od chwili
+        // przejęcia bramki. Jedna aktualizacja musi mieć jeden czas startu w obu odpowiedziach.
+        var gate = new SelfUpdateGate(TimeSpan.FromMinutes(10));
+        gate.TryAcquire(T0, out _);
+        Assert.Null(gate.StartsAt); // pierwsze żądanie jeszcze przygotowuje aktualizację
+
+        gate.Confirm(T0.AddSeconds(25));
+
+        Assert.False(gate.TryAcquire(T0.AddSeconds(49), out _));
+        Assert.Equal(T0.AddSeconds(25), gate.StartsAt);
+    }
+
+    [Fact]
+    public void Gate_ReleaseAndReacquire_ForgetsConfirmedStart()
+    {
+        var gate = new SelfUpdateGate(TimeSpan.FromMinutes(10));
+        gate.TryAcquire(T0, out _);
+        gate.Confirm(T0.AddSeconds(5));
+        gate.Release();
+        Assert.Null(gate.StartsAt);
+
+        gate.TryAcquire(T0.AddMinutes(1), out _);
+        Assert.Null(gate.StartsAt);
     }
 
     [Fact]

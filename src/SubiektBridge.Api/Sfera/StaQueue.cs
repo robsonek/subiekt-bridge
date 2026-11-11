@@ -82,6 +82,38 @@ public static class StaProbe
 }
 
 /// <summary>
+/// Niemutowalna migawka ostatniej ZAKOŃCZONEJ sondy sesji, publikowana przez wątek STA i czytana przez /health poza STA
+/// (Greptile PR #36). Rozwiązuje dwie rzeczy w gałęzi „sonda nie zdążyła w budżecie":
+/// - sonda sama bywa długim zadaniem: przy niedostępnym Subiekcie otwarcie sesji trwa dłużej niż budżet i kończy się błędem.
+///   Bez pamięci każdy /health zwracał 200 „busy", wynik przepadał, a monitoring nie dostawał 503. Świeża porażka sondy
+///   (nie starsza niż <c>failureMaxAge</c>) jest więc zwracana zamiast „busy";
+/// - „busy" nie czyta żywych pól sesji (<c>DateTimeOffset?</c> nie jest atomowe, most to proces 32-bitowy, a STA może je właśnie
+///   zapisywać) - wersja Subiekta i last_invoice_at pochodzą z migawki (referencja podmieniana atomowo).
+/// </summary>
+public sealed class HealthProbeMemory
+{
+    private sealed record Entry(SferaHealthDto Result, DateTimeOffset At);
+
+    private Entry? _last;
+
+    /// <summary>Wołane na STA po każdej zakończonej sondzie (sukces i porażka), także gdy wołający już nie czeka na wynik.</summary>
+    public void Record(SferaHealthDto result, DateTimeOffset now) => Volatile.Write(ref _last, new Entry(result, now));
+
+    /// <summary>Co zgłosić, gdy sonda nie zmieściła się w budżecie: świeżą porażkę ostatniej sondy albo „busy" z migawki.</summary>
+    public SferaHealthDto WhenProbeTimedOut(DateTimeOffset now, TimeSpan failureMaxAge)
+    {
+        var last = Volatile.Read(ref _last);
+        if (last is { Result.SessionActive: false } && now - last.At <= failureMaxAge)
+        {
+            return last.Result;
+        }
+        // SessionActive = ostatni znany stan; HealthController.Map przy StaBusy i tak zwraca "busy", nie "active"/"down".
+        return new SferaHealthDto(last?.Result.SubiektVersion ?? "unknown", last?.Result.SessionActive ?? false,
+            last?.Result.LastInvoiceAt, last?.Result.LastError) with { StaBusy = true };
+    }
+}
+
+/// <summary>
 /// Enumeracja kolekcji COM z anulowaniem: token sprawdzany PRZED pobraniem każdego elementu (każdy MoveNext to wywołanie Sfery),
 /// więc po rozłączeniu klienta job STA kończy się przy najbliższym elemencie. RunOnStaAsync sprawdza token tylko przed startem joba -
 /// pętla musi go dostać sama (incydent 2026-11-09). Dla listingu faktur robi to InvoiceListingScan; ten wrapper jest dla pozostałych

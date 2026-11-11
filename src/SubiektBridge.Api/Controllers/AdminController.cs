@@ -185,8 +185,10 @@ public sealed class AdminController : ControllerBase
         if (!UpdateGate.TryAcquire(DateTimeOffset.UtcNow, out var firstScheduledAt))
         {
             _logger.LogWarning("Self-update juz zaplanowany o {ScheduledAt:O} - kolejne zadanie nie uruchamia drugiego skryptu", firstScheduledAt);
+            // Ten sam czas startu co w pierwszej odpowiedzi; gdy pierwsze żądanie jeszcze przygotowuje aktualizację (pobiera skrypt/tag),
+            // najlepszy szacunek to "nie wcześniej niż za delay od teraz".
             return Accepted(new UpdateResponseDto(
-                ScheduledAt: firstScheduledAt.AddSeconds(UpdateDelaySeconds),
+                ScheduledAt: UpdateGate.StartsAt ?? DateTimeOffset.UtcNow.AddSeconds(UpdateDelaySeconds),
                 DelaySeconds: UpdateDelaySeconds,
                 EstimatedDurationSeconds: 60,
                 ScriptPath: scriptPath,
@@ -296,8 +298,10 @@ public sealed class AdminController : ControllerBase
                 Message: "Nie udalo sie uruchomic update-bridge.ps1: " + ex.Message));
         }
 
+        var startsAt = DateTimeOffset.UtcNow.AddSeconds(delaySeconds);
+        UpdateGate.Confirm(startsAt);
         return Accepted(new UpdateResponseDto(
-            ScheduledAt: DateTimeOffset.UtcNow.AddSeconds(delaySeconds),
+            ScheduledAt: startsAt,
             DelaySeconds: delaySeconds,
             EstimatedDurationSeconds: 60,
             ScriptPath: scriptPath,

@@ -12,8 +12,24 @@ public sealed class SelfUpdateGate
     private readonly object _gate = new();
     private readonly TimeSpan _window;
     private DateTimeOffset? _scheduledAt;
+    private DateTimeOffset? _startsAt;
 
     public SelfUpdateGate(TimeSpan window) => _window = window;
+
+    /// <summary>
+    /// Czas startu skryptu podany w odpowiedzi PIERWSZEGO żądania (<see cref="Confirm"/>). null = pierwsze żądanie jeszcze przygotowuje
+    /// aktualizację (pobiera skrypt i tag) albo bramka jest wolna. Duplikaty zwracają tę samą wartość co pierwsza odpowiedź.
+    /// </summary>
+    public DateTimeOffset? StartsAt
+    {
+        get { lock (_gate) return _startsAt; }
+    }
+
+    /// <summary>Skrypt uruchomiony - zapamiętaj czas startu zwrócony klientowi.</summary>
+    public void Confirm(DateTimeOffset startsAt)
+    {
+        lock (_gate) _startsAt = startsAt;
+    }
 
     /// <summary>
     /// true = to żądanie planuje aktualizację (<paramref name="scheduledAt"/> = now). false = aktualizacja już zaplanowana
@@ -29,6 +45,7 @@ public sealed class SelfUpdateGate
                 return false;
             }
             _scheduledAt = now;
+            _startsAt = null;
             scheduledAt = now;
             return true;
         }
@@ -37,6 +54,10 @@ public sealed class SelfUpdateGate
     /// <summary>Skrypt nie został uruchomiony (brak pliku, błąd spawnu, zły tag) - kolejna próba jest dozwolona od razu.</summary>
     public void Release()
     {
-        lock (_gate) _scheduledAt = null;
+        lock (_gate)
+        {
+            _scheduledAt = null;
+            _startsAt = null;
+        }
     }
 }

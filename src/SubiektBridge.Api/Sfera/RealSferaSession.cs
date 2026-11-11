@@ -40,6 +40,10 @@ public sealed class RealSferaSession : ISferaSession
     private readonly StaQueueMonitor _staMonitor = new();
     /// <summary>Ile /health czeka na sondę sesji w kolejce STA, zanim zgłosi "busy" (zimne otwarcie sesji na prod: 1-2,2 s).</summary>
     private static readonly TimeSpan HealthProbeBudget = TimeSpan.FromSeconds(5);
+    /// <summary>Jak długo porażka ostatniej sondy jest zgłaszana (503) zamiast "busy", gdy kolejna sonda nie mieści się w budżecie.</summary>
+    private static readonly TimeSpan HealthProbeFailureMaxAge = TimeSpan.FromSeconds(60);
+    // Migawka ostatniej zakończonej sondy - publikowana na STA, czytana przez /health poza STA (patrz HealthProbeMemory).
+    private readonly HealthProbeMemory _healthMemory = new();
     private dynamic? _subiekt;
     private DateTimeOffset? _lastInvoiceAt;
     private string? _subiektVersion;
@@ -239,22 +243,26 @@ public sealed class RealSferaSession : ISferaSession
         // na martwy). Po budżecie token sondy jest anulowany, więc RunOnStaAsync pominie ją, gdy dojdzie do czoła kolejki.
         var (probed, probeResult) = await StaProbe.RunAsync(token => RunOnStaAsync(() =>
         {
+            SferaHealthDto result;
             try
             {
                 _ = Session; // trigger lazy open
                 // Sonda (jedna runda do SQL): "_subiekt ustawione" to nie "sesja zyje" - operator mogl zamknac
                 // Subiekta; bez sondy health mowil "active" az do pierwszego padnietego zadania.
-                if (!IsSessionAlive())
-                    return new SferaHealthDto("unknown", false, _lastInvoiceAt, _lastError);
-                return new SferaHealthDto(_subiektVersion ?? "unknown", true, _lastInvoiceAt, null);
+                result = IsSessionAlive()
+                    ? new SferaHealthDto(_subiektVersion ?? "unknown", true, _lastInvoiceAt, null)
+                    : new SferaHealthDto("unknown", false, _lastInvoiceAt, _lastError);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Sfera health check failed");
                 _lastError = $"{ex.GetType().Name}: {ex.Message}";
                 ResetSessionOnSta();
-                return new SferaHealthDto("unknown", false, _lastInvoiceAt, _lastError);
+                result = new SferaHealthDto("unknown", false, _lastInvoiceAt, _lastError);
             }
+            // Wynik zapamiętany także wtedy, gdy wołający już nie czeka (sonda trwała dłużej niż budżet) - patrz HealthProbeMemory.
+            _healthMemory.Record(result, DateTimeOffset.UtcNow);
+            return result;
         }, token), HealthProbeBudget, ct);
 
         SferaHealthDto sfera;
@@ -264,8 +272,9 @@ public sealed class RealSferaSession : ISferaSession
         }
         else
         {
-            // SessionActive = ostatni znany stan (obiekt sesji istnieje), NIE wynik sondy - Map i tak zwraca "busy".
-            sfera = new SferaHealthDto(_subiektVersion ?? "unknown", (object?)_subiekt is not null, _lastInvoiceAt, _lastError) with { StaBusy = true };
+            // Poza STA: żadnych odczytów żywych pól sesji - migawka ostatniej sondy. Świeża porażka sondy (np. otwarcie sesji trwające
+            // dłużej niż budżet przy niedostępnym Subiekcie) wraca jako 503, nie jako "busy".
+            sfera = _healthMemory.WhenProbeTimedOut(DateTimeOffset.UtcNow, HealthProbeFailureMaxAge);
         }
 
         // SQL poza STA: ping nie blokuje kolejki COM (connect timeout do 5 s).
