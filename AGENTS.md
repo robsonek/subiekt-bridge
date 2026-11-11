@@ -114,7 +114,7 @@ przykłady tylko z fikcyjnymi danymi (NIP `1111111111`, EAN-y `5901...`), ZERO d
 | `POST /api/v1/admin/update` | Self-update (detached PowerShell). Od v0.24.0 `SelfUpdateGate`: drugie żądanie w 10 min → `202` z `already_scheduled: true`, bez drugiego skryptu i bez nadpisania `update-bridge.ps1` |
 | `POST /api/v1/sfera/raw` | Escape hatch (whitelist metod w configu) |
 
-Wszystkie wymagają `X-Bridge-Token: <secret>`. Mutujące POST (`/invoices`, `/corrections`, `/receipts`,
+Wszystkie poza `GET /health` wymagają `X-Bridge-Token: <secret>` (`/health` jest celowo anonimowe — `[AllowAnonymous]` dla monitoringu, chronione whitelistą IP w firewallu). Mutujące POST (`/invoices`, `/corrections`, `/receipts`,
 `/transfers`, `/settlements`, `/book`) i `PATCH /receipts/{id}` wymagają też `Idempotency-Key`. Bez klucza: `DELETE .../settlements/{id}`
 (idempotentny z natury) i `POST .../ksef` (idempotencja przez `StatusKSeF` w Subiekcie).
 
@@ -175,6 +175,10 @@ grep -rEi "ONEE|onee.pl|WIN-MSSQL|onee-sync|test@allegro" .   # jeśli coś wrac
 ```
 
 ## Diagnostyka
+
+**Poziomy (od v0.24.0, `BridgeLogging.ApplyLevels`):** `Information` z `Microsoft.AspNetCore.*` jest odcięte w kodzie — zostaje jedna linia
+`HTTP <metoda> <ścieżka> responded <kod> in X ms` na żądanie (sekcja `Logging:LogLevel` z appsettings NIE działa na Serilog; nadpisanie
+tylko sekcją `Serilog`). Rozłączenie klienta w listingu = `499` + INF (`ClientDisconnect`), nie `[ERR]` + 502.
 
 Logi: `C:\SubiektBridge\logs\subiekt-bridge-yyyyMMdd.log` (Serilog rolling daily, data BEZ kresek, np.
 `subiekt-bridge-20260929.log`); zdalnie: `GET /api/v1/admin/logs?tail=200&grep=KFS`. Usługa:

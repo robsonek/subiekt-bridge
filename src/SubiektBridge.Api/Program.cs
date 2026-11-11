@@ -30,7 +30,7 @@ EnsureSelfSignedCertificate(builder.Configuration, builder.Environment.ContentRo
 // Logi do absolute path obok exe - Windows Service ma WorkingDirectory=C:\Windows\System32,
 // wiec relative "logs/" trafialo poza C:\SubiektBridge\ i folder logs/ byl pusty.
 var logPath = Path.Combine(AppContext.BaseDirectory, "logs", "subiekt-bridge-.log");
-builder.Host.UseSerilog((ctx, cfg) => cfg
+builder.Host.UseSerilog((ctx, cfg) => BridgeLogging.ApplyLevels(cfg)
     .ReadFrom.Configuration(ctx.Configuration)
     .WriteTo.Console()
     .WriteTo.File(

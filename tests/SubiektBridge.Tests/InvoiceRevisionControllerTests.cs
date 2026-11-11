@@ -178,16 +178,6 @@ public sealed class InvoiceRevisionControllerTests : IDisposable
         Assert.Equal(0, fake.InvoiceRevisionReadCountForTests);
     }
 
-    /// <summary>Mutant: catch-all połyka anulowanie żądania (OCE zamienione na revision=null).</summary>
-    [Fact]
-    public async Task Get_cancellation_propagates()
-    {
-        var fake = new FakeSferaSession();
-        using var cts = new CancellationTokenSource();
-        cts.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Controller(fake).Get($"sub_{Id}", cts.Token));
-    }
-
     // ----------------------------- GET /invoices -----------------------------
 
     /// <summary>Mutant: lista bez rewizji albo z innego źródła niż GET (panel porównuje rewizje z obu endpointów).</summary>
@@ -216,14 +206,34 @@ public sealed class InvoiceRevisionControllerTests : IDisposable
         Assert.Equal(1, fake.InvoiceRevisionReadCountForTests);
     }
 
-    /// <summary>Mutant: anulowanie podczas odczytu rewizji listy połknięte (revision=null) albo zamienione na 502.</summary>
+    /// <summary>
+    /// Mutant: anulowanie podczas odczytu rewizji listy połknięte (200 z revision=null) albo zamienione na 502. Od v0.24.0 rozłączenie
+    /// klienta na tym etapie kończy się jak w fazie listy: 499 bez wpisu błędu (ClientDisconnect), nie nieobsłużonym wyjątkiem
+    /// (Greptile PR #38 - wyjątek z ReadRevisionsSoftAsync wychodził poza catch i zostawiał fałszywy alarm w logu).
+    /// </summary>
     [Fact]
-    public async Task List_cancellation_during_revision_read_propagates()
+    public async Task List_cancellation_during_revision_read_is_client_disconnect_499()
     {
         var fake = new FakeSferaSession();
         using var cts = new CancellationTokenSource();
         cts.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Controller(fake).Query(null, null, null, null, null, 0, null, cts.Token));
+
+        var result = await Controller(fake).Query(null, null, null, null, null, 0, null, cts.Token);
+
+        // Fake zwraca listę mimo anulowanego tokena, więc anulowanie trafia w odczyt rewizji (ten rzuca przed zliczeniem wywołania).
+        Assert.Equal(499, Assert.IsType<StatusCodeResult>(result.Result).StatusCode);
+    }
+
+    [Fact]
+    public async Task Get_cancellation_during_revision_read_is_client_disconnect_499()
+    {
+        var fake = new FakeSferaSession();
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var result = await Controller(fake).Get($"sub_{Id}", cts.Token);
+
+        Assert.Equal(499, Assert.IsType<StatusCodeResult>(result.Result).StatusCode);
     }
 
     /// <summary>Mutant: rewizja czytana w ścieżce replayu idempotencji (FindInvoiceByIdAsync) - zbędna zależność POST od SqlClienta.</summary>

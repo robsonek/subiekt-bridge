@@ -44,6 +44,10 @@ public sealed class BankOperationsController : ControllerBase
             var items = await _sfera.QueryBankOperationsAsync(request, ct);
             return Ok(items);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return ClientDisconnect.Result(_logger, "QueryBankOperations");
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "QueryBankOperations failed");

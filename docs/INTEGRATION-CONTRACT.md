@@ -320,8 +320,9 @@ Konsekwencje:
   `warehouse_subiekt_id` (id magazynu dokumentu), a `warehouse_subiekt_id=` w zapytaniu zawęża do jednego magazynu;
 - dokumenty **anulowane** w Subiekcie nie są zwracane (wcześniej były pomijane w praktyce, bo nie dawały się wczytać);
 - `contractor_nip` / `contractor_name` to bieżące dane kartoteki nabywcy (jak dotąd), `type` nadal z prefiksu numeru;
-  lista podaje je przycięte, a pustą wartość jako `null`, natomiast `GET /invoices/{id}` i `GET /receipts/{id}` — dosłownie
-  jak w kartotece (kontrahent bez NIP = `""`, spacje na brzegu nazwy zachowane); porównując oba źródła, normalizuj;
+  od v0.24.0 lista podaje je tak samo jak `GET /invoices/{id}` i `GET /receipts/{id}` — dosłownie jak w kartotece (kontrahent
+  bez NIP = `""`, spacje na brzegu nazwy zachowane; `null` tylko gdy dokument nie ma kartoteki nabywcy). W v0.21.6–v0.23.0 lista
+  przycinała te pola i pustą wartość podawała jako `null`;
 - `warehouse_subiekt_id` w `GET /invoices/{id}` jest `null` (ten endpoint czyta dokument przez Sferę);
 - błąd odczytu bazy = `502 SUBIEKT_QUERY_FAILED` (lista retry §4), bez cichego powrotu do wolnego trybu.
 
@@ -810,7 +811,7 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
 
-### v0.24.0 (2026-11-11 — `/health` nie czeka na zajęty Subiekt, przerwanie pozostałych list, jedna aktualizacja naraz)
+### v0.24.0 (2026-11-11 — `/health` nie czeka na zajęty Subiekt, przerwanie pozostałych list, jedna aktualizacja naraz, spójne pola kontrahenta)
 - **`GET /health`: nowy stan `status: "busy"` / `sfera_session: "busy"` z kodem `200`** i nowe pole `busy_for_seconds`
   (`null`, gdy Subiekt jest wolny). `queue_depth` pokazuje prawdziwą liczbę wywołań w kolejce (dotąd zawsze `0`). Do v0.23.0
   `/health` przy zajętym Subiekcie czekał do limitu czasu klienta i kończył się `503`. Opis: §8.
@@ -818,6 +819,12 @@ Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx =
   przy najbliższym wierszu (jak `GET /invoices` od v0.21.4). Odpowiedzi bez zmian.
 - **`POST /admin/update`:** drugie żądanie w ciągu 10 minut od zaplanowanej aktualizacji nie uruchamia drugiego skryptu. Odpowiedź
   to nadal `202` w tym samym kształcie, z nowym polem `already_scheduled: true` i tym samym `scheduled_at`, co w pierwszej odpowiedzi.
+- **`GET /invoices` i `GET /receipts`: `contractor_nip` / `contractor_name` bez normalizacji**, czyli identycznie jak w
+  `GET /invoices/{id}` i `GET /receipts/{id}` (§3.8): kontrahent bez NIP = `""` (w v0.21.6–v0.23.0 lista dawała `null`), nazwa ze
+  spacjami na brzegach jak w kartotece. `null` tylko wtedy, gdy dokument nie ma kartoteki nabywcy. Jeśli porównujesz NIP z listy
+  ściśle z `null`, potraktuj `""` tak samo.
+- Rozłączenie klienta w trakcie listy (`/invoices`, `/receipts`, `/bank-operations`, `/bank-transactions`, open-receivables/payables)
+  nie jest już zapisywane w logu mostu jako błąd `502`. Dla klienta bez znaczenia (odpowiedzi i tak nie odbiera).
 
 ### v0.23.0 (2026-11-11 — most na .NET 11)
 - Most działa na .NET 11 (dotąd .NET 10). **Dla klienta API nic się nie zmienia**: te same żądania, odpowiedzi i kody błędów.

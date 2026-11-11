@@ -59,6 +59,10 @@ public sealed class ReceiptsController : ControllerBase
             var items = await _sfera.QueryInvoicesAsync(request, ct);
             return Ok(items);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return ClientDisconnect.Result(_logger, "QueryReceipts");
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "QueryReceipts failed");
