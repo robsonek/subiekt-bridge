@@ -314,6 +314,8 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenReceivablesAsync(OpenReceivablesQueryRequestDto request, CancellationToken ct)
     {
+        // Lustro RunOnStaAsync: anulowany token = job nie rusza (Task anulowany).
+        if (ct.IsCancellationRequested) return Task.FromCanceled<IReadOnlyList<OpenReceivableDto>>(ct);
         // Deterministyczne otwarte naleznosci (rozrachunki sprzedazy z otwartym saldem) + data (nzf_Data) do
         // testu filtra from/to. Most NIE matchuje - zwraca okno; filtr min/max/contractor/from/to/limit lustrem
         // RealSferaSession. TYLKO PLN: 51900 (EUR) jest tu po to, by potwierdzic ze most go WYKLUCZA (Real:
@@ -340,6 +342,8 @@ public sealed class FakeSferaSession : ISferaSession
 
     public Task<IReadOnlyList<OpenReceivableDto>> QueryOpenPayablesAsync(OpenReceivablesQueryRequestDto request, CancellationToken ct)
     {
+        // Lustro RunOnStaAsync: anulowany token = job nie rusza (Task anulowany).
+        if (ct.IsCancellationRequested) return Task.FromCanceled<IReadOnlyList<OpenReceivableDto>>(ct);
         // Deterministyczne otwarte ZOBOWIAZANIA (FZ, nzf_Typ=40). Lustro receivables: PLN-only, okno
         // kwoty/kontrahent/data/limit + parytet wyszukiwarki (contractor-scope albo number-path).
         OpenReceivableDto[] all =
@@ -649,8 +653,14 @@ public sealed class FakeSferaSession : ISferaSession
         return Task.CompletedTask;
     }
 
+    /// <summary>Test-only: wyjątek rzucany przez listing operacji bankowych (awaria odczytu, która NIE jest anulowaniem wołającego).</summary>
+    public Exception? BankOperationsFailureForTests { get; init; }
+
     public Task<IReadOnlyList<BankOperationDto>> QueryBankOperationsAsync(BankOperationQueryRequestDto request, CancellationToken ct)
     {
+        // Lustro RunOnStaAsync: anulowany token = job nie rusza (Task anulowany).
+        if (ct.IsCancellationRequested) return Task.FromCanceled<IReadOnlyList<BankOperationDto>>(ct);
+        if (BankOperationsFailureForTests is { } failure) return Task.FromException<IReadOnlyList<BankOperationDto>>(failure);
         IReadOnlyList<BankOperationDto> ops = new[]
         {
             new BankOperationDto(70001, "in", "2026-06-10", 123.45m, 123.45m, 1, "Zaplata FS 1/2026", "BP 1/2026"),

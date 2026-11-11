@@ -1,6 +1,6 @@
 # SubiektBridge — przewodnik integracji KLIENTA (nowy system sprzedażowy)
 
-> **Dotyczy:** SubiektBridge **v0.24.0** (2026-11-11; v0.23.0 wydane 2026-11-11). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
+> **Dotyczy:** SubiektBridge **v0.24.1** (2026-11-11; v0.24.0 wydane 2026-11-11). Zmiany między wersjami: [Historia zmian kontraktu](#9-historia-zmian-kontraktu) na końcu.
 
 > **Topologia tej integracji.**
 > ```
@@ -320,8 +320,9 @@ Konsekwencje:
   `warehouse_subiekt_id` (id magazynu dokumentu), a `warehouse_subiekt_id=` w zapytaniu zawęża do jednego magazynu;
 - dokumenty **anulowane** w Subiekcie nie są zwracane (wcześniej były pomijane w praktyce, bo nie dawały się wczytać);
 - `contractor_nip` / `contractor_name` to bieżące dane kartoteki nabywcy (jak dotąd), `type` nadal z prefiksu numeru;
-  lista podaje je przycięte, a pustą wartość jako `null`, natomiast `GET /invoices/{id}` i `GET /receipts/{id}` — dosłownie
-  jak w kartotece (kontrahent bez NIP = `""`, spacje na brzegu nazwy zachowane); porównując oba źródła, normalizuj;
+  od v0.24.1 lista podaje je tak samo jak `GET /invoices/{id}` i `GET /receipts/{id}` — dosłownie jak w kartotece (kontrahent
+  bez NIP = `""`, spacje na brzegu nazwy zachowane; `null` tylko gdy dokument nie ma kartoteki nabywcy). W v0.21.6–v0.24.0 lista
+  przycinała te pola i pustą wartość podawała jako `null`;
 - `warehouse_subiekt_id` w `GET /invoices/{id}` jest `null` (ten endpoint czyta dokument przez Sferę);
 - błąd odczytu bazy = `502 SUBIEKT_QUERY_FAILED` (lista retry §4), bez cichego powrotu do wolnego trybu.
 
@@ -809,6 +810,14 @@ zostaw `null` (domyślny) albo dogadaj mapowanie magazynów z administratorem Su
 
 Tylko zmiany widoczne dla klienta (nowe pola, kody, zmienione zachowanie). Pełne opisy wydań: GitHub Releases.
 Kody 4xx/5xx obsługujesz wg §4 — nowe kody wpadają w te same reguły (4xx = nie retry, 5xx = retry tylko z listy retry).
+
+### v0.24.1 (2026-11-11 — spójne pola kontrahenta na liście, rozłączenie klienta bez błędu)
+- **`GET /invoices` i `GET /receipts`: `contractor_nip` / `contractor_name` bez normalizacji**, czyli identycznie jak w
+  `GET /invoices/{id}` i `GET /receipts/{id}` (§3.8): kontrahent bez NIP = `""` (w v0.21.6–v0.24.0 lista dawała `null`), nazwa ze
+  spacjami na brzegach jak w kartotece. `null` tylko wtedy, gdy dokument nie ma kartoteki nabywcy. Jeśli porównujesz NIP z listy
+  ściśle z `null`, potraktuj `""` tak samo.
+- Rozłączenie klienta w trakcie listy (`/invoices`, `/receipts`, `/bank-operations`, `/bank-transactions`, open-receivables/payables)
+  nie jest już zapisywane w logu mostu jako błąd `502`. Dla klienta bez znaczenia (odpowiedzi i tak nie odbiera).
 
 ### v0.24.0 (2026-11-11 — `/health` nie czeka na zajęty Subiekt, przerwanie pozostałych list, jedna aktualizacja naraz)
 - **`GET /health`: nowy stan `status: "busy"` / `sfera_session: "busy"` z kodem `200`** i nowe pole `busy_for_seconds`

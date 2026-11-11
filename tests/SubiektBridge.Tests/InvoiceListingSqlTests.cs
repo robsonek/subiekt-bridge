@@ -186,14 +186,15 @@ public class InvoiceListingSqlTests
     }
 
     [Fact]
-    public void Map_TrimsPaddedStrings_EmptyNipBecomesNull()
+    public void Map_TrimsNumber_ButKeepsContractorFieldsAsStored()
     {
-        var dto = InvoiceListingSql.Map(Row(("dok_NrPelny", "FS 1/2026   "), ("adr_NIP", "   "), ("adr_Nazwa", " Firma  ")));
+        // Numer po Trim (z niego liczony jest type); NIP i nazwa bez normalizacji - jak GET /invoices/{id} (LogsAndCancellationTests).
+        var dto = InvoiceListingSql.Map(Row(("dok_NrPelny", "FS 1/2026   "), ("adr_NIP", ""), ("adr_Nazwa", " Firma  ")));
 
         Assert.Equal("FS 1/2026", dto.Number);
         Assert.Equal("FS", dto.Type);
-        Assert.Null(dto.ContractorNip);
-        Assert.Equal("Firma", dto.ContractorName);
+        Assert.Equal("", dto.ContractorNip);
+        Assert.Equal(" Firma  ", dto.ContractorName);
     }
 
     [Fact]

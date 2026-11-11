@@ -57,6 +57,10 @@ public sealed class InvoicesController : ControllerBase
         {
             items = await _sfera.QueryInvoicesAsync(request, ct);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return ClientDisconnect.Result(_logger, "QueryInvoices");
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "QueryInvoices failed");
@@ -115,6 +119,10 @@ public sealed class InvoicesController : ControllerBase
             var items = await _sfera.QueryOpenReceivablesAsync(request, ct);
             return Ok(items);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return ClientDisconnect.Result(_logger, "QueryOpenReceivables");
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "QueryOpenReceivables failed");
@@ -163,6 +171,10 @@ public sealed class InvoicesController : ControllerBase
         {
             var items = await _sfera.QueryOpenPayablesAsync(request, ct);
             return Ok(items);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return ClientDisconnect.Result(_logger, "QueryOpenPayables");
         }
         catch (Exception ex)
         {

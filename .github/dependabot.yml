@@ -1,5 +1,9 @@
 # Cotygodniowe PR-y z aktualizacjami zależności. Minor/patch zgrupowane w jeden PR na ekosystem;
 # major idą osobno (breaking changes do przejrzenia - np. SqlClient 6 -> 7 wydzielił Azure).
+# Wyjątek: pakiety wydawane razem z runtime .NET (Microsoft.Extensions.*, Microsoft.Data.Sqlite, System.*) - ich major to nowa
+# linia .NET i musi wejść jednym PR-em razem (2026-11-11: trzy osobne PR-y 10 -> 11 zmieniały sąsiednie linie csproj i wzajemnie
+# się konfliktowały, a wdrożone pojedynczo dawały mieszankę linii nad starszym frameworkiem). Taki PR = decyzja o przejściu na
+# nowy runtime (TargetFramework + SDK na CI), nie rutynowe podbicie.
 version: 2
 updates:
   - package-ecosystem: "nuget"
@@ -9,6 +13,9 @@ updates:
     commit-message:
       prefix: "chore(deps)"
     groups:
+      dotnet-runtime-major:
+        patterns: ["Microsoft.Extensions.*", "Microsoft.Data.Sqlite*", "Microsoft.AspNetCore.*", "System.*"]
+        update-types: ["major"]
       nuget-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]

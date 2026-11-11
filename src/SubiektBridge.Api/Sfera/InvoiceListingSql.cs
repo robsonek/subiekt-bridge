@@ -114,8 +114,10 @@ public static class InvoiceListingSql
             Type: type,
             IssueDate: date?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
             ContractorId: contractorId,
-            ContractorNip: TrimmedOrNull(Required(row, "adr_NIP")),
-            ContractorName: TrimmedOrNull(Required(row, "adr_Nazwa")),
+            // NIP i nazwa BEZ normalizacji - ten sam zapis co GET /invoices/{id} (ContractorNipName, v0.21.7) i dawna ścieżka COM:
+            // kontrahent bez NIP = "", spacje na brzegach zachowane; null tylko gdy kartoteki nie ma (LEFT JOIN bez wiersza).
+            ContractorNip: Required(row, "adr_NIP") as string,
+            ContractorName: Required(row, "adr_Nazwa") as string,
             NetAmount: Money(Required(row, "dok_WartNetto")),
             VatAmount: Money(Required(row, "dok_WartVat")),
             GrossAmount: Money(Required(row, "dok_WartBrutto")),
@@ -133,9 +135,6 @@ public static class InvoiceListingSql
         }
         return value is DBNull ? null : value;
     }
-
-    private static string? TrimmedOrNull(object? value)
-        => value is string s && !string.IsNullOrWhiteSpace(s) ? s.Trim() : null;
 
     private static decimal? Money(object? value)
         => value is null ? null : Convert.ToDecimal(value, CultureInfo.InvariantCulture);

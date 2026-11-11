@@ -81,7 +81,8 @@ dokument** (pełne wczytanie + `Kontrahenci.Wczytaj`), 100 FS nie mieściło si�
 `SELECT TOP (@limit)` z `dok__Dokument d LEFT JOIN adr__Ewid a` (adres główny, `adr_TypAdresu = 1`), parametry zamiast interpolacji
 (LIKE escapowane `OpenReceivableFields.EscapeLikeWildcards`), **wszystkie magazyny** + opcjonalny `dok_MagId = @mag` + `dok_MagId`
 w każdym wierszu (`warehouse_subiekt_id`), `dok_Status <> 2`, typ spoza listy `DokTyp.BySymbol` po prefiksie **realnej** kolumny
-`dok_NrPelny`, `type` w DTO nadal z numeru. Błąd SQL → wyjątek → `502 SUBIEKT_QUERY_FAILED`; **ZAKAZ cichego fallbacku na COM**
+`dok_NrPelny`, `type` w DTO nadal z numeru. **NIP i nazwa kontrahenta bez normalizacji (od v0.24.1)** — ten sam zapis co
+`ContractorNipName` w pojedynczym dokumencie i dawna ścieżka COM (bez NIP = `""`, spacje zachowane; `null` tylko bez wiersza `adr__Ewid`). Błąd SQL → wyjątek → `502 SUBIEKT_QUERY_FAILED`; **ZAKAZ cichego fallbacku na COM**
 (wróciłby tryb blokujący most). Nagłówki dokumentów KSeF są czytelne (szyfrowany tylko XML w `ksef_Pliki`). Ścieżka COM poniżej żyje
 wyłącznie pod `Bridge:InvoiceListingViaSql=false` (przełącznik awaryjny). `GET /invoices/{id}` nadal COM (`warehouse_subiekt_id = null`;
 NIP/nazwa kontrahenta od v0.21.7 z SQL — sekcja niżej).
