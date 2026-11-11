@@ -317,22 +317,22 @@ public sealed class FakeSferaSession : ISferaSession
         // Deterministyczne otwarte naleznosci (rozrachunki sprzedazy z otwartym saldem) + data (nzf_Data) do
         // testu filtra from/to. Most NIE matchuje - zwraca okno; filtr min/max/contractor/from/to/limit lustrem
         // RealSferaSession. TYLKO PLN: 51900 (EUR) jest tu po to, by potwierdzic ze most go WYKLUCZA (Real:
-        // nzf_IdWaluty='PLN' w filtrze + controller odrzuca currency!=PLN). 52001 (ten sam kontrahent 13292 co
-        // 53447, starsza data) sprawdza filtr contractor_id ORAZ from/to.
+        // nzf_IdWaluty='PLN' w filtrze + controller odrzuca currency!=PLN). 52001 (ten sam kontrahent 13201 co
+        // 53401, starsza data) sprawdza filtr contractor_id ORAZ from/to.
         // Date/Original/Nip w DTO: data (nzf_Data) do testu filtra from/to ORAZ do prezentacji u klienta;
         // original (WartoscPoczatkowa, brutto) i nip (Kontrahenci.NIP) - dane decyzyjne operatora. 53310 ma
         // nip=null (parytet z B2C/osoba prywatna - brak NIP); 51900 (EUR) jest tu by potwierdzic wykluczenie.
         OpenReceivableDto[] all =
         {
-            new("sub_53447", 53447, "FS", "PLN", 3372.50m, 13292, "Szyszka Krzysztof", "FS 573/05/2026", "2026-06-12", 3372.50m, "1234563218"),
+            new("sub_53401", 53401, "FS", "PLN", 1230.00m, 13201, "Testowy Jan", "FS 101/05/2026", "2026-06-12", 1230.00m, "1234563218"),
             new("sub_53310", 53310, "FS", "PLN", 371.12m, 14001, "Google Commerce Limited", "FS 540/05/2026", "2026-06-11", 382.60m, null),
-            new("sub_52001", 52001, "FS", "PLN", 120.00m, 13292, "Szyszka Krzysztof", "FS 410/04/2026", "2026-04-15", 120.00m, "1234563218"),
+            new("sub_52001", 52001, "FS", "PLN", 120.00m, 13201, "Testowy Jan", "FS 102/04/2026", "2026-04-15", 120.00m, "1234563218"),
             new("sub_51900", 51900, "FS", "EUR", 99.00m, 15000, "Mock Foreign GmbH", "FS 300/03/2026", "2026-03-01", 99.00m, "DE123456789"),
             // Wiersz KOLIZYJNY (adwersaryjny dla Search_ContractorScope_TakesPrecedenceOverNumber): OBCY
-            // kontrahent (16100 "Nowak Anna" - NIE pasuje do "Szyszka" ani nazwa, ani NIP), ale NUMER FV
-            // zawiera "szyszka". Gdy fraza "Szyszka" trafia w scope kontrahenta 13292, ten wiersz NIE moze
+            // kontrahent (16100 "Nowak Anna" - NIE pasuje do "Testowy" ani nazwa, ani NIP), ale NUMER FV
+            // zawiera "testowy". Gdy fraza "Testowy" trafia w scope kontrahenta 13201, ten wiersz NIE moze
             // wrocic - number-path jest WYKLUCZONY (nie OR-owany ze scope). Twardy dowod precedencji scope.
-            new("sub_53500", 53500, "FS", "PLN", 250.00m, 16100, "Nowak Anna", "FS szyszka-99/06/2026", "2026-06-13", 250.00m, "9999999999"),
+            new("sub_53500", 53500, "FS", "PLN", 250.00m, 16100, "Nowak Anna", "FS testowy-99/06/2026", "2026-06-13", 250.00m, "9999999999"),
         };
 
         return Task.FromResult(FilterOpenSettlements(all, request));
@@ -673,7 +673,7 @@ public sealed class FakeSferaSession : ISferaSession
         IReadOnlyList<BankTransactionDto> all = new[]
         {
             new BankTransactionDto(13109, "2026-06-12", 371.12m, "in", "Google Commerce Limited", "PL61109010140000071219812874", "PRZELEW - payout", null, false, null, 49, "PL49 1870 0000 0000 0000 0000 0049"),
-            new BankTransactionDto(13127, "2026-06-11", 3372.50m, "in", "Jan Szyszka", "PL27114020040000300201355387", "PRZELEW - zaplata", null, false, null, 1, "PL08 1140 0000 0000 0000 0000 8831"),
+            new BankTransactionDto(13127, "2026-06-11", 1230.00m, "in", "Jan Testowy", "PL22222222222222222222222222", "PRZELEW - zaplata", null, false, null, 1, "PL08 1140 0000 0000 0000 0000 8831"),
             new BankTransactionDto(12001, "2026-06-01", 500.00m, "out", "Dostawca XYZ", "PL11111111111111111111111111", "PRZELEW wychodzacy", null, true, 88001, 49, "PL49 1870 0000 0000 0000 0000 0049"),
             // Bez linku, ale POMINIETA przez operatora (hb_Status=3) - NIE jest "do zaksiegowania".
             new BankTransactionDto(13200, "2026-06-10", 12.00m, "in", "Oplata bankowa", null, "PROWIZJA", null, false, null, 49, "PL49 1870 0000 0000 0000 0000 0049", HbStatus: 3),

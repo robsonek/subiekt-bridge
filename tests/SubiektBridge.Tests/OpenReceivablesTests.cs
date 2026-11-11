@@ -60,7 +60,7 @@ public class OpenReceivablesTests
         var fake = new FakeSferaSession();
         var r = await fake.QueryOpenReceivablesAsync(Req(), CancellationToken.None);
 
-        // 4 PLN naleznosci (53447, 53310, 52001, 53500); rekord EUR (51900) odfiltrowany przez default currency=PLN.
+        // 4 PLN naleznosci (53401, 53310, 52001, 53500); rekord EUR (51900) odfiltrowany przez default currency=PLN.
         Assert.Equal(4, r.Count);
         Assert.All(r, x => Assert.Equal("PLN", x.Currency));
         Assert.DoesNotContain(r, x => x.DocumentSubiektId == 51900);
@@ -82,12 +82,12 @@ public class OpenReceivablesTests
     public async Task ContractorFilter_NarrowsToOneContractor()
     {
         var fake = new FakeSferaSession();
-        // 13292 (Szyszka) ma dwie otwarte PLN naleznosci (53447, 52001).
-        var r = await fake.QueryOpenReceivablesAsync(Req(contractorId: 13292), CancellationToken.None);
+        // 13201 (Testowy) ma dwie otwarte PLN naleznosci (53401, 52001).
+        var r = await fake.QueryOpenReceivablesAsync(Req(contractorId: 13201), CancellationToken.None);
 
         Assert.Equal(2, r.Count);
-        Assert.All(r, x => Assert.Equal(13292, x.ContractorId));
-        Assert.Contains(r, x => x.DocumentSubiektId == 53447);
+        Assert.All(r, x => Assert.Equal(13201, x.ContractorId));
+        Assert.Contains(r, x => x.DocumentSubiektId == 53401);
         Assert.Contains(r, x => x.DocumentSubiektId == 52001);
     }
 
@@ -103,14 +103,14 @@ public class OpenReceivablesTests
     public async Task Dto_Shape_BridgeIdAndDocType()
     {
         var fake = new FakeSferaSession();
-        var r = await fake.QueryOpenReceivablesAsync(Req(min: 3000m, max: 3500m), CancellationToken.None);
+        var r = await fake.QueryOpenReceivablesAsync(Req(min: 1000m, max: 1500m), CancellationToken.None);
 
         var item = Assert.Single(r);
-        Assert.Equal("sub_53447", item.DocumentId);            // bridge id -> POST /invoices/{id}/settlements
-        Assert.Equal(53447, item.DocumentSubiektId);
+        Assert.Equal("sub_53401", item.DocumentId);            // bridge id -> POST /invoices/{id}/settlements
+        Assert.Equal(53401, item.DocumentSubiektId);
         Assert.Equal("FS", item.DocType);
-        Assert.Equal("Szyszka Krzysztof", item.ContractorName);
-        Assert.Equal("FS 573/05/2026", item.Number);
+        Assert.Equal("Testowy Jan", item.ContractorName);
+        Assert.Equal("FS 101/05/2026", item.Number);
         Assert.Equal($"sub_{item.DocumentSubiektId}", item.DocumentId); // niezmiennik formatu bridge id
     }
 
@@ -119,11 +119,11 @@ public class OpenReceivablesTests
     {
         // Operator widzi date FV, kwote pierwotna (brutto) i NIP, by dopasowac przelew do kontrahenta.
         var fake = new FakeSferaSession();
-        var r = await fake.QueryOpenReceivablesAsync(Req(min: 3000m, max: 3500m), CancellationToken.None);
+        var r = await fake.QueryOpenReceivablesAsync(Req(min: 1000m, max: 1500m), CancellationToken.None);
 
         var item = Assert.Single(r);
         Assert.Equal("2026-06-12", item.Date);
-        Assert.Equal(3372.50m, item.Original);
+        Assert.Equal(1230.00m, item.Original);
         Assert.Equal("1234563218", item.Nip);
     }
 
@@ -144,14 +144,14 @@ public class OpenReceivablesTests
     [InlineData(null, true)]                                  // brak frazy = pasuje wszystko
     [InlineData("", true)]
     [InlineData("   ", true)]
-    [InlineData("szyszka", true)]                             // nazwa (case-insensitive)
-    [InlineData("SZYSZKA", true)]
-    [InlineData("573", true)]                                 // numer
+    [InlineData("testowy", true)]                             // nazwa (case-insensitive)
+    [InlineData("TESTOWY", true)]
+    [InlineData("101", true)]                                 // numer
     [InlineData("1234563218", true)]                          // NIP
     [InlineData("zzz-nie-ma", false)]
     public void MatchesSearch_NumberNameNip(string? search, bool expected)
     {
-        Assert.Equal(expected, OpenReceivableFields.MatchesSearch(search, "FS 573/05/2026", "Szyszka Krzysztof", "1234563218"));
+        Assert.Equal(expected, OpenReceivableFields.MatchesSearch(search, "FS 101/05/2026", "Testowy Jan", "1234563218"));
     }
 
     [Fact]
@@ -163,7 +163,7 @@ public class OpenReceivablesTests
     }
 
     [Theory]
-    [InlineData("Szyszka", "Szyszka")]      // zwykla fraza - bez zmian
+    [InlineData("Testowy", "Testowy")]      // zwykla fraza - bez zmian
     [InlineData("50%", "50[%]")]            // % jako literal (inaczej = wszyscy kontrahenci)
     [InlineData("A_B", "A[_]B")]            // _ jako literal
     [InlineData("Sp[ar]", "Sp[[]ar]")]      // [ neutralizowane PIERWSZE (kolejnosc!)
@@ -178,20 +178,20 @@ public class OpenReceivablesTests
     public async Task Search_FiltersByContractorName()
     {
         var fake = new FakeSferaSession();
-        var r = await fake.QueryOpenReceivablesAsync(Req(search: "szyszka"), CancellationToken.None);
+        var r = await fake.QueryOpenReceivablesAsync(Req(search: "testowy"), CancellationToken.None);
 
-        Assert.Equal(2, r.Count); // 53447 + 52001 (oba Szyszka, PLN); 51900 EUR odpada
-        Assert.All(r, x => Assert.Equal("Szyszka Krzysztof", x.ContractorName));
+        Assert.Equal(2, r.Count); // 53401 + 52001 (oba Testowy, PLN); 51900 EUR odpada
+        Assert.All(r, x => Assert.Equal("Testowy Jan", x.ContractorName));
     }
 
     [Fact]
     public async Task Search_FiltersByInvoiceNumber()
     {
         var fake = new FakeSferaSession();
-        var r = await fake.QueryOpenReceivablesAsync(Req(search: "573"), CancellationToken.None);
+        var r = await fake.QueryOpenReceivablesAsync(Req(search: "101"), CancellationToken.None);
 
         var only = Assert.Single(r);
-        Assert.Equal(53447, only.DocumentSubiektId);
+        Assert.Equal(53401, only.DocumentSubiektId);
     }
 
     [Fact]
@@ -216,18 +216,18 @@ public class OpenReceivablesTests
     public async Task Search_ContractorScope_TakesPrecedenceOverNumber()
     {
         // Semantyka v0.14.0 (perf fix): gdy fraza pasuje do KONTRAHENTA (SQL nazwa/NIP), zwracamy wiersze
-        // tego kontrahenta - number-path NIE jest mieszany. "410" pasuje do numeru FS 410/04/2026 (52001,
-        // Szyszka), ale rowniez do NIP "1234563218"? nie. Tu sprawdzamy odwrotnie: fraza pasujaca do nazwy
+        // tego kontrahenta - number-path NIE jest mieszany. "102" pasuje do numeru FS 102/04/2026 (52001,
+        // Testowy), ale rowniez do NIP "1234563218"? nie. Tu sprawdzamy odwrotnie: fraza pasujaca do nazwy
         // kontrahenta zaweza po kontrahencie, a nie zwraca dodatkowo wierszy obcych o numerze z ta fraza.
         var fake = new FakeSferaSession();
 
-        // "Szyszka" -> scope = kontrahent 13292 -> tylko jego 2 wiersze (53447, 52001), nie inne.
-        var r = await fake.QueryOpenReceivablesAsync(Req(search: "Szyszka"), CancellationToken.None);
+        // "Testowy" -> scope = kontrahent 13201 -> tylko jego 2 wiersze (53401, 52001), nie inne.
+        var r = await fake.QueryOpenReceivablesAsync(Req(search: "Testowy"), CancellationToken.None);
         Assert.Equal(2, r.Count);
-        Assert.All(r, x => Assert.Equal(13292, x.ContractorId));
+        Assert.All(r, x => Assert.Equal(13201, x.ContractorId));
 
         // Twardy dowod precedencji: wiersz 53500 to OBCY kontrahent (16100 "Nowak Anna", nie pasuje do
-        // "Szyszka"), ALE jego numer FV zawiera "szyszka". Gdyby number-path byl OR-owany ze scope (a nie
+        // "Testowy"), ALE jego numer FV zawiera "testowy". Gdyby number-path byl OR-owany ze scope (a nie
         // wykluczony), 53500 by wrocil. Asercja, ze NIE wraca, lapie regresje OR-mieszania scope+number.
         Assert.DoesNotContain(r, x => x.DocumentSubiektId == 53500);
     }
@@ -238,13 +238,13 @@ public class OpenReceivablesTests
         var controller = NewController(new FakeSferaSession());
         var r = await controller.OpenReceivables(
             minAmount: null, maxAmount: null, currency: null, contractorId: null,
-            from: null, to: null, limit: 0, search: "szyszka", CancellationToken.None);
+            from: null, to: null, limit: 0, search: "testowy", CancellationToken.None);
 
         var (status, value) = Unwrap(r.Result);
         Assert.Equal(200, status);
         var list = Assert.IsAssignableFrom<IReadOnlyList<OpenReceivableDto>>(value);
         Assert.Equal(2, list.Count);
-        Assert.All(list, x => Assert.Equal("Szyszka Krzysztof", x.ContractorName));
+        Assert.All(list, x => Assert.Equal("Testowy Jan", x.ContractorName));
     }
 
     [Fact]
@@ -264,7 +264,7 @@ public class OpenReceivablesTests
     public async Task MinOnly_NoUpperBound()
     {
         var fake = new FakeSferaSession();
-        // Tylko dolna granica - bez max (decimal? = null) zwraca wszystko >= 200 PLN (53447, 53310, 53500=250;
+        // Tylko dolna granica - bez max (decimal? = null) zwraca wszystko >= 200 PLN (53401, 53310, 53500=250;
         // NIE 52001=120).
         var r = await fake.QueryOpenReceivablesAsync(Req(min: 200m), CancellationToken.None);
 
@@ -276,12 +276,12 @@ public class OpenReceivablesTests
     public async Task DateFrom_NarrowsToRecent()
     {
         var fake = new FakeSferaSession();
-        // from=2026-05-01 -> tylko czerwcowe (53447, 53310, 53500); 52001 (kwiecien) i 51900 (marzec) odpadaja.
+        // from=2026-05-01 -> tylko czerwcowe (53401, 53310, 53500); 52001 (kwiecien) i 51900 (marzec) odpadaja.
         // Klient poda okno daty wokol przelewu - swiezy przelew -> swieza FV, dodatkowo tnie skan.
         var r = await fake.QueryOpenReceivablesAsync(Req(from: "2026-05-01"), CancellationToken.None);
 
         Assert.Equal(3, r.Count);
-        Assert.All(r, x => Assert.Contains(x.DocumentSubiektId, new[] { 53447L, 53310L, 53500L }));
+        Assert.All(r, x => Assert.Contains(x.DocumentSubiektId, new[] { 53401L, 53310L, 53500L }));
     }
 
     [Fact]
@@ -329,12 +329,12 @@ public class OpenReceivablesTests
     {
         var controller = NewController(new FakeSferaSession());
         var r = await controller.OpenReceivables(
-            minAmount: 100m, maxAmount: 200m, currency: "PLN", contractorId: 13292, from: null, to: null, limit: 0, search: null, CancellationToken.None);
+            minAmount: 100m, maxAmount: 200m, currency: "PLN", contractorId: 13201, from: null, to: null, limit: 0, search: null, CancellationToken.None);
 
         var (status, value) = Unwrap(r.Result);
         Assert.Equal(200, status);
         var item = Assert.Single(Assert.IsAssignableFrom<IReadOnlyList<OpenReceivableDto>>(value));
-        Assert.Equal(52001, item.DocumentSubiektId); // 120 PLN, kontrahent 13292
+        Assert.Equal(52001, item.DocumentSubiektId); // 120 PLN, kontrahent 13201
     }
 
     [Fact]
@@ -348,8 +348,8 @@ public class OpenReceivablesTests
         var (status, value) = Unwrap(r.Result);
         Assert.Equal(200, status);
         var list = Assert.IsAssignableFrom<IReadOnlyList<OpenReceivableDto>>(value);
-        // Tylko czerwcowe (53447, 53310, 53500); kwiecien/marzec poza oknem daty.
+        // Tylko czerwcowe (53401, 53310, 53500); kwiecien/marzec poza oknem daty.
         Assert.Equal(3, list.Count);
-        Assert.All(list, x => Assert.Contains(x.DocumentSubiektId, new[] { 53447L, 53310L, 53500L }));
+        Assert.All(list, x => Assert.Contains(x.DocumentSubiektId, new[] { 53401L, 53310L, 53500L }));
     }
 }
